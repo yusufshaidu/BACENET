@@ -12,6 +12,8 @@ import itertools, os
 from ase.io import read, write
 
 import argparse
+from multiprocessing import Pool
+from functools import partial
 
 
 class Linear(tf.keras.layers.Layer):
@@ -39,6 +41,8 @@ def Networks(input_size, layer_sizes,
 
     model = tf.keras.Sequential()
     model.add(tf.keras.Input(shape=(input_size,)))
+    i = 0
+    layer = 1
     for layer, activation in zip(layer_sizes[:-1], activations[:-1]):
         model.add(tf.keras.layers.Dense(layer, 
                                         activation=activation,
@@ -50,8 +54,10 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
-                                        name=f'layer_{layer}_activation_{activation}'
+                                        name=f'{i}_layer_{layer}_activation_{activation}'
                                         ))
+        i += 1
+
     if activations[-1] == 'linear':
         model.add(tf.keras.layers.Dense(layer_sizes[-1],
                                         kernel_initializer=weight_initializer,
@@ -62,7 +68,7 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
-                                        name=f'layer_{layer}_activation_{activations[-1]}'
+                                        name=f'{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
     else:
         model.add(tf.keras.layers.Dense(layer_sizes[-1], activation=activations[-1],
@@ -74,8 +80,9 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
-                                        name=f'layer_{layer}_activation_{activations[-1]}'
+                                        name=f'{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
+        
     return model
 
 class mBP_model(tf.keras.Model):
@@ -150,12 +157,13 @@ class mBP_model(tf.keras.Model):
         
         #print("I am here")
         
-    @tf.function
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                                 tf.TensorSpec(shape=(), dtype=tf.float32)])
     def tf_fcut(self,r,rc):
         dim = tf.shape(r)
         pi = tf.constant(math.pi, dtype=tf.float32)
         return tf.where(r<=rc, 0.5*(1.0 + tf.cos(pi*r/rc)), tf.zeros(dim, dtype=tf.float32))
-    @tf.function
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None,None,None), dtype=tf.float32)])
     def tf_app_gaussian(self,x):
         # we approximate gaussians with polynomials (1+alpha x^2 / p)^(-p) ~ exp(-alpha x^2); 
         #p=64 is an even number
@@ -170,9 +178,23 @@ class mBP_model(tf.keras.Model):
         args32 = args16 * args16
 
         return args32 * args32
-    @tf.function
+    @tf.function(
+                input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(3,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32)
+                )])
     def tf_predict_energy_forces(self,x):
-        #(rcuts, batch_feature_size, species_encoder, batch_width, positions, batch_nmax)
 
         rc = tf.cast(x[0],dtype=tf.float32)
         Ngauss = tf.cast(x[1], dtype=tf.int32)
@@ -307,6 +329,7 @@ class mBP_model(tf.keras.Model):
             #idx = tf.where(tf.logical_and(a<6, a>0))
             all_rij_norm = tf.gather_nd(all_rij_norm, inball_ang)
             #produces a list of tensors with different shapes because atoms have different number of neighbors
+
             all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, inball_ang[:,0]).to_tensor(default_value=1e-8)
             
             all_rij = tf.gather_nd(all_rij, inball_ang)
@@ -370,7 +393,9 @@ class mBP_model(tf.keras.Model):
             rij_p_rik = all_rij_norm[:,tf.newaxis,:] + all_rij_norm[:,:,tf.newaxis]
             #rij_p_rik = tf.gather_nd(rij_p_rik_all, cond)
             #rij_p_rik = tf.reshape(tf.RaggedTensor.from_value_rowids(rij_p_rik, cond[:,0]).to_tensor(), [nat,-1])
+            #Nat x Nneigh**2
             rij_p_rik = tf.reshape(rij_p_rik, [nat, -1])
+            #Nat x Ngauss_ang * Nneigh**2
             rij_p_rik_rs = width_ang * (rij_p_rik[:,tf.newaxis,:]/2.0  - Rs_ang[tf.newaxis,:,tf.newaxis])**2
             #compute the exponetial term
             exp_ang_term = self.tf_app_gaussian(rij_p_rik_rs)
@@ -426,13 +451,13 @@ class mBP_model(tf.keras.Model):
             #total_energy = tf.reduce_sum(tf.where(tf.logical_or(tf.math.is_nan(atomic_energies), tf.math.is_inf(atomic_energies)),
             #                                      tf.zeros_like(atomic_energies), atomic_energies))
             total_energy = tf.reduce_sum(atomic_energies)
-            print(total_energy)
+           # print(total_energy)
        # print(positions, positions)   
         forces = g.gradient(total_energy, positions)
         
-        tf.debugging.check_numerics(total_energy, message='Total_energy contains NaN')
-        tf.debugging.check_numerics(positions, message='positions contains NaN')
-        tf.debugging.check_numerics(forces, message='forces contains NaN')
+        #tf.debugging.check_numerics(total_energy, message='Total_energy contains NaN')
+        #tf.debugging.check_numerics(positions, message='positions contains NaN')
+        #tf.debugging.check_numerics(forces, message='forces contains NaN')
         #print(forces)
         #forces = tf.reshape(forces, [nat,3]) 
         #forces = tf.cast(forces, tf.float32)
@@ -475,28 +500,6 @@ class mBP_model(tf.keras.Model):
     #    self._width = value
 
         
-    def single_total_energy(self, x):
-        nat = tf.cast(x[0], dtype=tf.int64)
-        energies = x[1][:nat]
-        return tf.reduce_sum(energies)
-
-    
-    
-    #def compile(self, nn_optimizer, w_optimizer, loss_fn):
-    #    super().compile()
-    #    self.nn_optimizer = nn_optimizer
-    #    self.w_optimizer = w_optimizer
-       # self.loss_fn = loss_fn
-    #def single_prediction(self, x):
-    #    
-    #    elements = (rcuts, batch_RsN_rad, species_encoder, batch_width,
-    #                positions, nmax_diff, batch_nats, 
-    #               batch_zeta, rcuts_ang, batch_RsN_ang, 
-    #                batch_thetaN, batch_width_ang)
-        
-        
-    #    atomic_descriptors = tf.map_fn(self.tf_Descriptors_fn, elements, fn_output_signature=tf.float32)
-    #    atomic_energies = self.atomic_nets(tf.reshape(atomic_descriptors, (-1,self.feature_size)))
             
     def call(self, inputs, training=False):
         '''inpu has a shape of batch_size x nmax_atoms x feature_size'''
@@ -733,7 +736,7 @@ class mBP_model(tf.keras.Model):
 
 # Construct and compile an instance of CustomModel
 
-def convert_json2ASE_atoms(file, species, atomic_energy):
+def convert_json2ASE_atoms(all_species_encoder, atomic_energy, file):
     Ry2eV = 13.6057039763
     from ase import Atoms
     import json
@@ -758,8 +761,8 @@ def convert_json2ASE_atoms(file, species, atomic_energy):
 
     positions = np.asarray(positions).astype(float)
     forces = np.asarray(forces).astype(float)
-    encoder = species_encoder(species)
-    _species_encoder = np.asarray([encoder[ss] for ss in symbols])
+#    encoder = all_species_encoder
+    _spec_encoder = np.asarray([all_species_encoder[ss] for ss in symbols])
     unitL = data['unit_of_length']
 
     if unitL in ['bohr', 'BOHR', 'Bohr']:
@@ -790,26 +793,111 @@ def convert_json2ASE_atoms(file, species, atomic_energy):
         forces *= (Ry2eV * 2)
 
     atoms.new_array('forces', forces)
-    atoms.new_array('encoder',_species_encoder)
+    atoms.new_array('encoder',_spec_encoder)
     atoms.info = {'energy':energy-E0}
 
     return atoms
+def atomic_number(symbol):
 
-def species_encoder(species):
-    atomic_numbers = [element(s).atomic_number for s in species]
-    #for s in species:
-    #    zs = element(s).atomic_number
-    #    atomic_numbers.append(zs)
+    symbols = [ 'H',                               'He',
+                'Li','Be', 'B', 'C', 'N', 'O', 'F','Ne',
+                'Na','Mg','Al','Si', 'P', 'S','Cl','Ar',
+                 'K','Ca','Sc','Ti', 'V','Cr','Mn',
+                          'Fe','Co','Ni','Cu','Zn',
+                          'Ga','Ge','As','Se','Br','Kr',
+                'Rb','Sr', 'Y','Zr','Nb','Mo','Tc',
+                          'Ru','Rh','Pd','Ag','Cd',
+                          'In','Sn','Sb','Te', 'I','Xe',
+                'Cs','Ba','La','Ce','Pr','Nd','Pm','Sm','Eu','Gd',
+                               'Tb','Dy','Ho','Er','Tm','Yb','Lu',
+                               'Hf','Ta', 'W','Re','Os',
+                          'Ir','Pt','Au','Hg',
+                          'Tl','Pb','Bi','Po','At','Rn',
+                'Fr','Ra','Ac','Th','Pa',' U','Np','Pu',
+                'Am','Cm','Bk','Cf','Es','Fm','Md','No',
+                'Lr','Rf','Db','Sg','Bh','Hs','Mt' ]
+
+    return symbols.index(symbol)+1
+
+#def species_encoder(species):
+#    atomic_numbers = [element(s).atomic_number for s in species]
+#    #standerdize the atomic numbers
+#    if len(species) == 1:
+#        return {species[0]:1.0}
+#    meanz = np.mean(atomic_numbers)
+#    stdz = np.std(atomic_numbers)
+
+#    atomic_numbers = np.asarray(atomic_numbers).astype(float)
+#    atomic_numbers = (atomic_numbers-meanz)/stdz
+    #atomic_numbers = np.abs(atomic_numbers)
+#    return {s:atomic_numbers[species.index(s)] for s in species}
+def _species_encoder(species):
+    symbols = [ 'H',                               'He',
+                'Li','Be', 'B', 'C', 'N', 'O', 'F','Ne',
+                'Na','Mg','Al','Si', 'P', 'S','Cl','Ar',
+                 'K','Ca','Sc','Ti', 'V','Cr','Mn',
+                          'Fe','Co','Ni','Cu','Zn',
+                          'Ga','Ge','As','Se','Br','Kr',
+                'Rb','Sr', 'Y','Zr','Nb','Mo','Tc',
+                          'Ru','Rh','Pd','Ag','Cd',
+                          'In','Sn','Sb','Te', 'I','Xe',
+                'Cs','Ba','La','Ce','Pr','Nd','Pm','Sm','Eu','Gd',
+                               'Tb','Dy','Ho','Er','Tm','Yb','Lu',
+                               'Hf','Ta', 'W','Re','Os',
+                          'Ir','Pt','Au','Hg',
+                          'Tl','Pb','Bi','Po','At','Rn',
+                'Fr','Ra','Ac','Th','Pa',' U','Np','Pu',
+                'Am','Cm','Bk','Cf','Es','Fm','Md','No',
+                'Lr','Rf','Db','Sg','Bh','Hs','Mt','Ds','Rg','Cn',
+                'Nh','Fl','Mc','Lv','Ts','Og']
+
+    atomic_numbers = [symbols.index(s) for s in symbols]
+    
     #standerdize the atomic numbers
-    if len(species) == 1:
-        return {species[0]:1.0}
+ 
     meanz = np.mean(atomic_numbers)
     stdz = np.std(atomic_numbers)
 
     atomic_numbers = np.asarray(atomic_numbers).astype(float)
-    atomic_numbers = (atomic_numbers-meanz)/stdz
+    atomic_numbers = (atomic_numbers - meanz) / stdz
+    atomic_numbers_std = {s:atomic_numbers[symbols.index(s)] for s in symbols}
     #atomic_numbers = np.abs(atomic_numbers)
-    return {s:atomic_numbers[species.index(s)] for s in species}
+    #return atomic_numbers_std, {s:atomic_numbers_std[s] for s in species}, len(symbols)
+    return {s:atomic_numbers_std[s] for s in species}
+
+def species_encoder():
+    symbols = [ 'H',                               'He',
+                'Li','Be', 'B', 'C', 'N', 'O', 'F','Ne',
+                'Na','Mg','Al','Si', 'P', 'S','Cl','Ar',
+                 'K','Ca','Sc','Ti', 'V','Cr','Mn',
+                          'Fe','Co','Ni','Cu','Zn',
+                          'Ga','Ge','As','Se','Br','Kr',
+                'Rb','Sr', 'Y','Zr','Nb','Mo','Tc',
+                          'Ru','Rh','Pd','Ag','Cd',
+                          'In','Sn','Sb','Te', 'I','Xe',
+                'Cs','Ba','La','Ce','Pr','Nd','Pm','Sm','Eu','Gd',
+                               'Tb','Dy','Ho','Er','Tm','Yb','Lu',
+                               'Hf','Ta', 'W','Re','Os',
+                          'Ir','Pt','Au','Hg',
+                          'Tl','Pb','Bi','Po','At','Rn',
+                'Fr','Ra','Ac','Th','Pa',' U','Np','Pu',
+                'Am','Cm','Bk','Cf','Es','Fm','Md','No',
+                'Lr','Rf','Db','Sg','Bh','Hs','Mt','Ds','Rg','Cn',
+                'Nh','Fl','Mc','Lv','Ts','Og']
+
+    atomic_numbers = [symbols.index(s) for s in symbols]
+    
+    #standerdize the atomic numbers
+ 
+    meanz = np.mean(atomic_numbers)
+    stdz = np.std(atomic_numbers)
+
+    atomic_numbers = np.asarray(atomic_numbers).astype(float)
+    atomic_numbers = (atomic_numbers - meanz) / stdz
+    atomic_numbers_std = {s:atomic_numbers[symbols.index(s)] for s in symbols}
+    #atomic_numbers = np.abs(atomic_numbers)
+    return atomic_numbers_std
+    #return {s:atomic_numbers_std[s] for s in species}
 
 ###########################################################################
 # Copyright (c), The PANNAdevs group. All rights reserved.                #
@@ -969,12 +1057,21 @@ def data_preparation(data_dir, species, data_format,
     all_natoms = []
     cells = []
     replica_idx = []
-  #  atoms = convert_json2ASE_atoms(files[0],species)
-  #  e0 = atoms.info['energy'] / len(atoms.positions)
-  #  print(e0)
+    #  atoms = convert_json2ASE_atoms(files[0],species)
+    #  e0 = atoms.info['energy'] / len(atoms.positions)
+    #  print(e0)
+    #implement multiprocessing
+    #species encoder for all atomic species.
+    _spec_encoder = species_encoder()
+    #partial_convert = convert_json2ASE_atoms(all_species_encoder,atomic_energy)
+    #number of precesses
+    #p = Pool(num_process)
+    #Ndata = len(files)
+
+    
     for file in files:
         if data_format == 'panna_json':
-            atoms = convert_json2ASE_atoms(file,species,atomic_energy)
+            atoms = convert_json2ASE_atoms(_spec_encoder,atomic_energy,file)
         elif data_format == 'xyz':
             atoms = file
             symbols = list(atoms.symbols)
@@ -984,6 +1081,8 @@ def data_preparation(data_dir, species, data_format,
             atoms.new_array('encoder', _species_encoder)
 
             
+    #    if atoms.info['energy'] > 30.0:
+    #        continue
         #all_configs_ase.append(atoms)
         all_energies.append(atoms.info['energy'])
         all_positions.append(atoms.positions)
@@ -1148,6 +1247,7 @@ if __name__ == '__main__':
         configs = yaml.safe_load(f)
 
     print(configs)
+
 #    configs = {}
 #    num_epochs = configs['num_epochs']
 #    batch_size = configs['batch_size']
@@ -1180,5 +1280,4 @@ if __name__ == '__main__':
     
 
 
-#print(model.summary())
 
