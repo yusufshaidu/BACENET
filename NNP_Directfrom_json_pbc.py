@@ -1200,19 +1200,7 @@ def create_model(config_file):
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
-    #load the last check points if available
-    initial_epoch = 0
-    try:
-        latest = tf.train.latest_checkpoint(model_outdir+"/models")
-        model.load_weights(latest)
-        model.compile()
-        #get the last saved checkpoint
-        file_content = open(model_outdir+"/models/"+'checkpoint').readlines()
-        last_epoch = file_content[0].split()[-1].split('-')[1].split('.')[0]
-        initial_epoch = int(last_epoch) + 1
-    except:
-        #implement other losses
-        model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
+    
 
     # Create a callback that saves the model's weights every 5 epochs
     if not os.path.exists(model_outdir):
@@ -1227,7 +1215,9 @@ def create_model(config_file):
                                                      verbose=1,
                                                     save_freq=save_freq,
                                                     options=None),
-                   tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1)]
+                   tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1),
+                   tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup"),
+                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
 
 
     model.save_weights(checkpoint_path.format(epoch=0))
@@ -1238,13 +1228,26 @@ def create_model(config_file):
                      rc_rad, rc_ang, pbc, batch_size,
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy)
+    
+    #load the last saved epoch
+
+    model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
+    try:
+        model.fit(train_data,
+              epochs=num_epochs,
+              batch_size=batch_size,
+             validation_data=test_data,
+             validation_freq=20,
+             initial_epoch=initial_epoch,
+             callbacks=[cp_callback])
+    except:
+      pass
 
     model.fit(train_data,
               epochs=num_epochs,
               batch_size=batch_size,
              validation_data=test_data,
              validation_freq=20,
-             initial_epoch=initial_epoch,
              callbacks=[cp_callback])
 
 if __name__ == '__main__':
