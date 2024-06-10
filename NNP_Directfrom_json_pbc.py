@@ -1208,7 +1208,7 @@ def create_model(config_file):
         model.compile()
         #get the last saved checkpoint
         file_content = open(model_outdir+"/models/"+'checkpoint').readlines()
-        last_epoch = file_content[0].split()[-1].split('-')[1]
+        last_epoch = file_content[0].split()[-1].split('-')[1].split('.')[0]
         initial_epoch = int(last_epoch) + 1
     except:
         #implement other losses
