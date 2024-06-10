@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from IPython.display import clear_output
+#import tensorflow
 import tensorflow.compat.v2.feature_column as fc
 import tensorflow as tf
 import mendeleev
@@ -1199,8 +1200,19 @@ def create_model(config_file):
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
-    #implement other losses
-    model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
+    #load the last check points if available
+    initial_epoch = 0
+    try:
+        latest = tf.train.latest_checkpoint(model_outdir+"/models")
+        model.load_weights(latest)
+        model.compile()
+        #get the last saved checkpoint
+        file_content = open(model_outdir+"/models/"+'checkpoint').readlines()
+        last_epoch = file_content[0].split()[-1].split('-')[1]
+        initial_epoch = int(last_epoch) + 1
+    except:
+        #implement other losses
+        model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
 
     # Create a callback that saves the model's weights every 5 epochs
     if not os.path.exists(model_outdir):
@@ -1232,6 +1244,7 @@ def create_model(config_file):
               batch_size=batch_size,
              validation_data=test_data,
              validation_freq=20,
+             initial_epoch=initial_epoch,
              callbacks=[cp_callback])
 
 if __name__ == '__main__':
