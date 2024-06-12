@@ -88,7 +88,7 @@ def Networks(input_size, layer_sizes,
 
 class mBP_model(tf.keras.Model):
    
-    def __init__(self, layer_sizes, rcut, species, 
+    def __init__(self, layer_sizes, rcut, species_identity, 
                  width, batch_size,
                 params_trainable,
                 activations,
@@ -104,7 +104,7 @@ class mBP_model(tf.keras.Model):
         #self.loss_tracker = self.metrics.Mean(name='loss')
         self.layer_sizes = layer_sizes
         self.rcut = rcut
-        self.species = species
+        self.species_identity = species_identity # atomic number
         self._width = width
         self.batch_size = batch_size
         self._params_trainable = params_trainable
@@ -113,12 +113,14 @@ class mBP_model(tf.keras.Model):
         self.RsN_rad = RsN_rad
         self.RsN_ang = RsN_ang
         self.thetaN = thetaN
-        self.zeta = zeta
-        self.width_ang = width_ang
+        self.zeta = float(zeta)
+        self.width_ang = float(width_ang)
         self.order = order
         self.feature_size = self.RsN_rad + self.RsN_ang * self.thetaN
         self.pbc = pbc
-        self.fcost = fcost
+        self.fcost = float(fcost)
+        self.nspecies = len(self.species_identity)
+
               
         
         # Layer is currectly noyt compactible with modelcheckpoints call back
@@ -126,6 +128,13 @@ class mBP_model(tf.keras.Model):
         
         #self.width_value = self._width
         self.atomic_nets = Networks(self.feature_size, self.layer_sizes, self._activations)
+
+        # the number of elements in the periodic table
+        nelement  = 118
+        self.nelement = nelement
+        # create a species embedding network Nembedding x Nspecies
+        self.species_nets = Networks(nelement, [16,1], ['sigmoid','linear'])
+
         if self._params_trainable:
             #constraint = tf.keras.constraints.MinMaxNorm(min_value=1e-2, 
             #                                             max_value=1.0, 
@@ -273,6 +282,9 @@ class mBP_model(tf.keras.Model):
                 nreplicas = tf.shape(replicas)
                 n_replicas = nreplicas[0]
                 positions_extended = tf.reshape(positions_extended, [nat*n_replicas, 3])
+                
+                species_encoder0 = tf.identity(species_encoder)
+
                 species_encoder = tf.reshape(tf.tile([species_encoder], [1, n_replicas]), [nat*n_replicas])
             else:
                 positions_extended = tf.identity(positions)
@@ -442,7 +454,10 @@ class mBP_model(tf.keras.Model):
             atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang], axis=1)
             
             #feature_size = Ngauss + Ngauss_ang * thetasN
+            #the descriptors can be scaled
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
+            #mutiply by independent weights
+            atomic_descriptors = species_encoder0[:,tf.newaxis] * atomic_descriptors
             #predict energy and forces
 
             atomic_energies = self.atomic_nets(atomic_descriptors)
@@ -523,9 +538,9 @@ class mBP_model(tf.keras.Model):
             self.zeta_value = tf.reshape(self.zeta_nets(tf.constant([self.zeta])), [-1])
             self.zeta_value += self.zeta
         else:
-            self.width_value = tf.constant([self._width])
-            self.width_value_ang = tf.constant([self.width_ang])
-            self.zeta_value = tf.constant([self.zeta])
+            self.width_value = tf.constant([self._width], dtype=tf.float32)
+            self.width_value_ang = tf.constant([self.width_ang], dtype=tf.float32)
+            self.zeta_value = tf.constant([self.zeta], dtype=tf.float32)
         
         batch_width = tf.tile(self.width_value, [self.batch_size])
         batch_width_ang = tf.tile(self.width_value_ang, [self.batch_size])
@@ -544,12 +559,24 @@ class mBP_model(tf.keras.Model):
         
         #positions and species_encoder are ragged tensors are converted to tensors before using them
         positions = tf.reshape(inputs[0].to_tensor(shape=(-1,nmax,3)), (-1, 3*nmax))
+        #obtain species encoder
+        spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
 
+        species_one_hot_encoder = tf.one_hot(spec_identity, depth=self.nelement)
+            
+        trainable_species_encoder = self.species_nets(species_one_hot_encoder)
         species_encoder = inputs[1].to_tensor(shape=(-1, nmax))
+        batch_species_encoder = tf.zeros([self.batch_size, nmax], dtype=tf.float32)
+
+        for idx, spec in enumerate(self.species_identity):
+            values = tf.ones([self.batch_size, nmax], dtype=tf.float32) * trainable_species_encoder[idx]
+            batch_species_encoder += tf.where(tf.equal(species_encoder,tf.cast(spec,tf.float32)), 
+                    values, tf.zeros([self.batch_size, nmax]))
+
         cells = inputs[3]
         replica_idx = inputs[4]
         
-        elements = (rcuts, batch_RsN_rad, species_encoder, batch_width,
+        elements = (rcuts, batch_RsN_rad, batch_species_encoder, batch_width,
                 positions, nmax_diff, batch_nats, 
                 batch_zeta, rcuts_ang, batch_RsN_ang, 
                 batch_thetaN, batch_width_ang, cells, replica_idx)
@@ -737,7 +764,7 @@ class mBP_model(tf.keras.Model):
 
 # Construct and compile an instance of CustomModel
 
-def convert_json2ASE_atoms(all_species_encoder, atomic_energy, file):
+def convert_json2ASE_atoms(atomic_energy, file):
     Ry2eV = 13.6057039763
     from ase import Atoms
     import json
@@ -763,7 +790,8 @@ def convert_json2ASE_atoms(all_species_encoder, atomic_energy, file):
     positions = np.asarray(positions).astype(float)
     forces = np.asarray(forces).astype(float)
 #    encoder = all_species_encoder
-    _spec_encoder = np.asarray([all_species_encoder[ss] for ss in symbols])
+    _spec_encoder = np.asarray([species_encoder(ss) for ss in symbols])
+
     unitL = data['unit_of_length']
 
     if unitL in ['bohr', 'BOHR', 'Bohr']:
@@ -832,7 +860,7 @@ def atomic_number(symbol):
 #    atomic_numbers = (atomic_numbers-meanz)/stdz
     #atomic_numbers = np.abs(atomic_numbers)
 #    return {s:atomic_numbers[species.index(s)] for s in species}
-def _species_encoder(species):
+'''def _species_encoder(species):
     symbols = [ 'H',                               'He',
                 'Li','Be', 'B', 'C', 'N', 'O', 'F','Ne',
                 'Na','Mg','Al','Si', 'P', 'S','Cl','Ar',
@@ -865,8 +893,8 @@ def _species_encoder(species):
     #atomic_numbers = np.abs(atomic_numbers)
     #return atomic_numbers_std, {s:atomic_numbers_std[s] for s in species}, len(symbols)
     return {s:atomic_numbers_std[s] for s in species}
-
-def species_encoder():
+'''
+def species_encoder(species):
     symbols = [ 'H',                               'He',
                 'Li','Be', 'B', 'C', 'N', 'O', 'F','Ne',
                 'Na','Mg','Al','Si', 'P', 'S','Cl','Ar',
@@ -886,18 +914,18 @@ def species_encoder():
                 'Lr','Rf','Db','Sg','Bh','Hs','Mt','Ds','Rg','Cn',
                 'Nh','Fl','Mc','Lv','Ts','Og']
 
-    atomic_numbers = [symbols.index(s) for s in symbols]
+    #atomic_numbers = [symbols.index(s) for s in symbols]
     
     #standerdize the atomic numbers
  
-    meanz = np.mean(atomic_numbers)
-    stdz = np.std(atomic_numbers)
+    #meanz = np.mean(atomic_numbers)
+    #stdz = np.std(atomic_numbers)
 
-    atomic_numbers = np.asarray(atomic_numbers).astype(float)
-    atomic_numbers = (atomic_numbers - meanz) / stdz
-    atomic_numbers_std = {s:atomic_numbers[symbols.index(s)] for s in symbols}
+    #atomic_numbers = np.asarray(atomic_numbers).astype(float)
+    #atomic_numbers = (atomic_numbers - meanz) / stdz
+    #atomic_numbers_std = {s:atomic_numbers[symbols.index(s)] for s in symbols}
     #atomic_numbers = np.abs(atomic_numbers)
-    return atomic_numbers_std
+    return symbols.index(species)
     #return {s:atomic_numbers_std[s] for s in species}
 
 ###########################################################################
@@ -1063,7 +1091,10 @@ def data_preparation(data_dir, species, data_format,
     #  print(e0)
     #implement multiprocessing
     #species encoder for all atomic species.
-    _spec_encoder = species_encoder()
+    #_spec_encoder = species_encoder()
+    
+    species_identity = [species_encoder(s) for s in species]
+
     #partial_convert = convert_json2ASE_atoms(all_species_encoder,atomic_energy)
     #number of precesses
     #p = Pool(num_process)
@@ -1072,14 +1103,14 @@ def data_preparation(data_dir, species, data_format,
     
     for file in files:
         if data_format == 'panna_json':
-            atoms = convert_json2ASE_atoms(_spec_encoder,atomic_energy,file)
+            atoms = convert_json2ASE_atoms(atomic_energy,file)
         elif data_format == 'xyz':
             atoms = file
             symbols = list(atoms.symbols)
-            encoder = species_encoder(species)
+            #encoder = species_encoder(species)
 
-            _species_encoder = np.asarray([encoder[ss] for ss in symbols])
-            atoms.new_array('encoder', _species_encoder)
+            _encoder = np.asarray([_spec_encoder[ss] for ss in symbols])
+            atoms.new_array('encoder', _encoder)
 
             
     #    if atoms.info['energy'] > 30.0:
@@ -1112,8 +1143,8 @@ def data_preparation(data_dir, species, data_format,
     all_forces_train = tf.ragged.constant(all_forces[Ntest:])
 
     #print(Ntest, len(all_positions_train), len(all_positions_test))
-    all_species_encoder_test = tf.ragged.constant(all_species_encoder[:Ntest])
-    all_species_encoder_train = tf.ragged.constant(all_species_encoder[Ntest:])
+    all_species_encoder_test = tf.ragged.constant(all_species_encoder[:Ntest], dtype=tf.float32)
+    all_species_encoder_train = tf.ragged.constant(all_species_encoder[Ntest:], dtype=tf.float32)
 
     all_natoms_test = tf.constant(all_natoms[:Ntest])
     all_natoms_train = tf.constant(all_natoms[Ntest:])
@@ -1134,7 +1165,7 @@ def data_preparation(data_dir, species, data_format,
                                 shuffle=True, batch_size=batch_size)
 
 
-    return [train_data, test_data]
+    return [train_data, test_data, species_identity]
 
 
 def create_model(config_file):
@@ -1181,9 +1212,15 @@ def create_model(config_file):
         atomic_energy = configs['atomic_energy']
     except:
         atomic_energy = []
+    
+    train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
+                     energy_key, force_key,
+                     rc_rad, rc_ang, pbc, batch_size,
+                     test_fraction=test_fraction,
+                     atomic_energy=atomic_energy)
 
     model = mBP_model(layer_sizes,
-                      rc_rad, species, width, batch_size,
+                      rc_rad, species_identity, width, batch_size,
                        params_trainable, activations,
                       rc_ang,RsN_rad,RsN_ang,
                       thetaN,width_ang,zeta,
@@ -1223,22 +1260,16 @@ def create_model(config_file):
     model.save_weights(checkpoint_path.format(epoch=0))
     #train the model
     
-    train_data, test_data = data_preparation(data_dir, species, data_format,
-                     energy_key, force_key,
-                     rc_rad, rc_ang, pbc, batch_size,
-                     test_fraction=test_fraction,
-                     atomic_energy=atomic_energy)
-    
+        
     #load the last saved epoch
 
     model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
     try:
         model.fit(train_data,
-              epochs=num_epochs,
-              batch_size=batch_size,
+             epochs=num_epochs,
+             batch_size=batch_size,
              validation_data=test_data,
-             validation_freq=20,
-             initial_epoch=initial_epoch,
+             validation_freq=10,
              callbacks=[cp_callback])
     except:
       pass
@@ -1247,7 +1278,7 @@ def create_model(config_file):
               epochs=num_epochs,
               batch_size=batch_size,
              validation_data=test_data,
-             validation_freq=20,
+             validation_freq=10,
              callbacks=[cp_callback])
 
 if __name__ == '__main__':
