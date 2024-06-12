@@ -38,7 +38,8 @@ def Networks(input_size, layer_sizes,
             weight_initializer='glorot_uniform',
             bias_initializer='zeros',
             kernel_constraint=None,
-            bias_constraint=None):
+            bias_constraint=None,
+            prefix='main'):
 
     model = tf.keras.Sequential()
     model.add(tf.keras.Input(shape=(input_size,)))
@@ -55,7 +56,7 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
-                                        name=f'{i}_layer_{layer}_activation_{activation}'
+                                        name=f'{prefix}_{i}_layer_{layer}_activation_{activation}'
                                         ))
         i += 1
 
@@ -69,7 +70,7 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
-                                        name=f'{i}_layer_{layer}_activation_{activations[-1]}'
+                                        name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
     else:
         model.add(tf.keras.layers.Dense(layer_sizes[-1], activation=activations[-1],
@@ -81,7 +82,7 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
-                                        name=f'{i}_layer_{layer}_activation_{activations[-1]}'
+                                        name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
         
     return model
@@ -133,7 +134,7 @@ class mBP_model(tf.keras.Model):
         nelement  = 118
         self.nelement = nelement
         # create a species embedding network Nembedding x Nspecies
-        self.species_nets = Networks(nelement, [16,1], ['sigmoid','linear'])
+        self.species_nets = Networks(nelement, [16,1], ['sigmoid','linear'], prefix='species_encoder')
 
         if self._params_trainable:
             #constraint = tf.keras.constraints.MinMaxNorm(min_value=1e-2, 
@@ -146,12 +147,12 @@ class mBP_model(tf.keras.Model):
                                       weight_initializer='random_normal',
                                       bias_initializer='random_normal',
                                       kernel_constraint=constraint,
-                                      bias_constraint=constraint)
+                                      bias_constraint=constraint, prefix='radial_width')
             self.width_nets_ang = Networks(1, [1], ['linear'],
                                       weight_initializer='random_normal',
                                       bias_initializer='random_normal',
                                       kernel_constraint=constraint,
-                                      bias_constraint=constraint)
+                                      bias_constraint=constraint,prefix='ang_width')
             
             #constraint = tf.keras.constraints.MinMaxNorm(min_value=0.2, 
             #                                             max_value=1.0, 
@@ -160,7 +161,7 @@ class mBP_model(tf.keras.Model):
                                       weight_initializer='random_normal',
                                       bias_initializer='random_normal',
                                       kernel_constraint=constraint,
-                                      bias_constraint=constraint)
+                                      bias_constraint=constraint, prefix='zeta')
        # self.atomic_nets = LayerNets(self.layer_sizes, self.feature_size)
         
         #self.inputs = tf.keras.Input(shape=(self.feature_size,))
