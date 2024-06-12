@@ -4,7 +4,9 @@
 
 ## Getting started
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Implementing the modified Behler Parrinello symmentry functions with learnable species embedding, gaussian spreads and the three body resolution in the descriptors.
+The species embedding starts with a one-hot encoding of species and pass it through a single layer multilayer perceptron of size 16 and returns a single number per species.
+The weights are learn from data.
 
 Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
 
