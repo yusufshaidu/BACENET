@@ -603,14 +603,25 @@ class mBP_model(tf.keras.Model):
         # the last dimension is the feature size
         #inputs = tf.reshape(inputs, [-1, in_shape[-1]])
         
+        batch_nats = tf.cast(inputs[2], tf.float32)
+        nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
         
         with tf.GradientTape() as tape:
             e_pred, forces, width, width_ang, zeta = self(inputs, training=True)  # Forward pass
             # Compute the loss value
             # (the loss function is configured in `compile()`)
+            ediff = (e_pred - target)
             forces = tf.reshape(forces, [-1])
-            loss = self.compute_loss(y=target, y_pred=e_pred)
-            loss += self.fcost * self.compute_loss(y=target_f, y_pred=forces)
+
+            emse_loss = tf.reduce_mean((ediff/batch_nats)**2)
+
+            dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax])
+            fmse_loss = tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats))
+
+            #loss = self.compute_loss(y=target, y_pred=e_pred)
+            #loss += self.fcost * self.compute_loss(y=target_f, y_pred=forces)
+            loss = emse_loss
+            loss += self.fcost * fmse_loss
         # Compute gradients
         trainable_vars = self.trainable_variables
         #trainable_vars.append(self.width)
@@ -622,15 +633,17 @@ class mBP_model(tf.keras.Model):
         
         
         # Update metrics (includes the metric that tracks the loss)
-        batch_nats = tf.cast(inputs[2], tf.float32)
-        ediff = (e_pred - target)
+#        ediff = (e_pred - target)
         
         metrics = {'tot_st': self._train_counter}
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
-        
-        mae_f = tf.reduce_mean(tf.abs(target_f - forces))
-        rmse_f = tf.sqrt(tf.reduce_mean((target_f - forces)**2))
+
+ #       dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax])
+        #dforces = dforces  / (3*batch_nats[:, tf.newaxis])
+
+        mae_f = tf.reduce_mean(tf.reduce_sum(tf.abs(dforces), axis=-1) / (3*batch_nats))
+        rmse_f = tf.sqrt(tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats)))
         
         
         metrics.update({'MAE': mae})
@@ -650,6 +663,8 @@ class mBP_model(tf.keras.Model):
         #        metrics.update({'F_RMSE': Frmse})
         
         metrics.update({'loss': loss})
+        metrics.update({'energy loss': emse_loss})
+        metrics.update({'force loss': fmse_loss})
         
         #with writer.set_as_default():
            
