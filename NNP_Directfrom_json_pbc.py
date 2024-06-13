@@ -241,6 +241,7 @@ class mBP_model(tf.keras.Model):
         Rs = r0 + tf.range(Ngauss, dtype=tf.float32) * (rc-r0)/tf.cast(Ngauss, dtype=tf.float32)
         eps = tf.constant(1e-3, dtype=tf.float32)
         norm_ang = 1.0 + tf.sqrt(1.0 + eps)
+        norm_ang = 2.0
         tf_pi = tf.constant(math.pi, dtype=tf.float32)
 
         Rs_ang = r0 + tf.range(Ngauss_ang, dtype=tf.float32) * (rc_ang-r0)/tf.cast(Ngauss_ang, dtype=tf.float32)
@@ -710,18 +711,23 @@ class mBP_model(tf.keras.Model):
         # Update metrics (includes the metric that tracks the loss)
         
         batch_nats = tf.cast(inputs[2], tf.float32)
+        nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
+        
         ediff = (e_pred - target)
         
-    
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
         
-        mae_f = tf.reduce_mean(tf.abs(target_f - forces))
-        rmse_f = tf.sqrt(tf.reduce_mean((target_f - forces)**2))
+        #mae_f = tf.reduce_mean(tf.abs(target_f - forces))
+        #rmse_f = tf.sqrt(tf.reduce_mean((target_f - forces)**2))
+        dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax]) 
+        mae_f = tf.reduce_mean(tf.reduce_sum(tf.abs(dforces), axis=-1) / (3*batch_nats))
+        rmse_f = tf.sqrt(tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats)))
         
+
         metrics = {}
         #mae = tf.reduce_mean(tf.abs(ediff))
-        loss = tf.reduce_mean(ediff**2) + tf.reduce_mean((target_f - forces)**2)
+        loss = rmse * rmse + rmse_f * rmse_f
         #rmse = tf.sqrt(loss)
         
         metrics.update({'MAE': mae})
@@ -756,15 +762,17 @@ class mBP_model(tf.keras.Model):
         _forces = tf.reshape(_forces, [-1])
         
         batch_nats = tf.cast(inputs[2], tf.float32)
+        nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
         ediff = (e_pred - target)
         
     
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
         
-        mae_f = tf.reduce_mean(tf.abs(target_f - _forces))
-        rmse_f = tf.sqrt(tf.reduce_mean((target_f - _forces)**2))
-        
+        dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax]) 
+        mae_f = tf.reduce_mean(tf.reduce_sum(tf.abs(dforces), axis=-1) / (3*batch_nats))
+        rmse_f = tf.sqrt(tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats)))
+
         metrics = {}
         #mae = tf.reduce_mean(tf.abs(ediff))
         #loss = tf.reduce_mean(ediff**2)
