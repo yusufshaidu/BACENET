@@ -1,0 +1,2 @@
+-implement ase interface
+-implement some repulsive energy term like exp(-alphaij(rij-rij0))
