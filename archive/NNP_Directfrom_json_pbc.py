@@ -15,6 +15,7 @@ from ase.io import read, write
 import argparse
 from multiprocessing import Pool
 from functools import partial
+import random
 
 
 class Linear(tf.keras.layers.Layer):
@@ -91,11 +92,11 @@ class mBP_model(tf.keras.Model):
    
     def __init__(self, layer_sizes, rcut, species_identity, 
                  width, batch_size,
-                params_trainable,
                 activations,
                 rc_ang,RsN_rad, RsN_ang,
                 thetaN,width_ang,zeta,
-                order=2,
+                params_trainable=True,
+                order=3,
                 fcost=0.0,
                 pbc=True):
         
@@ -240,7 +241,7 @@ class mBP_model(tf.keras.Model):
         #Vectors = tf.zeros((nat, Ngauss), dtype=tf.float32)
         Rs = r0 + tf.range(Ngauss, dtype=tf.float32) * (rc-r0)/tf.cast(Ngauss, dtype=tf.float32)
         eps = tf.constant(1e-3, dtype=tf.float32)
-        norm_ang = 1.0 + tf.sqrt(1.0 + eps)
+#        norm_ang = 1.0 + tf.sqrt(1.0 + eps)
         norm_ang = 2.0
         tf_pi = tf.constant(math.pi, dtype=tf.float32)
 
@@ -783,7 +784,7 @@ class mBP_model(tf.keras.Model):
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
         
-        return [target, e_pred, metrics, target_f, forces, batch_nats]
+        return [target, e_pred, metrics, tf.reshape(target_f, [self.batch_size, nmax, 3]),tf.reshape(forces, [self.batch_size, nmax, 3]), batch_nats]
 
 
 # Construct and compile an instance of CustomModel
@@ -1103,6 +1104,12 @@ def data_preparation(data_dir, species, data_format,
         files = read(data_dir, index=':')
         #collect configurations
     #all_configs_ase = []
+
+    #shuffle dataset before splitting
+    # this method shuffle files in-place
+
+    random.Random(42).shuffle(files)
+
     all_positions = []
     all_species_encoder = []
     all_energies = []
@@ -1245,9 +1252,11 @@ def create_model(config_file):
 
     model = mBP_model(layer_sizes,
                       rc_rad, species_identity, width, batch_size,
-                       params_trainable, activations,
+                      activations,
                       rc_ang,RsN_rad,RsN_ang,
                       thetaN,width_ang,zeta,
+                      params_trainable,
+                      order=3,
                       fcost=fcost,
                       pbc=pbc)
 
