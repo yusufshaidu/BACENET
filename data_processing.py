@@ -14,7 +14,11 @@ import random
 from ase import Atoms
 import json
 
-from pbc import replicas_max_idx
+#from ml_potentials.pbc import replicas_max_idx
+try:
+    from pbc import replicas_max_idx
+except:
+    from .pbc import replicas_max_idx
 
 
 def convert_json2ASE_atoms(atomic_energy, file):
@@ -128,6 +132,8 @@ def data_preparation(data_dir, species, data_format,
     elif data_format == 'xyz':
         # note, this is already atom object
         files = read(data_dir, index=':')
+    elif data_format == 'ase':
+        files = data_dir
         #collect configurations
     #all_configs_ase = []
 
@@ -161,23 +167,27 @@ def data_preparation(data_dir, species, data_format,
     for file in files:
         if data_format == 'panna_json':
             atoms = convert_json2ASE_atoms(atomic_energy,file)
-        elif data_format == 'xyz':
-            atoms = file
+        elif data_format == 'ase' or data_format == 'xyz' :
+            atoms = file.copy()
             symbols = list(atoms.symbols)
-            _encoder = np.asarray([atomic_number[ss] for ss in symbols])
+            _encoder = np.asarray([atomic_number(ss) for ss in symbols])
             atoms.new_array('encoder', _encoder)
 
             
     #    if atoms.info['energy'] > 30.0:
     #        continue
         #all_configs_ase.append(atoms)
-        all_energies.append(atoms.info['energy'])
+        try:
+            all_energies.append(atoms.info['energy'])
+        except:
+            all_energies.append(0.0)
+
         all_positions.append(atoms.positions)
         all_species_encoder.append(atoms.get_array('encoder'))
         try:
             all_forces.append(atoms.get_array('forces'))
         except:
-            all_forces.append(atoms.get_forces())
+            all_forces.append(np.zeros((len(symbols),3)))
 
         all_natoms.append(atoms.get_global_number_of_atoms())
         cells.append(atoms.cell)

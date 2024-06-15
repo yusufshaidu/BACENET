@@ -76,7 +76,7 @@ def create_model(config_file):
 
     
     model.load_weights(ckpts[-1])
-    model.compile()
+#    model.compile()
 #    print(model.get_weights())
     e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
     mae = np.mean(metrics['MAE'])
@@ -85,15 +85,23 @@ def create_model(config_file):
     mae = np.mean(metrics['MAE_F'])
     rmse = np.mean(metrics['RMSE_F'])
     print(f'Forces: the test rmse = {rmse} and mae = {mae}')
+    _f_ref = []
+    _f_pred = []
+    for i, j in enumerate(nat):
+        j = tf.cast(j, tf.int32)
+        _f_ref = np.append(_f_ref, force_ref[i][:j])
+        _f_pred = np.append(_f_pred, force_pred[i][:j])
 
-    force_ref = tf.reshape(force_ref, [-1,3])
-    force_pred = tf.reshape(force_pred, [-1,3])
+    #force_ref = [tf.reshape(force_ref[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
+    force_ref = tf.reshape(_f_ref, [-1,3])
+    #force_pred = [tf.reshape(_f_pred[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
+    force_pred = tf.reshape(_f_pred, [-1,3])
 
     np.savetxt(os.path.join(outdir, 'energy_last_test.dat'), np.stack([e_ref, e_pred, nat]).T)
     np.savetxt(os.path.join(outdir, 'forces_last_test.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
 
     #model.predict(train_data)
-    e_ref, e_pred, metrics, force_ref, force_pred, nat = model.predict(train_data)
+    '''e_ref, e_pred, metrics, force_ref, force_pred, nat = model.predict(train_data)
     mae = np.mean(metrics['MAE'])
     rmse = np.mean(metrics['RMSE'])
     print(f'Energy: the training rmse = {rmse} and mae = {mae}')
@@ -106,6 +114,7 @@ def create_model(config_file):
     np.savetxt(os.path.join(outdir, 'energy_last_train.dat'), np.stack([e_ref, e_pred, nat]).T)
     np.savetxt(os.path.join(outdir, 'forces_last_train.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
     #model.predict(test_data)
+    '''
     
 if __name__ == '__main__':
 

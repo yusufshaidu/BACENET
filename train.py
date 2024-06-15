@@ -109,15 +109,15 @@ def create_model(config_file):
     #load the last saved epoch
 
     model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
-    try:
-        model.fit(train_data,
-             epochs=num_epochs,
-             batch_size=batch_size,
-             validation_data=test_data,
-             validation_freq=10,
-             callbacks=[cp_callback])
-    except:
-      pass
+ #   try:
+ #       model.fit(train_data,
+ #            epochs=num_epochs,
+ #            batch_size=batch_size,
+ #            validation_data=test_data,
+ #            validation_freq=10,
+ #            callbacks=[cp_callback])
+ #   except:
+#      pass
 
     model.fit(train_data,
               epochs=num_epochs,

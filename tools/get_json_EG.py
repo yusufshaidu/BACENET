@@ -25,6 +25,8 @@
 
 import os, sys, json
 import numpy as np
+from ase import Atoms
+from ase.io import write
 
 infile = sys.argv[1]
 outdir = sys.argv[2]
@@ -51,11 +53,16 @@ print(Nstr)
 all_forces = [[],[],[]]
 all_energy = []
 for key in data.keys():
+    if int(key) > 0:
+        break
     info = {}
     d = data[key]
     total_charge = d['charge']
     symbols = d['elements']
     positions = d['positions']
+    atoms = Atoms(positions=positions, cell=[20,20,20], symbols=symbols)
+
+    write('test.xyz', atoms)
 
     name = d['datasetTitle']
     cohesive_E = d['labels']['wB97X-D3BJ__def2-TZVPD']['atomizationEnergy']
@@ -65,7 +72,7 @@ for key in data.keys():
     charges = d['labels']['wB97X-D3BJ__def2-TZVPD']['xtbCharges']
     
     forces = d['labels']['wB97X-D3BJ__def2-TZVPD']['gradient']
-
+    
     all_energy.append(cohesive_E)
     for i in range(3):
         all_forces[i] = np.append(all_forces[i], np.asarray(forces)[:,i])
