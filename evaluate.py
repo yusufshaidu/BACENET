@@ -19,6 +19,11 @@ def create_model(config_file):
     RsN_ang = configs['RsN_ang']
     rc_rad = configs['rc_rad']
     rc_ang = configs['rc_ang']
+    nelement = configs['nelement']
+    try:
+        epoch = configs['epoch']
+    except:
+        epoch = -1
     #estimate initial parameters
     width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
     width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
@@ -63,19 +68,28 @@ def create_model(config_file):
                       thetaN,width_ang,zeta,
                       fcost=fcost,
                       params_trainable=True,
-                      pbc=pbc)
+                      pbc=pbc,
+                      nelement=nelement)
     
     #load the last check points
     
-    ckpts = tf.train.latest_checkpoint(model_outdir+"/models")
+#    ckpts = tf.train.latest_checkpoint(model_outdir+"/models")
 #    ckpts = tf.train.load_checkpoint(model_outdir+"/models")
     ckpts = [os.path.join(model_outdir+"/models", x.split('.index')[0]) for x in os.listdir(model_outdir+"/models") if x.endswith('index')]
     ckpts.sort()
 
-    print(ckpts)
+    #print(ckpts)
 
-    
-    model.load_weights(ckpts[-1])
+    if epoch == -1: 
+        epoch = int(ckpts[-1].split('-')[-1].split('.')[0])
+        model.load_weights(ckpts[-1]).expect_partial()
+        print(f'evaluating {ckpts[-1]}')
+    else:
+        idx=f"{epoch:04d}"
+        ck = model_outdir+"/models/"+f"ckpts-{idx}.ckpt"
+        model.load_weights(ck).expect_partial()
+        print(f'evaluating {ck}')
+
 #    model.compile()
 #    print(model.get_weights())
     e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
@@ -97,8 +111,8 @@ def create_model(config_file):
     #force_pred = [tf.reshape(_f_pred[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
     force_pred = tf.reshape(_f_pred, [-1,3])
 
-    np.savetxt(os.path.join(outdir, 'energy_last_test.dat'), np.stack([e_ref, e_pred, nat]).T)
-    np.savetxt(os.path.join(outdir, 'forces_last_test.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
+    np.savetxt(os.path.join(outdir, f'energy_last_test_{epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
+    np.savetxt(os.path.join(outdir, f'forces_last_test_{epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
 
     #model.predict(train_data)
     '''e_ref, e_pred, metrics, force_ref, force_pred, nat = model.predict(train_data)

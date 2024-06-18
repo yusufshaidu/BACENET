@@ -45,6 +45,7 @@ class mBP_Calculator(Calculator):
         self.RsN_ang = configs['RsN_ang']
         self.rc_rad = configs['rc_rad']
         self.rc_ang = configs['rc_ang']
+        self.nelement = configs['nelement']
         #estimate initial parameters
         self.width_ang = self.RsN_ang * self.RsN_ang / (self.rc_ang-0.25)**2
         self.width = self.RsN_rad * self.RsN_rad / (self.rc_rad-0.25)**2
@@ -72,7 +73,8 @@ class mBP_Calculator(Calculator):
                           self.activations,
                           self.rc_ang,self.RsN_rad,self.RsN_ang,
                           self.thetaN,self.width_ang,self.zeta,
-                          pbc=self.pbc)
+                          pbc=self.pbc,
+                          nelement=self.nelement)
         ckpts = [os.path.join(self.model_outdir, x.split('.index')[0]) for x in os.listdir(self.model_outdir) if x.endswith('index')]
 
         self.model.load_weights(ckpts[0]).expect_partial()

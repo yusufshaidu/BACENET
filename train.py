@@ -18,6 +18,7 @@ def create_model(config_file):
     #I am parsing yaml files with all the parameters
     #
     layer_sizes = configs['layer_sizes']
+    nelement = configs['nelement']
     save_freq = configs['save_freq']
     zeta = configs['zeta']
     thetaN = configs['thetaN']
@@ -70,7 +71,8 @@ def create_model(config_file):
                       params_trainable,
                       order=3,
                       fcost=fcost,
-                      pbc=pbc)
+                      pbc=pbc,
+                      nelement=nelement)
 
     initial_learning_rate = initial_lr
 
@@ -123,7 +125,7 @@ def create_model(config_file):
               epochs=num_epochs,
               batch_size=batch_size,
              validation_data=test_data,
-             validation_freq=10,
+             validation_freq=5,
              callbacks=[cp_callback])
 
 if __name__ == '__main__':

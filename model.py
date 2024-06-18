@@ -76,7 +76,8 @@ class mBP_model(tf.keras.Model):
                 params_trainable=True,
                 order=3,
                 fcost=0.0,
-                pbc=True):
+                pbc=True,
+                nelement=118):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -110,10 +111,10 @@ class mBP_model(tf.keras.Model):
         self.atomic_nets = Networks(self.feature_size, self.layer_sizes, self._activations)
 
         # the number of elements in the periodic table
-        nelement  = 118
+        #self.nelement  = nelement
         self.nelement = nelement
         # create a species embedding network Nembedding x Nspecies
-        self.species_nets = Networks(nelement, [16,1], ['sigmoid','linear'], prefix='species_encoder')
+        self.species_nets = Networks(self.nelement, [16,1], ['sigmoid','linear'], prefix='species_encoder')
 
         if self._params_trainable:
             #constraint = tf.keras.constraints.MinMaxNorm(min_value=1e-2, 
@@ -463,7 +464,12 @@ class mBP_model(tf.keras.Model):
         #positions and species_encoder are ragged tensors are converted to tensors before using them
         positions = tf.reshape(inputs[0].to_tensor(shape=(-1,nmax,3)), (-1, 3*nmax))
         #obtain species encoder
-        spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
+        
+        # if we want species encoder for every elements, then we can do this
+        # I am not sure it is useful to encode all species except in other context.
+        #spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
+
+        spec_identity = tf.range(len(self.species_identity), dtype=tf.int32)
 
         species_one_hot_encoder = tf.one_hot(spec_identity, depth=self.nelement)
             
@@ -476,6 +482,7 @@ class mBP_model(tf.keras.Model):
             batch_species_encoder += tf.where(tf.equal(species_encoder,tf.cast(spec,tf.float32)), 
                     values, tf.zeros([self.batch_size, nmax]))
 
+
         cells = inputs[3]
         replica_idx = inputs[4]
         
@@ -487,16 +494,44 @@ class mBP_model(tf.keras.Model):
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32])
         
         return energies, forces, tf.reduce_sum(self.width_value),tf.reduce_sum(self.width_value_ang), tf.reduce_sum(self.zeta_value)
-    
+
+    def force_loss(self, x):
+        
+        nat = tf.cast(x[0], tf.int32)
+        force_ref = tf.reshape(x[1][:3*nat], (nat,3))
+        force_pred = tf.reshape(x[2][:3*nat], (nat,3))
+
+        loss = tf.reduce_mean((force_ref - force_pred)**2)
+
+        return loss
+
+    def force_mse(self, x):
+        
+        nat = tf.cast(x[0], tf.int32)
+        force_ref = tf.reshape(x[1][:3*nat], (nat,3))
+        force_pred = tf.reshape(x[2][:3*nat], (nat,3))
+
+        fmse = tf.reduce_mean((force_ref - force_pred)**2)
+
+        return fmse
+
+    def force_mae(self, x):
+        
+        nat = tf.cast(x[0], tf.int32)
+        force_ref = tf.reshape(x[1][:3*nat], (nat,3))
+        force_pred = tf.reshape(x[2][:3*nat], (nat,3))
+
+        fmae = tf.reduce_mean(tf.abs(force_ref - force_pred))
+
+        return fmae
+
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
         inputs_target = data
         inputs = inputs_target[:5]
         target = inputs_target[5]
-        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1])
-        target_f = tf.cast(target_f, tf.float32)
-        
+                
         #in_shape = inputs[0].shape
         
         # the last dimension is the feature size
@@ -504,18 +539,23 @@ class mBP_model(tf.keras.Model):
         
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
-        
+
+        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1, 3*nmax])
+        target_f = tf.cast(target_f, tf.float32)
+
         with tf.GradientTape() as tape:
             e_pred, forces, width, width_ang, zeta = self(inputs, training=True)  # Forward pass
             # Compute the loss value
             # (the loss function is configured in `compile()`)
             ediff = (e_pred - target)
-            forces = tf.reshape(forces, [-1])
-
+            forces = tf.reshape(forces, [-1, 3*nmax])
+       
             emse_loss = tf.reduce_mean((ediff/batch_nats)**2)
 
-            dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax])
-            fmse_loss = tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats))
+            fmse_loss = tf.map_fn(self.force_loss, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+            fmse_loss = tf.reduce_mean(fmse_loss)
+            #dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax])
+            #fmse_loss = tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats))
 
             #loss = self.compute_loss(y=target, y_pred=e_pred)
             #loss += self.fcost * self.compute_loss(y=target_f, y_pred=forces)
@@ -541,8 +581,10 @@ class mBP_model(tf.keras.Model):
  #       dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax])
         #dforces = dforces  / (3*batch_nats[:, tf.newaxis])
 
-        mae_f = tf.reduce_mean(tf.reduce_sum(tf.abs(dforces), axis=-1) / (3*batch_nats))
-        rmse_f = tf.sqrt(tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats)))
+        mae_f = tf.map_fn(self.force_mae, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+        mae_f = tf.reduce_mean(mae_f)
+
+        rmse_f = tf.sqrt(fmse_loss)
         
         
         metrics.update({'MAE': mae})
@@ -599,33 +641,36 @@ class mBP_model(tf.keras.Model):
         inputs_target = data
         inputs = inputs_target[:5]
         target = inputs_target[5]
-        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1])
-        target_f = tf.cast(target_f, tf.float32)
-        
+               
         #in_shape = inputs[0].shape
         e_pred, forces,width, width_ang, zeta = self(inputs, training=True)  # Forward pass
         
-        forces = tf.reshape(forces, [-1])
         # Update metrics (includes the metric that tracks the loss)
         
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
-        
+
+        forces = tf.reshape(forces, [-1, nmax*3])
+
+        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1, 3*nmax])
+        target_f = tf.cast(target_f, tf.float32)
+
         ediff = (e_pred - target)
         
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
         
-        #mae_f = tf.reduce_mean(tf.abs(target_f - forces))
-        #rmse_f = tf.sqrt(tf.reduce_mean((target_f - forces)**2))
-        dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax]) 
-        mae_f = tf.reduce_mean(tf.reduce_sum(tf.abs(dforces), axis=-1) / (3*batch_nats))
-        rmse_f = tf.sqrt(tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats)))
-        
+        fmse_loss = tf.map_fn(self.force_loss, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+        fmse_loss = tf.reduce_mean(fmse_loss)
+
+        #dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax]) 
+        mae_f = tf.map_fn(self.force_mae, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+        mae_f = tf.reduce_mean(mae_f)
+        rmse_f = tf.sqrt(fmse_loss)
 
         metrics = {}
         #mae = tf.reduce_mean(tf.abs(ediff))
-        loss = rmse * rmse + rmse_f * rmse_f
+        loss = rmse * rmse + self.fcost * fmse_loss
         #rmse = tf.sqrt(loss)
         
         metrics.update({'MAE': mae})
@@ -651,25 +696,31 @@ class mBP_model(tf.keras.Model):
         inputs_target = data
         inputs = inputs_target[:5]
         target = inputs_target[5]
-        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1])
-        target_f = tf.cast(target_f, tf.float32)
-        #in_shape = inputs[0].shape
+                #in_shape = inputs[0].shape
         e_pred, forces, width, width_ang, zeta = self(inputs, training=False)  # Forward pass
-        
-        _forces = tf.identity(forces)
-        _forces = tf.reshape(_forces, [-1])
         
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
+
+        forces = tf.reshape(forces, [-1, nmax*3])
+
+        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1, 3*nmax])
+        target_f = tf.cast(target_f, tf.float32)
+
         ediff = (e_pred - target)
         
     
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
         
-        dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax]) 
-        mae_f = tf.reduce_mean(tf.reduce_sum(tf.abs(dforces), axis=-1) / (3*batch_nats))
-        rmse_f = tf.sqrt(tf.reduce_mean(tf.reduce_sum((dforces)**2, axis=-1) / (3*batch_nats)))
+        fmse = tf.map_fn(self.force_mse, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+        fmse = tf.reduce_mean(fmse)
+
+        #dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax])
+        mae_f = tf.map_fn(self.force_mae, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+        mae_f = tf.reduce_mean(mae_f)
+
+        rmse_f = tf.sqrt(fmse)
 
         metrics = {}
         #mae = tf.reduce_mean(tf.abs(ediff))
