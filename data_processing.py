@@ -107,7 +107,7 @@ def input_function(x, shuffle=True, batch_size=32): # inner function that will b
     dataset = tf.data.Dataset.from_tensor_slices(x)
     if shuffle:
         dataset = dataset.shuffle(1000)
-    dataset = dataset.ragged_batch(batch_size,drop_remainder=True) # split dataset into batch_size batches and repeat process for num_epochs
+    dataset = dataset.ragged_batch(batch_size,drop_remainder=False) # split dataset into batch_size batches and repeat process for num_epochs
     return dataset
 
 #def input_function_examples(data_path, shuffle=True, batch_size=32): # inner function that will be returned

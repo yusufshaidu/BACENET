@@ -10,6 +10,7 @@ import os
 import argparse
 from data_processing import data_preparation
 from model import mBP_model
+from model_modified import mBP_model as mBP_model_v1
 
 def create_model(config_file):
 
@@ -38,6 +39,14 @@ def create_model(config_file):
     else:
         pbc = [False,False,False]
     initial_lr = configs['initial_lr']
+    model_call = mBP_model
+    print('model_version' in list(configs.keys()))
+    if 'model_version' in list(configs.keys()):
+        model_v = configs['model_version']
+        if model_v == 'v1':
+            model_call = mBP_model_v1
+
+        print('I am using variable width')
     #this is the global step
     decay_step = configs['decay_step']
     decay_rate = configs['decay_rate']
@@ -62,8 +71,10 @@ def create_model(config_file):
                      rc_rad, rc_ang, pbc, batch_size,
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy)
+    
+    train_writer = tf.summary.create_file_writer(model_outdir+'/train')
 
-    model = mBP_model(layer_sizes,
+    model = model_call(layer_sizes,
                       rc_rad, species_identity, width, batch_size,
                       activations,
                       rc_ang,RsN_rad,RsN_ang,
@@ -72,7 +83,8 @@ def create_model(config_file):
                       order=3,
                       fcost=fcost,
                       pbc=pbc,
-                      nelement=nelement)
+                      nelement=nelement,
+                      train_writer=train_writer)
 
     initial_learning_rate = initial_lr
 
@@ -99,7 +111,8 @@ def create_model(config_file):
                                                      verbose=1,
                                                     save_freq=save_freq,
                                                     options=None),
-                   tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1),
+                   tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
+                                                  update_freq='batch'),
                    tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup"),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
 

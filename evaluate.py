@@ -3,6 +3,7 @@ import tensorflow as tf
 
 from data_processing import data_preparation
 from model import mBP_model
+from model_modified import mBP_model as mBP_model_v1
 
 import os, sys, yaml,argparse
 import numpy as np
@@ -55,13 +56,20 @@ def create_model(config_file):
         atomic_energy = configs['atomic_energy']
     except:
         atomic_energy = []
+    model_call = mBP_model
+    print('model_version' in list(configs.keys()))
+    if 'model_version' in list(configs.keys()):
+        model_v = configs['model_version']
+        if model_v == 'v1':
+            model_call = mBP_model_v1
+
     train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
                      energy_key, force_key,
                      rc_rad, rc_ang, pbc, batch_size,
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy)
 
-    model = mBP_model(layer_sizes,
+    model = model_call(layer_sizes,
                       rc_rad, species_identity, width, batch_size,
                       activations,
                       rc_ang,RsN_rad,RsN_ang,
@@ -94,10 +102,11 @@ def create_model(config_file):
 #    print(model.get_weights())
     e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
     mae = np.mean(metrics['MAE'])
-    rmse = np.mean(metrics['RMSE'])
+    #rmse = np.mean(metrics['RMSE'])
+    rmse = np.sqrt(np.mean(metrics['RMSE_F']**2))
     print(f'Energy: the test rmse = {rmse} and mae = {mae}')
     mae = np.mean(metrics['MAE_F'])
-    rmse = np.mean(metrics['RMSE_F'])
+    rmse = np.sqrt(np.mean(metrics['RMSE_F']**2))
     print(f'Forces: the test rmse = {rmse} and mae = {mae}')
     _f_ref = []
     _f_pred = []

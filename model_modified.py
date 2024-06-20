@@ -11,6 +11,7 @@ from mendeleev import element
 import math 
 import itertools, os
 from ase.io import read, write
+from tensorflow.keras import backend as K
 
 def Networks(input_size, layer_sizes, 
              activations,
@@ -77,7 +78,8 @@ class mBP_model(tf.keras.Model):
                 order=3,
                 fcost=0.0,
                 pbc=True,
-                nelement=118):
+                nelement=118,
+                train_writer=None):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -101,6 +103,7 @@ class mBP_model(tf.keras.Model):
         self.pbc = pbc
         self.fcost = float(fcost)
         self.nspecies = len(self.species_identity)
+        self.train_writer = train_writer
 
               
         
@@ -123,22 +126,34 @@ class mBP_model(tf.keras.Model):
             #constraint = tf.keras.constraints.NonNeg()
             constraint = None
 
-            self.width_nets = Networks(1, [1], ['linear'],
+            self.width_nets = Networks(self.RsN_rad, [64,self.RsN_rad], ['sigmoid','softplus'],
                                       weight_initializer='random_normal',
                                       bias_initializer='random_normal',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint, prefix='radial_width')
-            self.width_nets_ang = Networks(1, [1], ['linear'],
+            self.width_nets_ang = Networks(self.RsN_ang, [64,self.RsN_ang], ['sigmoid','softplus'],
                                       weight_initializer='random_normal',
                                       bias_initializer='random_normal',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint,prefix='ang_width')
             
-            self.zeta_nets = Networks(1, [1], ['linear'],
+            self.zeta_nets = Networks(self.thetaN, [64, self.thetaN], ['sigmoid','softplus'],
                                       weight_initializer='random_normal',
                                       bias_initializer='random_normal',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint, prefix='zeta')
+        #self.lamda1_nets = Networks(self.thetaN, [64,self.thetaN], ['sigmoid','sigmoid','sigmoid'],
+        #                              weight_initializer='random_normal',
+        #                              bias_initializer='random_normal',
+        #                              kernel_constraint=constraint,
+        #                              bias_constraint=constraint, prefix='lambda1_costhetas')
+        #self.lamda2_nets = Networks(self.thetaN, [64,self.thetaN], ['sigmoid','sigmoid','sigmoid'],
+        #                              weight_initializer='random_normal',
+        #                              bias_initializer='random_normal',
+        #                              kernel_constraint=constraint,
+        #                              bias_constraint=constraint, prefix='lambda2_sinthetas')
+
+
     @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                                  tf.TensorSpec(shape=(), dtype=tf.float32)])
     def tf_fcut(self,r,rc):
@@ -164,15 +179,15 @@ class mBP_model(tf.keras.Model):
                 input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(3,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32)
                 )])
@@ -296,7 +311,7 @@ class mBP_model(tf.keras.Model):
             #all_rij_norm = tf.gather_ng(all_rij_norm, idx_in_ball)
 
             #nat x Ngauss x Nneigh
-            gauss_args = width * (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2
+            gauss_args = width[tf.newaxis,:,tf.newaxis] * (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2
 
             #since fcut =0 for rij > rc, there is no need for any special treatment
             #species_encoder Nneigh and reshaped to 1 x 1 x Nneigh
@@ -361,7 +376,7 @@ class mBP_model(tf.keras.Model):
             cos_theta_ijk_theta_s = cos_theta_ijk[:,tf.newaxis,:] * cos_theta_s[tf.newaxis,:,tf.newaxis] 
             cos_theta_ijk_theta_s += (sin_theta_ijk[:,tf.newaxis,:] * sin_theta_s[tf.newaxis,:,tf.newaxis])
             cos_theta_ijk_theta_s += 1.0
-            cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta
+            cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta[tf.newaxis,:,tf.newaxis]
 
             #(rij + rik) / 2
             #dim : nat,neigh,neigh
@@ -369,7 +384,7 @@ class mBP_model(tf.keras.Model):
             #Nat x Nneigh**2
             rij_p_rik = tf.reshape(rij_p_rik, [nat, -1])
             #Nat x Ngauss_ang * Nneigh**2
-            rij_p_rik_rs = width_ang * (rij_p_rik[:,tf.newaxis,:]/2.0  - Rs_ang[tf.newaxis,:,tf.newaxis])**2
+            rij_p_rik_rs = width_ang[tf.newaxis,:,tf.newaxis] * (rij_p_rik[:,tf.newaxis,:]/2.0  - Rs_ang[tf.newaxis,:,tf.newaxis])**2
             #compute the exponetial term
             exp_ang_term = self.tf_app_gaussian(rij_p_rik_rs)
             
@@ -419,55 +434,55 @@ class mBP_model(tf.keras.Model):
         forces = tf.concat([forces, padding], 0)
         #forces = tf.zeros((nmax_diff+nat,3))   
         return [tf.cast(total_energy, tf.float32), -tf.cast(forces, tf.float32)]
-
-            
+    
     def call(self, inputs, training=False):
         '''inpu has a shape of batch_size x nmax_atoms x feature_size'''
         # may be just call the energy prediction here which will be needed in the train and test steps
-        
         # the input are going to be filename from which descriptors and targets are going to be extracted
-        
+
         batch_size = tf.shape(inputs[2])[0]
 
         rcuts = tf.tile([self.rcut], [batch_size])
         rcuts_ang = tf.tile([self.rcut_ang], [batch_size])
         batch_RsN_rad = tf.tile([self.RsN_rad], [batch_size])
         batch_RsN_ang = tf.tile([self.RsN_ang], [batch_size])
-       
+
         batch_thetaN = tf.tile([self.thetaN], [batch_size])
-            
+
         if self._params_trainable:
-            self.width_value = tf.reshape(self.width_nets(tf.constant([self._width])), [-1])
-            self.width_value += self._width
-            
-            self.width_value_ang = tf.reshape(self.width_nets_ang(tf.constant([self.width_ang])), [-1])
-            self.width_value_ang += self.width_ang
-            self.zeta_value = tf.reshape(self.zeta_nets(tf.constant([self.zeta])), [-1])
-            self.zeta_value += self.zeta
+            inputs_width = tf.ones(self.RsN_rad) * self._width
+            self.width_value = tf.reshape(self.width_nets(inputs_width[tf.newaxis, :]), [-1])
+            #self.width_value += self._width
+
+            inputs_width_ang = tf.ones(self.RsN_ang) * self.width_ang
+            self.width_value_ang = tf.reshape(self.width_nets_ang(inputs_width_ang[tf.newaxis, :]), [-1])
+            #self.width_value_ang += self.width_ang
+
+            inputs_zeta = tf.ones(self.thetaN) * self.zeta
+            self.zeta_value = tf.reshape(self.zeta_nets(inputs_zeta[tf.newaxis, :]), [-1])
+            #self.zeta_value += self.zeta
         else:
-            self.width_value = tf.constant([self._width], dtype=tf.float32)
-            self.width_value_ang = tf.constant([self.width_ang], dtype=tf.float32)
-            self.zeta_value = tf.constant([self.zeta], dtype=tf.float32)
-        
-        batch_width = tf.tile(self.width_value, [batch_size])
-        batch_width_ang = tf.tile(self.width_value_ang, [batch_size])
-        batch_zeta = tf.tile(self.zeta_value, [batch_size])
-        
-        
-        
+            self.width_value = tf.ones(self.RsN_ang) * self.width_ang
+            self.width_value_ang = tf.ones(self.RsN_ang) * self.width_ang
+            self.zeta_value = tf.ones(self.thetaN) * self.zeta
+
+        batch_width = tf.tile([self.width_value], [batch_size,1])
+        batch_width_ang = tf.tile([self.width_value_ang], [batch_size,1])
+        batch_zeta = tf.tile([self.zeta_value], [batch_size,1])
+
         #positions = tf.reshape(inputs[0], (self.batch_size, -1))
         #species_encoder = tf.reshape(inputs[1], (self.batch_size, -1))
-        
+
         batch_nats = inputs[2]
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
         batch_nmax = tf.tile([nmax], [batch_size])
         #print(batch_nats, batch_nmax)
         nmax_diff = batch_nmax - batch_nats
-        
+
         #positions and species_encoder are ragged tensors are converted to tensors before using them
         positions = tf.reshape(inputs[0].to_tensor(shape=(-1,nmax,3)), (-1, 3*nmax))
         #obtain species encoder
-        
+
         # if we want species encoder for every elements, then we can do this
         # I am not sure it is useful to encode all species except in other context.
         #spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
@@ -475,31 +490,30 @@ class mBP_model(tf.keras.Model):
         spec_identity = tf.range(len(self.species_identity), dtype=tf.int32)
 
         species_one_hot_encoder = tf.one_hot(spec_identity, depth=self.nelement)
-            
+
         trainable_species_encoder = self.species_nets(species_one_hot_encoder)
         species_encoder = inputs[1].to_tensor(shape=(-1, nmax))
         batch_species_encoder = tf.zeros([batch_size, nmax], dtype=tf.float32)
 
         for idx, spec in enumerate(self.species_identity):
             values = tf.ones([batch_size, nmax], dtype=tf.float32) * trainable_species_encoder[idx]
-            batch_species_encoder += tf.where(tf.equal(species_encoder,tf.cast(spec,tf.float32)), 
+            batch_species_encoder += tf.where(tf.equal(species_encoder,tf.cast(spec,tf.float32)),
                     values, tf.zeros([batch_size, nmax]))
 
 
         cells = inputs[3]
         replica_idx = inputs[4]
-        
+
         elements = (rcuts, batch_RsN_rad, batch_species_encoder, batch_width,
-                positions, nmax_diff, batch_nats, 
-                batch_zeta, rcuts_ang, batch_RsN_ang, 
+                positions, nmax_diff, batch_nats,
+                batch_zeta, rcuts_ang, batch_RsN_ang,
                 batch_thetaN, batch_width_ang, cells, replica_idx)
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32])
-        
-        return energies, forces, tf.reduce_sum(self.width_value),tf.reduce_sum(self.width_value_ang), tf.reduce_sum(self.zeta_value)
+        return energies, forces
 
     def force_loss(self, x):
-        
+
         nat = tf.cast(x[0], tf.int32)
         force_ref = tf.reshape(x[1][:3*nat], (nat,3))
         force_pred = tf.reshape(x[2][:3*nat], (nat,3))
@@ -509,7 +523,7 @@ class mBP_model(tf.keras.Model):
         return loss
 
     def force_mse(self, x):
-        
+
         nat = tf.cast(x[0], tf.int32)
         force_ref = tf.reshape(x[1][:3*nat], (nat,3))
         force_pred = tf.reshape(x[2][:3*nat], (nat,3))
@@ -519,7 +533,7 @@ class mBP_model(tf.keras.Model):
         return fmse
 
     def force_mae(self, x):
-        
+
         nat = tf.cast(x[0], tf.int32)
         force_ref = tf.reshape(x[1][:3*nat], (nat,3))
         force_pred = tf.reshape(x[2][:3*nat], (nat,3))
@@ -534,12 +548,12 @@ class mBP_model(tf.keras.Model):
         inputs_target = data
         inputs = inputs_target[:5]
         target = inputs_target[5]
-                
+
         #in_shape = inputs[0].shape
-        
+
         # the last dimension is the feature size
         #inputs = tf.reshape(inputs, [-1, in_shape[-1]])
-        
+
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
 
@@ -547,12 +561,12 @@ class mBP_model(tf.keras.Model):
         target_f = tf.cast(target_f, tf.float32)
 
         with tf.GradientTape() as tape:
-            e_pred, forces, width, width_ang, zeta = self(inputs, training=True)  # Forward pass
+            e_pred, forces = self(inputs, training=True)  # Forward pass
             # Compute the loss value
             # (the loss function is configured in `compile()`)
             ediff = (e_pred - target)
             forces = tf.reshape(forces, [-1, 3*nmax])
-       
+
             emse_loss = tf.reduce_mean((ediff/batch_nats)**2)
 
             fmse_loss = tf.map_fn(self.force_loss, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
@@ -571,12 +585,12 @@ class mBP_model(tf.keras.Model):
         gradients = tape.gradient(loss, trainable_vars)
         # Update weights
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-        
-        
-        
+
+
+
         # Update metrics (includes the metric that tracks the loss)
 #        ediff = (e_pred - target)
-        
+
         metrics = {'tot_st': self._train_counter}
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
@@ -588,52 +602,51 @@ class mBP_model(tf.keras.Model):
         mae_f = tf.reduce_mean(mae_f)
 
         rmse_f = tf.sqrt(fmse_loss)
-        
-        
+
+
         metrics.update({'MAE': mae})
         metrics.update({'RMSE': rmse})
-        
+
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
-        metrics.update({'Parameter-width-rad':width})
-        metrics.update({'Parameter-width-ang':width_ang})
-        metrics.update({'Parameter-zeta':zeta})
-        
+#        metrics.update({'Parameter-width-rad':width})
+ #       metrics.update({'Parameter-width-ang':width_ang})
+ #       metrics.update({'Parameter-zeta':zeta})
+
         #    if self._f_loss:
         #        metrics.update({'F_MAE': Fmae})
         #if 'RMSE' in self._printmetrics:
         #    metrics.update({'RMSE/at': rmseat})
         #    if self._f_loss:
         #        metrics.update({'F_RMSE': Frmse})
-        
+
         metrics.update({'loss': loss})
         metrics.update({'energy loss': emse_loss})
         metrics.update({'force loss': fmse_loss})
-        
+        lr = K.eval(self.optimizer.lr)
+
         #with writer.set_as_default():
-           
-        tf.summary.scalar('1. Losses/1. Total',loss,self._train_counter)
-        tf.summary.scalar('2. Metrics/1. RMSE/atom',rmse,self._train_counter)
-        tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter)
-        tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter)
-        tf.summary.scalar('2. Metrics/3. MAE_F',mae_f,self._train_counter)
-        tf.summary.scalar('3. Parameters/1. width',width,self._train_counter)
-        tf.summary.scalar('3. Parameters/2. width_ang',width_ang,self._train_counter)
-        tf.summary.scalar('3. Parameters/3. zeta',zeta,self._train_counter)
-            
+        with self.train_writer.as_default(step=self._train_counter):
 
-
-          
+            tf.summary.scalar('1. Losses/1. Total',loss,self._train_counter)
+            tf.summary.scalar('2. Metrics/1. RMSE/atom',rmse,self._train_counter)
+            tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. MAE_F',mae_f,self._train_counter)
+            tf.summary.scalar('4. LearningRate/1. LR',lr,self._train_counter)
+            tf.summary.histogram('3. Parameters/1. width',self.width_value,self._train_counter)
+            tf.summary.histogram('3. Parameters/2. width_ang',self.width_value_ang,self._train_counter)
+            tf.summary.histogram('3. Parameters/3. zeta',self.zeta_value,self._train_counter)
 
         #self.metrics.update(metrics)
-        
+
         #for metric in self.metrics:
         #    if metric.name == "loss":
         #        metric.update_state(loss)
         #    else:
         #        metric.update_state(y, y_pred)
         # Return a dict mapping metric names to current value
-        
+
         #return {m.name: m.result() for m in self.metrics}
         return {key: metrics[key] for key in metrics.keys()}
 
@@ -644,12 +657,12 @@ class mBP_model(tf.keras.Model):
         inputs_target = data
         inputs = inputs_target[:5]
         target = inputs_target[5]
-               
+
         #in_shape = inputs[0].shape
-        e_pred, forces,width, width_ang, zeta = self(inputs, training=True)  # Forward pass
-        
+        e_pred, forces = self(inputs, training=True)  # Forward pass
+
         # Update metrics (includes the metric that tracks the loss)
-        
+
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
 
@@ -659,14 +672,14 @@ class mBP_model(tf.keras.Model):
         target_f = tf.cast(target_f, tf.float32)
 
         ediff = (e_pred - target)
-        
+
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
-        
+
         fmse_loss = tf.map_fn(self.force_loss, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
         fmse_loss = tf.reduce_mean(fmse_loss)
 
-        #dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax]) 
+        #dforces = tf.reshape(target_f, [self.batch_size, 3*nmax]) - tf.reshape(forces, [self.batch_size, 3*nmax])
         mae_f = tf.map_fn(self.force_mae, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
         mae_f = tf.reduce_mean(mae_f)
         rmse_f = tf.sqrt(fmse_loss)
@@ -675,21 +688,20 @@ class mBP_model(tf.keras.Model):
         #mae = tf.reduce_mean(tf.abs(ediff))
         loss = rmse * rmse + self.fcost * fmse_loss
         #rmse = tf.sqrt(loss)
-        
+
         metrics.update({'MAE': mae})
         metrics.update({'RMSE': rmse})
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
-        
-        #    if self._f_loss:
-        #        metrics.update({'F_MAE': Fmae})
-        #if 'RMSE' in self._printmetrics:
-        #    metrics.update({'RMSE/at': rmseat})
-        #    if self._f_loss:
-        #        metrics.update({'F_RMSE': Frmse})
-        
+        with self.train_writer.as_default(step=self._train_counter):
+            tf.summary.scalar('2. Metrics/1. V_RMSE/atom',rmse,self._train_counter)
+            tf.summary.scalar('2. Metrics/2. V_MAE/atom',mae,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. V_RMSE_F',rmse_f,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. V_MAE_F',mae_f,self._train_counter)
+
+
         metrics.update({'loss': loss})
-          
+
         return {key: metrics[key] for key in metrics.keys()}
 
 
@@ -700,8 +712,8 @@ class mBP_model(tf.keras.Model):
         inputs = inputs_target[:5]
         target = inputs_target[5]
                 #in_shape = inputs[0].shape
-        e_pred, forces, width, width_ang, zeta = self(inputs, training=False)  # Forward pass
-        
+        e_pred, forces = self(inputs, training=False)  # Forward pass
+
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
 
@@ -711,11 +723,11 @@ class mBP_model(tf.keras.Model):
         target_f = tf.cast(target_f, tf.float32)
 
         ediff = (e_pred - target)
-        
-    
+
+
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
-        
+
         fmse = tf.map_fn(self.force_mse, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
         fmse = tf.reduce_mean(fmse)
 
@@ -729,10 +741,10 @@ class mBP_model(tf.keras.Model):
         #mae = tf.reduce_mean(tf.abs(ediff))
         #loss = tf.reduce_mean(ediff**2)
         #rmse = tf.sqrt(loss)
-        
+
         metrics.update({'MAE': mae})
         metrics.update({'RMSE': rmse})
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
-        
+
         return [target, e_pred, metrics, tf.reshape(target_f, [-1, nmax, 3]),tf.reshape(forces, [-1, nmax, 3]), batch_nats]
