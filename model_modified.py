@@ -12,6 +12,7 @@ import math
 import itertools, os
 from ase.io import read, write
 from tensorflow.keras import backend as K
+from tensorflow.keras import regularizers
 
 def Networks(input_size, layer_sizes, 
              activations,
@@ -19,7 +20,8 @@ def Networks(input_size, layer_sizes,
             bias_initializer='zeros',
             kernel_constraint=None,
             bias_constraint=None,
-            prefix='main'):
+            prefix='main',
+            l1=0.0,l2=0.0):
 
     model = tf.keras.Sequential()
     model.add(tf.keras.Input(shape=(input_size,)))
@@ -30,8 +32,8 @@ def Networks(input_size, layer_sizes,
                                         activation=activation,
                                         kernel_initializer=weight_initializer,
                                         bias_initializer=bias_initializer,
-                                        kernel_regularizer=None,
-                                        bias_regularizer=None,
+                                        kernel_regularizer=regularizers.L1L2(l1=l1,l2=l2),
+                                        bias_regularizer=regularizers.L1L2(l1=l1,l2=l2),
                                         activity_regularizer=None,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
@@ -75,11 +77,12 @@ class mBP_model(tf.keras.Model):
                 rc_ang,RsN_rad, RsN_ang,
                 thetaN,width_ang,zeta,
                 params_trainable=True,
-                order=3,
                 fcost=0.0,
                 pbc=True,
                 nelement=118,
-                train_writer=None):
+                train_writer=None,
+                l1=0.0,l2=0.0,
+                nspec_embedding=64):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -98,26 +101,27 @@ class mBP_model(tf.keras.Model):
         self.thetaN = thetaN
         self.zeta = float(zeta)
         self.width_ang = float(width_ang)
-        self.order = order
         self.feature_size = self.RsN_rad + self.RsN_ang * self.thetaN
         self.pbc = pbc
         self.fcost = float(fcost)
         self.nspecies = len(self.species_identity)
         self.train_writer = train_writer
+        self.nspec_embedding = nspec_embedding
 
-              
+        self.l1 = l1
+        self.l2 = l2
         
         # Layer is currectly noyt compactible with modelcheckpoints call back
         #self.width_nets = Linear(trainable=self._width_trainable)
         
         #self.width_value = self._width
-        self.atomic_nets = Networks(self.feature_size, self.layer_sizes, self._activations)
+        self.atomic_nets = Networks(self.feature_size, self.layer_sizes, self._activations, l1=self.l1, l2=self.l2)
 
         # the number of elements in the periodic table
         #self.nelement  = nelement
         self.nelement = nelement
         # create a species embedding network Nembedding x Nspecies
-        self.species_nets = Networks(self.nelement, [16,1], ['sigmoid','linear'], prefix='species_encoder')
+        self.species_nets = Networks(self.nelement, [self.nspec_embedding,1], ['sigmoid','linear'], prefix='species_encoder')
 
         if self._params_trainable:
             #constraint = tf.keras.constraints.MinMaxNorm(min_value=1e-2, 
@@ -127,19 +131,19 @@ class mBP_model(tf.keras.Model):
             constraint = None
 
             self.width_nets = Networks(self.RsN_rad, [64,self.RsN_rad], ['sigmoid','softplus'],
-                                      weight_initializer='random_normal',
-                                      bias_initializer='random_normal',
+                                      weight_initializer='ones',
+                                      bias_initializer='ones',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint, prefix='radial_width')
             self.width_nets_ang = Networks(self.RsN_ang, [64,self.RsN_ang], ['sigmoid','softplus'],
-                                      weight_initializer='random_normal',
-                                      bias_initializer='random_normal',
+                                      weight_initializer='ones',
+                                      bias_initializer='ones',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint,prefix='ang_width')
             
             self.zeta_nets = Networks(self.thetaN, [64, self.thetaN], ['sigmoid','softplus'],
-                                      weight_initializer='random_normal',
-                                      bias_initializer='random_normal',
+                                      weight_initializer='ones',
+                                      bias_initializer='ones',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint, prefix='zeta')
         #self.lamda1_nets = Networks(self.thetaN, [64,self.thetaN], ['sigmoid','sigmoid','sigmoid'],

@@ -62,6 +62,13 @@ def create_model(config_file):
     force_key = configs['force_key']
     test_fraction = configs['test_fraction']
     try:
+        l1_norm = configs['l1_norm']
+        l2_norm = configs['l2_norm']
+    except:
+        l1_norm = 0.0
+        l2_norm = 0.0
+
+    try:
         atomic_energy = configs['atomic_energy']
     except:
         atomic_energy = []
@@ -80,11 +87,11 @@ def create_model(config_file):
                       rc_ang,RsN_rad,RsN_ang,
                       thetaN,width_ang,zeta,
                       params_trainable,
-                      order=3,
                       fcost=fcost,
                       pbc=pbc,
                       nelement=nelement,
-                      train_writer=train_writer)
+                      train_writer=train_writer,
+                       l1=l1_norm,l2=l2_norm)
 
     initial_learning_rate = initial_lr
 

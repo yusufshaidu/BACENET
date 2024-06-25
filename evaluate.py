@@ -63,6 +63,10 @@ def create_model(config_file):
         if model_v == 'v1':
             model_call = mBP_model_v1
 
+    try:
+        nspec_embedding = configs['nspec_embedding']
+    except:
+        nspec_embedding = 64
     train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
                      energy_key, force_key,
                      rc_rad, rc_ang, pbc, batch_size,
@@ -77,7 +81,8 @@ def create_model(config_file):
                       fcost=fcost,
                       params_trainable=True,
                       pbc=pbc,
-                      nelement=nelement)
+                      nelement=nelement,
+                      nspec_embedding=nspec_embedding)
     
     #load the last check points
     
@@ -103,7 +108,7 @@ def create_model(config_file):
     e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
     mae = np.mean(metrics['MAE'])
     #rmse = np.mean(metrics['RMSE'])
-    rmse = np.sqrt(np.mean(metrics['RMSE_F']**2))
+    rmse = np.sqrt(np.mean(metrics['RMSE']**2))
     print(f'Energy: the test rmse = {rmse} and mae = {mae}')
     mae = np.mean(metrics['MAE_F'])
     rmse = np.sqrt(np.mean(metrics['RMSE_F']**2))

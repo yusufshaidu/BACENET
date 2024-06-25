@@ -11,6 +11,7 @@ from mendeleev import element
 import math 
 import itertools, os
 from ase.io import read, write
+from tensorflow.keras import backend as K
 
 def Networks(input_size, layer_sizes, 
              activations,
@@ -77,7 +78,8 @@ class mBP_model(tf.keras.Model):
                 order=3,
                 fcost=0.0,
                 pbc=True,
-                nelement=118):
+                nelement=118,
+                train_writer=None):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -101,7 +103,7 @@ class mBP_model(tf.keras.Model):
         self.pbc = pbc
         self.fcost = float(fcost)
         self.nspecies = len(self.species_identity)
-
+        self.train_writer = train_writer
               
         
         # Layer is currectly noyt compactible with modelcheckpoints call back
@@ -496,7 +498,8 @@ class mBP_model(tf.keras.Model):
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32])
         
-        return energies, forces, tf.reduce_sum(self.width_value),tf.reduce_sum(self.width_value_ang), tf.reduce_sum(self.zeta_value)
+        return energies, forces
+    #, tf.reduce_sum(self.width_value),tf.reduce_sum(self.width_value_ang), tf.reduce_sum(self.zeta_value)
 
     def force_loss(self, x):
         
@@ -547,7 +550,7 @@ class mBP_model(tf.keras.Model):
         target_f = tf.cast(target_f, tf.float32)
 
         with tf.GradientTape() as tape:
-            e_pred, forces, width, width_ang, zeta = self(inputs, training=True)  # Forward pass
+            e_pred, forces = self(inputs, training=True)  # Forward pass
             # Compute the loss value
             # (the loss function is configured in `compile()`)
             ediff = (e_pred - target)
@@ -595,9 +598,9 @@ class mBP_model(tf.keras.Model):
         
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
-        metrics.update({'Parameter-width-rad':width})
-        metrics.update({'Parameter-width-ang':width_ang})
-        metrics.update({'Parameter-zeta':zeta})
+        #metrics.update({'Parameter-width-rad':width})
+        #metrics.update({'Parameter-width-ang':width_ang})
+        #metrics.update({'Parameter-zeta':zeta})
         
         #    if self._f_loss:
         #        metrics.update({'F_MAE': Fmae})
@@ -609,17 +612,19 @@ class mBP_model(tf.keras.Model):
         metrics.update({'loss': loss})
         metrics.update({'energy loss': emse_loss})
         metrics.update({'force loss': fmse_loss})
+        lr = K.eval(self.optimizer.lr)
         
-        #with writer.set_as_default():
+        with self.train_writer.as_default(step=self._train_counter):
            
-        tf.summary.scalar('1. Losses/1. Total',loss,self._train_counter)
-        tf.summary.scalar('2. Metrics/1. RMSE/atom',rmse,self._train_counter)
-        tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter)
-        tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter)
-        tf.summary.scalar('2. Metrics/3. MAE_F',mae_f,self._train_counter)
-        tf.summary.scalar('3. Parameters/1. width',width,self._train_counter)
-        tf.summary.scalar('3. Parameters/2. width_ang',width_ang,self._train_counter)
-        tf.summary.scalar('3. Parameters/3. zeta',zeta,self._train_counter)
+            tf.summary.scalar('1. Losses/1. Total',loss,self._train_counter)
+            tf.summary.scalar('2. Metrics/1. RMSE/atom',rmse,self._train_counter)
+            tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. MAE_F',mae_f,self._train_counter)
+            tf.summary.scalar('4. LearningRate/1. LR',lr,self._train_counter)
+            tf.summary.scalar('3. Parameters/1. width',self.width_value[0],self._train_counter)
+            tf.summary.scalar('3. Parameters/2. width_ang',self.width_value_ang[0],self._train_counter)
+            tf.summary.scalar('3. Parameters/3. zeta',self.zeta_value[0],self._train_counter)
             
 
 
@@ -646,7 +651,7 @@ class mBP_model(tf.keras.Model):
         target = inputs_target[5]
                
         #in_shape = inputs[0].shape
-        e_pred, forces,width, width_ang, zeta = self(inputs, training=True)  # Forward pass
+        e_pred, forces = self(inputs, training=True)  # Forward pass
         
         # Update metrics (includes the metric that tracks the loss)
         
@@ -680,14 +685,12 @@ class mBP_model(tf.keras.Model):
         metrics.update({'RMSE': rmse})
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
-        
-        #    if self._f_loss:
-        #        metrics.update({'F_MAE': Fmae})
-        #if 'RMSE' in self._printmetrics:
-        #    metrics.update({'RMSE/at': rmseat})
-        #    if self._f_loss:
-        #        metrics.update({'F_RMSE': Frmse})
-        
+        with self.train_writer.as_default(step=self._train_counter):
+            tf.summary.scalar('2. Metrics/1. V_RMSE/atom',rmse,self._train_counter)
+            tf.summary.scalar('2. Metrics/2. V_MAE/atom',mae,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. V_RMSE_F',rmse_f,self._train_counter)
+            tf.summary.scalar('2. Metrics/3. V_MAE_F',mae_f,self._train_counter)
+
         metrics.update({'loss': loss})
           
         return {key: metrics[key] for key in metrics.keys()}
@@ -700,7 +703,7 @@ class mBP_model(tf.keras.Model):
         inputs = inputs_target[:5]
         target = inputs_target[5]
                 #in_shape = inputs[0].shape
-        e_pred, forces, width, width_ang, zeta = self(inputs, training=False)  # Forward pass
+        e_pred, forces = self(inputs, training=False)  # Forward pass
         
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
