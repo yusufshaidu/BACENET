@@ -368,16 +368,17 @@ class mBP_model(tf.keras.Model):
             #cos_theta_ijk = tf.matmul(rij_unit, tf.transpose(rij_unit, (0,2,1)))
             #rij.rik
             cos_theta_ijk = tf.einsum('ijk, ilk -> ijl', rij_unit, rij_unit) 
+
             #tensorprod(rij, rij)
-            tensor_rij_rij = tf.einsum('ijk, ijl -> ijkl',rij_unit, rij_unit)
+            #tensor_rij_rij = tf.einsum('ijk, ijl -> ijkl',rij_unit, rij_unit)
             #compute the Frobinus norm of the tensors
-            tensor_rij_rij_Fnorm = tf.einsum('ijkl, ijlm -> ijkm',tensor_rij_rij, tensor_rij_rij)
+            #tensor_rij_rij_Fnorm = tf.einsum('ijkl, ijlm -> ijkm',tensor_rij_rij, tf.transpose(tensor_rij_rij, (0,1,3,2)))
             #tf trace apply trace on the last two dimensions. This would be control by axis1 and axis2 in numpy
             # nat x neigh x neigh
-            tensor_rij_rij_Fnorm = tf.linalg.trace(tensor_rij_rij_Fnorm)
-            tensor_rij_rij_Fnorm = tf.tile(tensor_rij_rij_Fnorm[:,:,tf.newaxis], [1,1,Nneigh])
-            tensor_rij_rij_Fnorm = tf.reshape(tensor_rij_rij_Fnorm, [nat,-1])
-            tensor_rij_rij_Fnorm = tensor_rij_rij_Fnorm[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis] / 3.0
+            #tensor_rij_rij_Fnorm = tf.sqrt(tf.linalg.trace(tensor_rij_rij_Fnorm) + 1e-12)
+            #tensor_rij_rij_Fnorm = tf.tile(tensor_rij_rij_Fnorm[:,:,tf.newaxis], [1,1,Nneigh])
+            #tensor_rij_rij_Fnorm = tf.reshape(tensor_rij_rij_Fnorm, [nat,-1])
+            #tensor_rij_rij_Fnorm = tensor_rij_rij_Fnorm[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis] / 3.0
 
 
             
@@ -394,26 +395,28 @@ class mBP_model(tf.keras.Model):
 
             #tensorprod(rij, rik)
             tensor_rij_rik = tf.einsum('ijk, ilm -> ijlkm',rij_unit, rij_unit)
-            #compute the Frobinus norm of the tensors
-            tensor_rij_rik_Fnorm = tf.einsum('ijklm, ijkmn -> ijkln',tensor_rij_rik, tensor_rij_rik)
+            #X = tensorprod(rij, rik)
+            #S = (X + X.T) / 2 - 1/3 trace(X) Id
+
+            S = tensor_rij_rik + tf.transpose(tensor_rij_rik, (0,1,2,4,3))
+
+            S /= 2.0
+            #trace(X) = cos_theta_ijk
+            #to compute trace(X) * Id, we need to first tile cos_theta_ijk to have (nat,neigh,neigh,3,3) dimensions
+            #then the diagonal in the last 2 directions that are 3x3. We achieve this by multiply tf.eye(3)
+            trace_X = tf.tile(cos_theta_ijk[:,:,:,tf.newaxis,tf.newaxis], [1,1,1,3,3])
+
+            S -= trace_X * tf.eye(3) / 3.0
+
+            #compute the Frobinius norm of the tensors
+            S_Fnorm = tf.einsum('ijklm, ijkmn -> ijkln',S, tf.transpose(S, (0,1,2,4,3)))
             #tf trace apply trace on the last two dimensions. This would be control by axis1 and axis2 in numpy 
-            # nat x neigh x neigh
-            tensor_rij_rik_Fnorm = tf.linalg.trace(tensor_rij_rik_Fnorm)
+            # dimension = nat x neigh x neigh
+            tensors_contrib = tf.sqrt(tf.linalg.trace(S_Fnorm) + 1e-12)
+            tensors_contrib = tf.reshape(tensors_contrib, [nat,-1])
+            tensors_contrib  = tensors_contrib[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis]
 
-            #remove diagonal elements from the tensor product: we create ones of same shape as tensor and set the innermost diagonal to zero
-            #then sum over the tensor elements. If we want to keep the diagonal, we could jus do 
-            #tensor_rij_rik = tf.einsum('ijk,ilm->ijl',rij_unit, rij_unit)
-            #tl = tf.ones_like(tensor_rij_rik) - tf.eye(3)
-            #tensor_rij_rik = tf.reduce_sum(tensor_rij_rik * tl, axis=(-2,-1)) #natxNeighxNeigh
-            #tensor_rij_rik = tf.reshape(tensor_rij_rik, [nat,-1])
-            #tensor_rij_rik = tensor_rij_rik[:,tf.newaxis,:] * lambda2[tf.newaxis,:,tf.newaxis] / 3.0
-            tensor_rij_rik_Fnorm = tf.reshape(tensor_rij_rik_Fnorm, [nat,-1])
-            tensor_rij_rik_Fnorm = tensor_rij_rik_Fnorm[:,tf.newaxis,:] * lambda2[tf.newaxis,:,tf.newaxis] / 3.0
 
-            tensors_contrib = tensor_rij_rij_Fnorm + tensor_rij_rik_Fnorm
-
-        
-            
             #do we need to remove the case of j=k?
             #i==j or i==k already contribute 0 because of 1/2**zeta or  constant
             #lmn = tf.shape(rij_dot_rik)
@@ -444,7 +447,6 @@ class mBP_model(tf.keras.Model):
 #            cos_theta_ijk_theta_s += (tensor_rij_rij + tensor_rij_rik)
 
             cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta[tf.newaxis,:,tf.newaxis]
-            #cos_theta_ijk_theta_s_zeta += tensor_rij_rij + tensor_rij_rik
 
             #(rij + rik) / 2
             #dim : nat,neigh,neigh
