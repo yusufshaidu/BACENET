@@ -101,7 +101,7 @@ class mBP_model(tf.keras.Model):
         self.thetaN = thetaN
         self.zeta = float(zeta)
         self.width_ang = float(width_ang)
-        self.feature_size = self.RsN_rad + 2*(self.RsN_ang * self.thetaN)
+        self.feature_size = self.RsN_rad + (self.RsN_ang * self.thetaN)
         self.pbc = pbc
         self.fcost = float(fcost)
         self.nspecies = len(self.species_identity)
@@ -150,12 +150,12 @@ class mBP_model(tf.keras.Model):
                                       weight_initializer='random_normal',
                                       bias_initializer='random_normal',
                                       kernel_constraint=constraint,
-                                      bias_constraint=constraint, prefix='lambda1_ijij')
-        self.lambda2_nets = Networks(self.thetaN, [64,self.thetaN], ['tanh','tanh'],
-                                      weight_initializer='random_normal',
-                                      bias_initializer='random_normal',
-                                      kernel_constraint=constraint,
-                                      bias_constraint=constraint, prefix='lambda2_ijik')
+                                      bias_constraint=constraint, prefix='lambda1_ijik')
+#        self.lambda2_nets = Networks(self.thetaN, [64,self.thetaN], ['tanh','tanh'],
+#                                      weight_initializer='random_normal',
+#                                      bias_initializer='random_normal',
+#                                      kernel_constraint=constraint,
+#                                      bias_constraint=constraint, prefix='lambda2_ijik')
 
 
     @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
@@ -194,8 +194,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(3,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32)
                 )])
     def tf_predict_energy_forces(self,x):
 
@@ -221,7 +220,6 @@ class mBP_model(tf.keras.Model):
         cell = tf.cast(x[12], tf.float32)
         replica_idx = tf.cast(x[13], tf.float32)
         lambda1 = tf.cast(x[14], tf.float32)
-        lambda2 = tf.cast(x[15], tf.float32)
 
         
         
@@ -239,7 +237,7 @@ class mBP_model(tf.keras.Model):
         #adding the new tensor product increases the maximum
         # I am not sure what the appropriate normalization would be at the moment.
 
-        norm_ang = 2.0
+        norm_ang = 3.0
 
         tf_pi = tf.constant(math.pi, dtype=tf.float32)
 
@@ -444,7 +442,7 @@ class mBP_model(tf.keras.Model):
             cos_theta_ijk_theta_s = cos_theta_ijk[:,tf.newaxis,:] * cos_theta_s[tf.newaxis,:,tf.newaxis] 
             cos_theta_ijk_theta_s += (sin_theta_ijk[:,tf.newaxis,:] * sin_theta_s[tf.newaxis,:,tf.newaxis])
             cos_theta_ijk_theta_s += 1.0
-#            cos_theta_ijk_theta_s += (tensor_rij_rij + tensor_rij_rik)
+            cos_theta_ijk_theta_s += tensors_contrib
 
             cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta[tf.newaxis,:,tf.newaxis]
 
@@ -461,8 +459,8 @@ class mBP_model(tf.keras.Model):
             exp_ang_theta_ijk = cos_theta_ijk_theta_s_zeta[:,tf.newaxis,:,:] * exp_ang_term[:,:,tf.newaxis,:]
             exp_ang_theta_ijk = tf.reshape(exp_ang_theta_ijk, [nat,thetasN*Ngauss_ang,-1])
             
-            exp_ang_tensor_ijk = tensors_contrib[:,tf.newaxis,:,:] * exp_ang_term[:,:,tf.newaxis,:]
-            exp_ang_tensor_ijk = tf.reshape(exp_ang_tensor_ijk, [nat,thetasN*Ngauss_ang,-1])
+            #exp_ang_tensor_ijk = tensors_contrib[:,tf.newaxis,:,:] * exp_ang_term[:,:,tf.newaxis,:]
+            #exp_ang_tensor_ijk = tf.reshape(exp_ang_tensor_ijk, [nat,thetasN*Ngauss_ang,-1])
 
             #nat x Nneigh x Nneigh
             fc_rij_rik = self.tf_fcut(all_rij_norm, rc_ang)[:,tf.newaxis,:] * self.tf_fcut(all_rij_norm, rc_ang)[:,:,tf.newaxis]
@@ -479,10 +477,11 @@ class mBP_model(tf.keras.Model):
             _descriptor_ang = spec_encoder_fcjk[:,tf.newaxis,:] * exp_ang_theta_ijk
             descriptor_ang = tf.reduce_sum(_descriptor_ang, axis=-1)
 
-            _descriptor_tensor = spec_encoder_fcjk[:,tf.newaxis,:] * exp_ang_tensor_ijk
-            descriptor_tensor = tf.reduce_sum(_descriptor_tensor, axis=-1)
+            #_descriptor_tensor = spec_encoder_fcjk[:,tf.newaxis,:] * exp_ang_tensor_ijk
+            #descriptor_tensor = tf.reduce_sum(_descriptor_tensor, axis=-1)
 
-            atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang, descriptor_tensor], axis=1)
+            #atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang, descriptor_tensor], axis=1)
+            atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang], axis=1)
             
             #feature_size = Ngauss + Ngauss_ang * thetasN
             #the descriptors can be scaled
@@ -545,8 +544,8 @@ class mBP_model(tf.keras.Model):
         lambda1 = tf.reshape(self.lambda1_nets(lambda_init), [-1])
         batch_lambda1 = tf.tile([lambda1], [batch_size,1])
 
-        lambda2 = tf.reshape(self.lambda2_nets(lambda_init), [-1])
-        batch_lambda2 = tf.tile([lambda2], [batch_size,1])
+#        lambda2 = tf.reshape(self.lambda2_nets(lambda_init), [-1])
+#        batch_lambda2 = tf.tile([lambda2], [batch_size,1])
 
         #positions = tf.reshape(inputs[0], (self.batch_size, -1))
         #species_encoder = tf.reshape(inputs[1], (self.batch_size, -1))
@@ -563,9 +562,9 @@ class mBP_model(tf.keras.Model):
 
         # if we want species encoder for every elements, then we can do this
         # I am not sure it is useful to encode all species except in other context.
-        #spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
+        spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
 
-        spec_identity = tf.range(len(self.species_identity), dtype=tf.int32)
+        #spec_identity = tf.range(len(self.species_identity), dtype=tf.int32)
 
         species_one_hot_encoder = tf.one_hot(spec_identity, depth=self.nelement)
 
@@ -585,7 +584,7 @@ class mBP_model(tf.keras.Model):
         elements = (rcuts, batch_RsN_rad, batch_species_encoder, batch_width,
                 positions, nmax_diff, batch_nats,
                 batch_zeta, rcuts_ang, batch_RsN_ang,
-                batch_thetaN, batch_width_ang, cells, replica_idx, batch_lambda1, batch_lambda2)
+                batch_thetaN, batch_width_ang, cells, replica_idx, batch_lambda1)
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32])
         return energies, forces
