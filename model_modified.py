@@ -101,7 +101,7 @@ class mBP_model(tf.keras.Model):
         self.thetaN = thetaN
         self.zeta = float(zeta)
         self.width_ang = float(width_ang)
-        self.feature_size = self.RsN_rad + self.RsN_ang * self.thetaN
+        self.feature_size = self.RsN_rad + 2*(self.RsN_ang * self.thetaN)
         self.pbc = pbc
         self.fcost = float(fcost)
         self.nspecies = len(self.species_identity)
@@ -370,26 +370,47 @@ class mBP_model(tf.keras.Model):
             cos_theta_ijk = tf.einsum('ijk, ilk -> ijl', rij_unit, rij_unit) 
             #tensorprod(rij, rij)
             tensor_rij_rij = tf.einsum('ijk, ijl -> ijkl',rij_unit, rij_unit)
+            #compute the Frobinus norm of the tensors
+            tensor_rij_rij_Fnorm = tf.einsum('ijkl, ijlm -> ijkm',tensor_rij_rij, tensor_rij_rij)
+            #tf trace apply trace on the last two dimensions. This would be control by axis1 and axis2 in numpy
+            # nat x neigh x neigh
+            tensor_rij_rij_Fnorm = tf.linalg.trace(tensor_rij_rij_Fnorm)
+            tensor_rij_rij_Fnorm = tf.tile(tensor_rij_rij_Fnorm[:,:,tf.newaxis], [1,1,Nneigh])
+            tensor_rij_rij_Fnorm = tf.reshape(tensor_rij_rij_Fnorm, [nat,-1])
+            tensor_rij_rij_Fnorm = tensor_rij_rij_Fnorm[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis] / 3.0
+
+
+            
             #remove diagonal elements from the tensor product: we create ones of same shape as tensor and set the innermost diagonal to zero
             #then sum over the tensor elements. If we want to keep the diagonal, we could jus do 
             #tensor_rij_rij = tf.einsum('ijk,ijl->ij',rij_unit, rij_unit)
-            tl = tf.ones_like(tensor_rij_rij)-tf.eye(3)
-            tensor_rij_rij = tf.reduce_sum(tensor_rij_rij * tl, axis=(-2,-1)) #natxNeigh
+            #tl = tf.ones_like(tensor_rij_rij)-tf.eye(3)
+            #tensor_rij_rij = tf.reduce_sum(tensor_rij_rij * tl, axis=(-2,-1)) #natxNeigh
             #tile to have same dimension as costheta
-            tensor_rij_rij = tf.tile(tensor_rij_rij[:,:,tf.newaxis], [1,1,Nneigh])
-            tensor_rij_rij = tf.reshape(tensor_rij_rij, [nat,-1])
-            #multiply by the learnable parameter lambda1
-            tensor_rij_rij = tensor_rij_rij[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis] / 3.0
+            #tensor_rij_rij = tf.tile(tensor_rij_rij[:,:,tf.newaxis], [1,1,Nneigh])
+            #tensor_rij_rij = tf.reshape(tensor_rij_rij, [nat,-1])
+            ##multiply by the learnable parameter lambda1
+            #tensor_rij_rij = tensor_rij_rij[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis] / 3.0
 
             #tensorprod(rij, rik)
             tensor_rij_rik = tf.einsum('ijk, ilm -> ijlkm',rij_unit, rij_unit)
+            #compute the Frobinus norm of the tensors
+            tensor_rij_rik_Fnorm = tf.einsum('ijklm, ijkmn -> ijkln',tensor_rij_rik, tensor_rij_rik)
+            #tf trace apply trace on the last two dimensions. This would be control by axis1 and axis2 in numpy 
+            # nat x neigh x neigh
+            tensor_rij_rik_Fnorm = tf.linalg.trace(tensor_rij_rik_Fnorm)
+
             #remove diagonal elements from the tensor product: we create ones of same shape as tensor and set the innermost diagonal to zero
             #then sum over the tensor elements. If we want to keep the diagonal, we could jus do 
             #tensor_rij_rik = tf.einsum('ijk,ilm->ijl',rij_unit, rij_unit)
-            tl = tf.ones_like(tensor_rij_rik) - tf.eye(3)
-            tensor_rij_rik = tf.reduce_sum(tensor_rij_rik * tl, axis=(-2,-1)) #natxNeighxNeigh
-            tensor_rij_rik = tf.reshape(tensor_rij_rik, [nat,-1])
-            tensor_rij_rik = tensor_rij_rik[:,tf.newaxis,:] * lambda2[tf.newaxis,:,tf.newaxis] / 3.0
+            #tl = tf.ones_like(tensor_rij_rik) - tf.eye(3)
+            #tensor_rij_rik = tf.reduce_sum(tensor_rij_rik * tl, axis=(-2,-1)) #natxNeighxNeigh
+            #tensor_rij_rik = tf.reshape(tensor_rij_rik, [nat,-1])
+            #tensor_rij_rik = tensor_rij_rik[:,tf.newaxis,:] * lambda2[tf.newaxis,:,tf.newaxis] / 3.0
+            tensor_rij_rik_Fnorm = tf.reshape(tensor_rij_rik_Fnorm, [nat,-1])
+            tensor_rij_rik_Fnorm = tensor_rij_rik_Fnorm[:,tf.newaxis,:] * lambda2[tf.newaxis,:,tf.newaxis] / 3.0
+
+            tensors_contrib = tensor_rij_rij_Fnorm + tensor_rij_rik_Fnorm
 
         
             
@@ -423,7 +444,7 @@ class mBP_model(tf.keras.Model):
 #            cos_theta_ijk_theta_s += (tensor_rij_rij + tensor_rij_rik)
 
             cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta[tf.newaxis,:,tf.newaxis]
-            cos_theta_ijk_theta_s_zeta += tensor_rij_rij + tensor_rij_rik
+            #cos_theta_ijk_theta_s_zeta += tensor_rij_rij + tensor_rij_rik
 
             #(rij + rik) / 2
             #dim : nat,neigh,neigh
@@ -436,13 +457,15 @@ class mBP_model(tf.keras.Model):
             exp_ang_term = self.tf_app_gaussian(rij_p_rik_rs)
             
             exp_ang_theta_ijk = cos_theta_ijk_theta_s_zeta[:,tf.newaxis,:,:] * exp_ang_term[:,:,tf.newaxis,:]
-            
             exp_ang_theta_ijk = tf.reshape(exp_ang_theta_ijk, [nat,thetasN*Ngauss_ang,-1])
+            
+            exp_ang_tensor_ijk = tensors_contrib[:,tf.newaxis,:,:] * exp_ang_term[:,:,tf.newaxis,:]
+            exp_ang_tensor_ijk = tf.reshape(exp_ang_tensor_ijk, [nat,thetasN*Ngauss_ang,-1])
+
             #nat x Nneigh x Nneigh
             fc_rij_rik = self.tf_fcut(all_rij_norm, rc_ang)[:,tf.newaxis,:] * self.tf_fcut(all_rij_norm, rc_ang)[:,:,tf.newaxis]
             #fc_rij_rik = tf.gather_nd(fc_rij_rik_all, cond)
             #fc_rij_rik = tf.reshape(tf.RaggedTensor.from_value_rowids(fc_rij_rik, cond[:,0]).to_tensor(), [nat,-1])
-   #         tf.debugging.check_numerics(fc_rij_rik, message='cutoff contains NaN')
             
             #convert species_encoder from Nneig=nat*n_replicas to nat,Nneig x Nneig to have i,j,k
             species_encoder_jk = species_encoder[:,tf.newaxis,:] * species_encoder[:,:,tf.newaxis]
@@ -451,14 +474,13 @@ class mBP_model(tf.keras.Model):
             spec_encoder_fcjk = species_encoder_jk * fc_rij_rik
             #nat x Neigh**2
             spec_encoder_fcjk = tf.reshape(spec_encoder_fcjk, [nat, -1])
-    #        tf.debugging.check_numerics(spec_encoder_fcjk, message='cutoff and spec contains NaN')
             _descriptor_ang = spec_encoder_fcjk[:,tf.newaxis,:] * exp_ang_theta_ijk
-     #       tf.debugging.check_numerics(_descriptor_ang, message='Before the sum angular descriptors contains NaN')
             descriptor_ang = tf.reduce_sum(_descriptor_ang, axis=-1)
-            tf.debugging.check_numerics(descriptor_ang, message='After the sum angular descriptors contains NaN')
 
+            _descriptor_tensor = spec_encoder_fcjk[:,tf.newaxis,:] * exp_ang_tensor_ijk
+            descriptor_tensor = tf.reduce_sum(_descriptor_tensor, axis=-1)
 
-            atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang], axis=1)
+            atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang, descriptor_tensor], axis=1)
             
             #feature_size = Ngauss + Ngauss_ang * thetasN
             #the descriptors can be scaled
