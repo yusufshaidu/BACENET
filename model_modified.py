@@ -82,7 +82,13 @@ class mBP_model(tf.keras.Model):
                 nelement=118,
                 train_writer=None,
                 l1=0.0,l2=0.0,
-                nspec_embedding=64):
+                nspec_embedding=64,
+                train_zeta=False,
+                include_vdw=False,
+                rmin_u=3.0,
+                rmax_u=5.0,
+                rmin_d=11.0,
+                rmax_d=12.0):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -107,9 +113,14 @@ class mBP_model(tf.keras.Model):
         self.nspecies = len(self.species_identity)
         self.train_writer = train_writer
         self.nspec_embedding = nspec_embedding
-
+        self.train_zeta = train_zeta
         self.l1 = l1
         self.l2 = l2
+        self.include_vdw = include_vdw
+        self.rmin_u = rmin_u
+        self.rmax_u = rmax_u
+        self.rmin_d = rmin_d
+        self.rmax_d = rmax_d
         
         # Layer is currectly noyt compactible with modelcheckpoints call back
         #self.width_nets = Linear(trainable=self._width_trainable)
@@ -140,23 +151,46 @@ class mBP_model(tf.keras.Model):
                                       bias_initializer='ones',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint,prefix='ang_width')
-            
-            self.zeta_nets = Networks(self.thetaN, [64, self.thetaN], ['sigmoid','softplus'],
+            if self.train_zeta:
+                self.zeta_nets = Networks(self.thetaN, [64, self.thetaN], ['sigmoid','softplus'],
                                       weight_initializer='ones',
                                       bias_initializer='ones',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint, prefix='zeta')
-        self.lambda1_nets = Networks(self.thetaN, [64,self.thetaN], ['tanh','tanh'],
-                                      weight_initializer='random_normal',
-                                      bias_initializer='random_normal',
-                                      kernel_constraint=constraint,
-                                      bias_constraint=constraint, prefix='lambda1_ijik')
+#        self.lambda1_nets = Networks(self.thetaN, [64,self.thetaN], ['tanh','tanh'],
+#                                      weight_initializer='random_normal',
+#                                      bias_initializer='random_normal',
+#                                      kernel_constraint=constraint,
+#                                      bias_constraint=constraint, prefix='lambda1_ijik')
 #        self.lambda2_nets = Networks(self.thetaN, [64,self.thetaN], ['tanh','tanh'],
 #                                      weight_initializer='random_normal',
 #                                      bias_initializer='random_normal',
 #                                      kernel_constraint=constraint,
 #                                      bias_constraint=constraint, prefix='lambda2_ijik')
 
+    def switch(self, r, rmin,rmax):
+        x = (r-rmin)/(rmax-rmin)
+        res  = tf.zeros(tf.shape(x))
+        res = tf.where(x<=0., 1.0, -6.0*x**5+15.0*x**4-10.0*x**3+1.0)
+        res = tf.where(x>1.0, 0.0, res)
+        return res
+
+    def vdw_contribution(self,x):
+        rmin_u = self.rmin_u
+        rmax_u = self.rmax_u
+        rmin_d = self.rmin_d
+        rmax_d = self.rmax_d
+        rij_norm = x[0]
+        C6ij = x[1]
+
+        rij_norm_inv6  = 1.0 / (rij_norm**6 + 1e-8)
+        #rij_norm_inv2 = rij_norm_inv * rij_norm_inv
+        #rij_norm_inv6 = rij_norm_inv2 * rij_norm_inv2 * rij_norm_inv2
+
+        energy = -(1 - self.switch(rij_norm, rmin_u, rmax_u)) * self.switch(rij_norm,rmin_d, rmax_d) * rij_norm_inv6
+        energy = energy * C6ij
+        energy = 0.5 * tf.reduce_sum(energy)
+        return [energy]
 
     @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                                  tf.TensorSpec(shape=(), dtype=tf.float32)])
@@ -178,6 +212,7 @@ class mBP_model(tf.keras.Model):
         args16 = args8 * args8
         args32 = args16 * args16
         return args32 * args32
+
 
     @tf.function(
                 input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
@@ -219,7 +254,10 @@ class mBP_model(tf.keras.Model):
         
         cell = tf.cast(x[12], tf.float32)
         replica_idx = tf.cast(x[13], tf.float32)
-        lambda1 = tf.cast(x[14], tf.float32)
+        evdw = 0.0
+        if self.include_vdw:
+            C6 = tf.cast(x[14], tf.float32)
+        #lambda1 = tf.cast(x[14], tf.float32)
 
         
         
@@ -232,12 +270,11 @@ class mBP_model(tf.keras.Model):
 
         #Vectors = tf.zeros((nat, Ngauss), dtype=tf.float32)
         Rs = r0 + tf.range(Ngauss, dtype=tf.float32) * (rc-r0)/tf.cast(Ngauss, dtype=tf.float32)
-        eps = tf.constant(1e-3, dtype=tf.float32)
+        #eps = tf.constant(1e-3, dtype=tf.float32)
 #        norm_ang = 1.0 + tf.sqrt(1.0 + eps)
         #adding the new tensor product increases the maximum
         # I am not sure what the appropriate normalization would be at the moment.
 
-        norm_ang = 3.0
 
         tf_pi = tf.constant(math.pi, dtype=tf.float32)
 
@@ -285,8 +322,11 @@ class mBP_model(tf.keras.Model):
                 species_encoder0 = tf.identity(species_encoder)
 
                 species_encoder = tf.reshape(tf.tile([species_encoder], [1, n_replicas]), [nat*n_replicas])
+                if self.include_vdw:
+                    C6_extended = tf.reshape(tf.tile([C6], [1, n_replicas]), [nat*n_replicas])
             else:
                 positions_extended = tf.identity(positions)
+                C6_extended = tf.identity(C6)
             #positions_extended has nat x nreplica x 3 for periodic systems and nat x 1 x 3 for molecules
             
             #currectly use all neighbors to compute the radial part of the descriptors
@@ -294,33 +334,38 @@ class mBP_model(tf.keras.Model):
             #Nneigh x nat x 3
             all_rij = positions - positions_extended[:, tf.newaxis, :]
             all_rij = tf.transpose(all_rij, [1,0,2])
+            
             #all_rij_norm = tf.linalg.norm(all_rij, axis=-1)
             #nat, Nneigh: Nneigh = nat * n_replicas
             #regularize the norm to avoid divition by zero in the derivatives
             all_rij_norm = tf.sqrt(tf.reduce_sum(all_rij * all_rij, axis=-1) + 1e-12)
             
-            #inball_rad = tf.where(tf.logical_and(all_rij_norm <=rc, all_rij_norm>1e-8))
+            inball_rad = tf.where(tf.logical_and(all_rij_norm <=rc, all_rij_norm>1e-8))
             
-            #all_rij_norm = tf.gather_nd(all_rij_norm, inball_rad)
+            all_rij_norm = tf.gather_nd(all_rij_norm, inball_rad)
             #produces as list of tensors with different shapes because atoms have different number of neighbors
-            #all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, inball_rad[:,0])
+            all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, inball_rad[:,0]).to_tensor(default_value=1e-8)
             
-            #all_rij = tf.gather_nd(all_rij, inball_rad)
+            all_rij = tf.gather_nd(all_rij, inball_rad)
             #produces as list of tensors with different shapes because atoms have different number of neighbors
-            #all_rij= tf.RaggedTensor.from_value_rowids(all_rij, inball_rad[:,0])
+            all_rij = tf.RaggedTensor.from_value_rowids(all_rij, inball_rad[:,0]).to_tensor(default_value=1e-8)
             
-            #species_encoder = tf.gather_nd(tf.tile([species_encoder],[1,nat], inball_rad)
-            
-            #print(all_rij.to_tensor())
-            
-            #all_rij_norm = tf.where(all_rij_norm <= rc, all_rij_norm, tf.zeros((nat,nat)))
-            #all_rij_norm += 1e-10
-            #all_rij = tf.where(tf.tile(all_rij_norm[:,:,tf.newaxis],[1,1,3]) <= rc, all_rij, tf.zeros((nat,nat,3)))
-            #all_rij += 1e-10
+            species_encoder_rad = tf.tile([species_encoder], [nat, 1])
 
-            #all_rij = tf.gather_ng(all_rij, idx_in_ball)
-            #all_rij_norm = tf.gather_ng(all_rij_norm, idx_in_ball)
+            species_encoder_rad = tf.gather_nd(species_encoder_rad, inball_rad)
+            species_encoder_rad = tf.RaggedTensor.from_value_rowids(species_encoder_rad, inball_rad[:,0]).to_tensor()
 
+            if self.include_vdw:
+                #nat x Nneigh from C6_extended in 1xNeigh and C6 in nat
+                C6ij = tf.sqrt(C6_extended * C6[:, tf.newaxis])
+                C6ij = tf.gather_nd(C6ij, inball_rad)
+                C6ij = tf.RaggedTensor.from_value_rowids(C6ij, inball_rad[:,0]).to_tensor()
+                #the dimensions needs to be checked!!!!!!!!!
+                #C6ij = tf.sqrt((C6[:, tf.newaxis] * C6[tf.newaxis, :]))
+                evdw = self.vdw_contribution((all_rij_norm, C6ij))[0]
+    #            tf.debugging.check_numerics(evdw, message='Total_energy_vdw contains NaN')
+
+            
             #nat x Ngauss x Nneigh
             gauss_args = width[tf.newaxis,:,tf.newaxis] * (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2
             #gauss_args = tf.einsum('j, ijk->ijk', width, (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2)
@@ -329,10 +374,11 @@ class mBP_model(tf.keras.Model):
             #since fcut =0 for rij > rc, there is no need for any special treatment
             #species_encoder Nneigh and reshaped to 1 x 1 x Nneigh
             #fcuts is nat x Nneigh and reshaped to nat x 1 x Nneigh
-            args = species_encoder[tf.newaxis,tf.newaxis,:] * self.tf_app_gaussian(gauss_args) * self.tf_fcut(all_rij_norm, rc)[:,tf.newaxis,:]
+            args = species_encoder_rad[:,tf.newaxis,:] * self.tf_app_gaussian(gauss_args) * self.tf_fcut(all_rij_norm, rc)[:,tf.newaxis,:]
             
             # sum over neighbors j including periodic boundary conditions
             atomic_descriptors = tf.reduce_sum(args, axis=-1)
+
 
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik
@@ -360,60 +406,12 @@ class mBP_model(tf.keras.Model):
             #number of neighbors:
             _Nneigh = tf.shape(all_rij)
             Nneigh = _Nneigh[1]
-
+            
             rij_unit = all_rij * all_rij_norm_inv[:,:,tf.newaxis]
             #nat x Neigh X Nneigh
             #cos_theta_ijk = tf.matmul(rij_unit, tf.transpose(rij_unit, (0,2,1)))
             #rij.rik
             cos_theta_ijk = tf.einsum('ijk, ilk -> ijl', rij_unit, rij_unit) 
-
-            #tensorprod(rij, rij)
-            #tensor_rij_rij = tf.einsum('ijk, ijl -> ijkl',rij_unit, rij_unit)
-            #compute the Frobinus norm of the tensors
-            #tensor_rij_rij_Fnorm = tf.einsum('ijkl, ijlm -> ijkm',tensor_rij_rij, tf.transpose(tensor_rij_rij, (0,1,3,2)))
-            #tf trace apply trace on the last two dimensions. This would be control by axis1 and axis2 in numpy
-            # nat x neigh x neigh
-            #tensor_rij_rij_Fnorm = tf.sqrt(tf.linalg.trace(tensor_rij_rij_Fnorm) + 1e-12)
-            #tensor_rij_rij_Fnorm = tf.tile(tensor_rij_rij_Fnorm[:,:,tf.newaxis], [1,1,Nneigh])
-            #tensor_rij_rij_Fnorm = tf.reshape(tensor_rij_rij_Fnorm, [nat,-1])
-            #tensor_rij_rij_Fnorm = tensor_rij_rij_Fnorm[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis] / 3.0
-
-
-            
-            #remove diagonal elements from the tensor product: we create ones of same shape as tensor and set the innermost diagonal to zero
-            #then sum over the tensor elements. If we want to keep the diagonal, we could jus do 
-            #tensor_rij_rij = tf.einsum('ijk,ijl->ij',rij_unit, rij_unit)
-            #tl = tf.ones_like(tensor_rij_rij)-tf.eye(3)
-            #tensor_rij_rij = tf.reduce_sum(tensor_rij_rij * tl, axis=(-2,-1)) #natxNeigh
-            #tile to have same dimension as costheta
-            #tensor_rij_rij = tf.tile(tensor_rij_rij[:,:,tf.newaxis], [1,1,Nneigh])
-            #tensor_rij_rij = tf.reshape(tensor_rij_rij, [nat,-1])
-            ##multiply by the learnable parameter lambda1
-            #tensor_rij_rij = tensor_rij_rij[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis] / 3.0
-
-            #tensorprod(rij, rik)
-            tensor_rij_rik = tf.einsum('ijk, ilm -> ijlkm',rij_unit, rij_unit)
-            #X = tensorprod(rij, rik)
-            #S = (X + X.T) / 2 - 1/3 trace(X) Id
-
-            S = tensor_rij_rik + tf.transpose(tensor_rij_rik, (0,1,2,4,3))
-
-            S /= 2.0
-            #trace(X) = cos_theta_ijk
-            #to compute trace(X) * Id, we need to first tile cos_theta_ijk to have (nat,neigh,neigh,3,3) dimensions
-            #then the diagonal in the last 2 directions that are 3x3. We achieve this by multiply tf.eye(3)
-            trace_X = tf.tile(cos_theta_ijk[:,:,:,tf.newaxis,tf.newaxis], [1,1,1,3,3])
-
-            S -= trace_X * tf.eye(3) / 3.0
-
-            #compute the Frobinius norm of the tensors
-            S_Fnorm = tf.einsum('ijklm, ijkmn -> ijkln',S, tf.transpose(S, (0,1,2,4,3)))
-            #tf trace apply trace on the last two dimensions. This would be control by axis1 and axis2 in numpy 
-            # dimension = nat x neigh x neigh
-            tensors_contrib = tf.sqrt(tf.linalg.trace(S_Fnorm) + 1e-12)
-            tensors_contrib = tf.reshape(tensors_contrib, [nat,-1])
-            tensors_contrib  = tensors_contrib[:,tf.newaxis,:] * lambda1[tf.newaxis,:,tf.newaxis]
-
 
             #do we need to remove the case of j=k?
             #i==j or i==k already contribute 0 because of 1/2**zeta or  constant
@@ -442,8 +440,9 @@ class mBP_model(tf.keras.Model):
             cos_theta_ijk_theta_s = cos_theta_ijk[:,tf.newaxis,:] * cos_theta_s[tf.newaxis,:,tf.newaxis] 
             cos_theta_ijk_theta_s += (sin_theta_ijk[:,tf.newaxis,:] * sin_theta_s[tf.newaxis,:,tf.newaxis])
             cos_theta_ijk_theta_s += 1.0
-            cos_theta_ijk_theta_s += tensors_contrib
-
+            #cos_theta_ijk_theta_s += tensors_contrib
+            
+            norm_ang = 2.0 #+ tf.sqrt(2.0/3.0)
             cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta[tf.newaxis,:,tf.newaxis]
 
             #(rij + rik) / 2
@@ -467,7 +466,7 @@ class mBP_model(tf.keras.Model):
             #fc_rij_rik = tf.gather_nd(fc_rij_rik_all, cond)
             #fc_rij_rik = tf.reshape(tf.RaggedTensor.from_value_rowids(fc_rij_rik, cond[:,0]).to_tensor(), [nat,-1])
             
-            #convert species_encoder from Nneig=nat*n_replicas to nat,Nneig x Nneig to have i,j,k
+            #convert species_encoder from nat,Nneig=nat*n_replicas to nat,Nneig x Nneig to have i,j,k
             species_encoder_jk = species_encoder[:,tf.newaxis,:] * species_encoder[:,:,tf.newaxis]
 
             #collect all terms
@@ -493,6 +492,8 @@ class mBP_model(tf.keras.Model):
 
             atomic_energies = self.atomic_nets(atomic_descriptors)
             total_energy = tf.reduce_sum(atomic_energies)
+            total_energy += evdw
+
            # print(total_energy)
        # print(positions, positions)   
         forces = g.gradient(total_energy, positions)
@@ -504,7 +505,6 @@ class mBP_model(tf.keras.Model):
         forces = tf.concat([forces, padding], 0)
         #forces = tf.zeros((nmax_diff+nat,3))   
         return [tf.cast(total_energy, tf.float32), -tf.cast(forces, tf.float32)]
-    
     def call(self, inputs, training=False):
         '''inpu has a shape of batch_size x nmax_atoms x feature_size'''
         # may be just call the energy prediction here which will be needed in the train and test steps
@@ -520,16 +520,24 @@ class mBP_model(tf.keras.Model):
         batch_thetaN = tf.tile([self.thetaN], [batch_size])
 
         if self._params_trainable:
-            inputs_width = tf.ones(self.RsN_rad) * self._width
+            #inputs_width = tf.ones(self.RsN_rad) * self._width
+            #exponentially samples gaussian width
+            m = tf.range(1,self.RsN_rad+1, dtype=tf.float32)
+            N = tf.cast(self.RsN_rad, tf.float32)
+            inputs_width = (N**(m/N) / self.rcut)**2
             self.width_value = tf.reshape(self.width_nets(inputs_width[tf.newaxis, :]), [-1])
-            #self.width_value += self._width
 
-            inputs_width_ang = tf.ones(self.RsN_ang) * self.width_ang
+            m = tf.range(1,self.RsN_ang+1, dtype=tf.float32)
+            N = tf.cast(self.RsN_ang, tf.float32)
+            inputs_width_ang = (N**(m/N) / self.rcut_ang)**2
+            #inputs_width_ang = tf.ones(self.RsN_ang) * self.width_ang
             self.width_value_ang = tf.reshape(self.width_nets_ang(inputs_width_ang[tf.newaxis, :]), [-1])
             #self.width_value_ang += self.width_ang
-
-            inputs_zeta = tf.ones(self.thetaN) * self.zeta
-            self.zeta_value = tf.reshape(self.zeta_nets(inputs_zeta[tf.newaxis, :]), [-1])
+            if self.train_zeta:
+                inputs_zeta = tf.ones(self.thetaN) * self.zeta
+                self.zeta_value = tf.reshape(self.zeta_nets(inputs_zeta[tf.newaxis, :]), [-1])
+            else:
+                self.zeta_value = tf.ones(self.thetaN) * self.zeta
             #self.zeta_value += self.zeta
         else:
             self.width_value = tf.ones(self.RsN_ang) * self.width_ang
@@ -540,9 +548,9 @@ class mBP_model(tf.keras.Model):
         batch_width_ang = tf.tile([self.width_value_ang], [batch_size,1])
         batch_zeta = tf.tile([self.zeta_value], [batch_size,1])
 
-        lambda_init = tf.ones(self.thetaN)[tf.newaxis,:]
-        lambda1 = tf.reshape(self.lambda1_nets(lambda_init), [-1])
-        batch_lambda1 = tf.tile([lambda1], [batch_size,1])
+        #lambda_init = tf.ones(self.thetaN)[tf.newaxis,:]
+        #self.lambda1 = tf.reshape(self.lambda1_nets(lambda_init), [-1])
+        #batch_lambda1 = tf.tile([self.lambda1], [batch_size,1])
 
 #        lambda2 = tf.reshape(self.lambda2_nets(lambda_init), [-1])
 #        batch_lambda2 = tf.tile([lambda2], [batch_size,1])
@@ -580,11 +588,12 @@ class mBP_model(tf.keras.Model):
 
         cells = inputs[3]
         replica_idx = inputs[4]
+        C6 = inputs[5]
 
         elements = (rcuts, batch_RsN_rad, batch_species_encoder, batch_width,
                 positions, nmax_diff, batch_nats,
                 batch_zeta, rcuts_ang, batch_RsN_ang,
-                batch_thetaN, batch_width_ang, cells, replica_idx, batch_lambda1)
+                batch_thetaN, batch_width_ang, cells, replica_idx, C6)
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32])
         return energies, forces
@@ -623,8 +632,8 @@ class mBP_model(tf.keras.Model):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
         inputs_target = data
-        inputs = inputs_target[:5]
-        target = inputs_target[5]
+        inputs = inputs_target[:6]
+        target = inputs_target[6]
 
         #in_shape = inputs[0].shape
 
@@ -634,7 +643,7 @@ class mBP_model(tf.keras.Model):
         batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
 
-        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1, 3*nmax])
+        target_f = tf.reshape(inputs_target[7].to_tensor(), [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
 
         with tf.GradientTape() as tape:
@@ -714,6 +723,7 @@ class mBP_model(tf.keras.Model):
             tf.summary.histogram('3. Parameters/1. width',self.width_value,self._train_counter)
             tf.summary.histogram('3. Parameters/2. width_ang',self.width_value_ang,self._train_counter)
             tf.summary.histogram('3. Parameters/3. zeta',self.zeta_value,self._train_counter)
+#            tf.summary.histogram('3. Parameters/4. lambda',self.lambda1,self._train_counter)
 
         #self.metrics.update(metrics)
 
@@ -732,8 +742,8 @@ class mBP_model(tf.keras.Model):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
         inputs_target = data
-        inputs = inputs_target[:5]
-        target = inputs_target[5]
+        inputs = inputs_target[:6]
+        target = inputs_target[6]
 
         #in_shape = inputs[0].shape
         e_pred, forces = self(inputs, training=True)  # Forward pass
@@ -745,7 +755,7 @@ class mBP_model(tf.keras.Model):
 
         forces = tf.reshape(forces, [-1, nmax*3])
 
-        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1, 3*nmax])
+        target_f = tf.reshape(inputs_target[7].to_tensor(), [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
 
         ediff = (e_pred - target)
@@ -786,8 +796,8 @@ class mBP_model(tf.keras.Model):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
         inputs_target = data
-        inputs = inputs_target[:5]
-        target = inputs_target[5]
+        inputs = inputs_target[:6]
+        target = inputs_target[6]
                 #in_shape = inputs[0].shape
         e_pred, forces = self(inputs, training=False)  # Forward pass
 
@@ -796,7 +806,7 @@ class mBP_model(tf.keras.Model):
 
         forces = tf.reshape(forces, [-1, nmax*3])
 
-        target_f = tf.reshape(inputs_target[6].to_tensor(), [-1, 3*nmax])
+        target_f = tf.reshape(inputs_target[7].to_tensor(), [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
 
         ediff = (e_pred - target)

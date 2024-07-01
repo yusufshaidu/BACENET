@@ -7,11 +7,18 @@ from model_modified import mBP_model as mBP_model_v1
 
 import os, sys, yaml,argparse
 import numpy as np
+import train
 
-def create_model(config_file):
+def create_model(configs):
 
     #Read in model parameters
     #I am parsing yaml files with all the parameters
+
+    _configs = train.default_config()
+    for key in _configs:
+        if key not in configs.keys():
+            configs[key] = _configs[key]
+
     #
     layer_sizes = configs['layer_sizes']
     zeta = configs['zeta']
@@ -21,10 +28,7 @@ def create_model(config_file):
     rc_rad = configs['rc_rad']
     rc_ang = configs['rc_ang']
     nelement = configs['nelement']
-    try:
-        epoch = configs['epoch']
-    except:
-        epoch = -1
+    epoch = configs['epoch']
     #estimate initial parameters
     width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
     width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
@@ -52,10 +56,16 @@ def create_model(config_file):
     energy_key = configs['energy_key']
     force_key = configs['force_key']
     test_fraction = configs['test_fraction']
-    try:
-        atomic_energy = configs['atomic_energy']
-    except:
-        atomic_energy = []
+    atomic_energy = configs['atomic_energy']
+    train_zeta = configs['train_zeta']
+    include_vdw = configs['include_vdw']
+    rmin_u = configs['rmin_u']
+    rmax_u = configs['rmax_u']
+    rmin_d = configs['rmin_d']
+    rmax_d = configs['rmax_d']
+
+    rc = np.max([rc_rad,rc_ang,rmax_d])
+
     model_call = mBP_model
     print('model_version' in list(configs.keys()))
     if 'model_version' in list(configs.keys()):
@@ -63,13 +73,11 @@ def create_model(config_file):
         if model_v == 'v1':
             model_call = mBP_model_v1
 
-    try:
-        nspec_embedding = configs['nspec_embedding']
-    except:
-        nspec_embedding = 64
+    nspec_embedding = configs['nspec_embedding']
+
     train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
                      energy_key, force_key,
-                     rc_rad, rc_ang, pbc, batch_size,
+                     rc, pbc, batch_size,
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy)
 
@@ -82,7 +90,11 @@ def create_model(config_file):
                       params_trainable=True,
                       pbc=pbc,
                       nelement=nelement,
-                      nspec_embedding=nspec_embedding)
+                      train_zeta=train_zeta,
+                      nspec_embedding=nspec_embedding,
+                      include_vdw=include_vdw,
+                      rmin_u=rmin_u,rmax_u=rmax_u,
+                      rmin_d=rmin_d,rmax_d=rmax_d)
     
     #load the last check points
     

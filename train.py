@@ -12,12 +12,60 @@ from data_processing import data_preparation
 from model import mBP_model
 from model_modified import mBP_model as mBP_model_v1
 
-def create_model(config_file):
+def default_config():
+    configs = {}
+    configs['layer_sizes'] = None
+    configs['nelement'] = 118
+    configs['save_freq'] = 'epoch'
+    configs['zeta'] =  50
+    configs['thetaN'] = None
+    configs['RsN_rad'] = None
+    configs['RsN_ang'] = None
+    configs['rc_rad'] = None
+    configs['rc_ang'] = None
+    configs['fcost'] = None
+    #trainable linear model
+    configs['params_trainable'] = False
+    configs['pbc'] = True
+    configs['initial_lr'] = 0.001
+    configs['model_version'] = 'v1'
+    #this is the global step
+    configs['decay_step'] = None
+    configs['decay_rate'] = None
+    #activations are basically sigmoid and linear for now
+    configs['species'] = None
+    configs['batch_size'] = 4
+    configs['outdir'] = './train'
+    configs['num_epochs'] = 10000000
+    configs['data_dir'] = 'jsons'
+    configs['data_format'] = 'panna_json'
+    configs['energy_key'] = 'energy'
+    configs['force_key'] = 'forces'
+    configs['test_fraction'] = 0.1
+    configs['nspec_embedding'] = 64
+    
+    configs['l1_norm'] = 0.0
+    configs['l2_norm'] = 0.0
+    configs['train_zeta'] = True
+    configs['include_vdw'] = False
+    configs['atomic_energy'] = []
+    configs['rmin_u'] = 3.0
+    configs['rmax_u'] = 5.0
+    configs['rmin_d'] = 10.0
+    configs['rmax_d'] = 12.0
+    return configs
+
+def create_model(configs):
 
 
     #Read in model parameters
     #I am parsing yaml files with all the parameters
     #
+    _configs = default_config()
+    
+    for key in _configs:
+        if key not in configs.keys():
+            configs[key] = _configs[key]
     layer_sizes = configs['layer_sizes']
     nelement = configs['nelement']
     save_freq = configs['save_freq']
@@ -61,21 +109,22 @@ def create_model(config_file):
     energy_key = configs['energy_key']
     force_key = configs['force_key']
     test_fraction = configs['test_fraction']
-    try:
-        l1_norm = configs['l1_norm']
-        l2_norm = configs['l2_norm']
-    except:
-        l1_norm = 0.0
-        l2_norm = 0.0
+    l1_norm = configs['l1_norm']
+    l2_norm = configs['l2_norm']
+    l1_norm = 0.0
+    l2_norm = 0.0
 
-    try:
-        atomic_energy = configs['atomic_energy']
-    except:
-        atomic_energy = []
-    
+    train_zeta = configs['train_zeta']
+    atomic_energy = configs['atomic_energy']
+    include_vdw = configs['include_vdw']
+    rmin_u = configs['rmin_u']
+    rmax_u = configs['rmax_u']
+    rmin_d = configs['rmin_d']
+    rmax_d = configs['rmax_d']
+    rc = np.max([rc_rad,rc_ang,rmax_d])
     train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
                      energy_key, force_key,
-                     rc_rad, rc_ang, pbc, batch_size,
+                     rc, pbc, batch_size,
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy)
     
@@ -91,7 +140,11 @@ def create_model(config_file):
                       pbc=pbc,
                       nelement=nelement,
                       train_writer=train_writer,
-                       l1=l1_norm,l2=l2_norm)
+                      train_zeta=train_zeta,
+                      l1=l1_norm,l2=l2_norm,
+                      include_vdw=include_vdw,
+                      rmin_u=rmin_u,rmax_u=rmax_u,
+                      rmin_d=rmin_d,rmax_d=rmax_d)
 
     initial_learning_rate = initial_lr
 

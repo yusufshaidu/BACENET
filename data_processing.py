@@ -21,7 +21,7 @@ except:
     from .pbc import replicas_max_idx
 
 
-def convert_json2ASE_atoms(atomic_energy, file):
+def convert_json2ASE_atoms(atomic_energy, file, C6_spec):
     Ry2eV = 13.6057039763
     data = json.load(open(file))
     try:
@@ -46,6 +46,9 @@ def convert_json2ASE_atoms(atomic_energy, file):
     forces = np.asarray(forces).astype(float)
 #    encoder = all_species_encoder
     _spec_encoder = np.asarray([atomic_number(ss) for ss in symbols])
+
+
+    C6 = np.asarray([C6_spec[ss] for ss in symbols])
 
     unitL = data['unit_of_length']
 
@@ -78,6 +81,7 @@ def convert_json2ASE_atoms(atomic_energy, file):
 
     atoms.new_array('forces', forces)
     atoms.new_array('encoder',_spec_encoder)
+    atoms.new_array('C6',C6)
     atoms.info = {'energy':energy-E0}
 
     return atoms
@@ -121,11 +125,11 @@ def input_function(x, shuffle=True, batch_size=32): # inner function that will b
 
 def data_preparation(data_dir, species, data_format, 
                      energy_key, force_key,
-                     rc_rad, rc_ang, pbc, batch_size, 
+                     rc, pbc, batch_size, 
                      test_fraction=0.1,
                      atomic_energy=[]):
     
-    rc = np.max([rc_rad, rc_ang])
+#    rc = np.max([rc_rad, rc_ang])
 
     if data_format == 'panna_json':
         files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.split('.')[-1]=='example']
@@ -149,6 +153,7 @@ def data_preparation(data_dir, species, data_format,
     all_natoms = []
     cells = []
     replica_idx = []
+    all_C6 = []
     #  atoms = convert_json2ASE_atoms(files[0],species)
     #  e0 = atoms.info['energy'] / len(atoms.positions)
     #  print(e0)
@@ -157,6 +162,9 @@ def data_preparation(data_dir, species, data_format,
     #_spec_encoder = species_encoder()
     
     species_identity = [atomic_number(s) for s in species]
+    # C6 are in Ha * au^6
+    to_eV = 27.211324570273 * 0.529177**6
+    C6_spec = {ss:element(ss).c6_gb * to_eV for ss in species}
 
     #partial_convert = convert_json2ASE_atoms(all_species_encoder,atomic_energy)
     #number of precesses
@@ -166,12 +174,17 @@ def data_preparation(data_dir, species, data_format,
     #this should be parellize at some point   
     for file in files:
         if data_format == 'panna_json':
-            atoms = convert_json2ASE_atoms(atomic_energy,file)
+            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec)
         elif data_format == 'ase' or data_format == 'xyz' :
             atoms = file.copy()
             symbols = list(atoms.symbols)
             _encoder = np.asarray([atomic_number(ss) for ss in symbols])
             atoms.new_array('encoder', _encoder)
+            # C6 are in Ha * au^6
+            to_eV = 27.211324570273 * 0.529177**6
+            C6 = np.asarray([C6_spec[ss] for ss in symbols])
+            atoms.new_array('C6', C6)
+
 
             
     #    if atoms.info['energy'] > 30.0:
@@ -184,6 +197,7 @@ def data_preparation(data_dir, species, data_format,
 
         all_positions.append(atoms.positions)
         all_species_encoder.append(atoms.get_array('encoder'))
+        all_C6.append(atoms.get_array('C6'))
         try:
             all_forces.append(atoms.get_array('forces'))
         except:
@@ -216,16 +230,17 @@ def data_preparation(data_dir, species, data_format,
 
     all_energies_test = tf.constant(all_energies[:Ntest])
     all_energies_train = tf.constant(all_energies[Ntest:])
-
+    all_C6_test = tf.ragged.constant(all_C6[:Ntest])
+    all_C6_train = tf.ragged.constant(all_C6[Ntest:])
 
 
     train_data = input_function((all_positions_train, all_species_encoder_train,
-                                 all_natoms_train,cells_train, replica_idx_train,
+                                 all_natoms_train,cells_train, replica_idx_train, all_C6_train,
                                  all_energies_train, all_forces_train),
                                 shuffle=True, batch_size=batch_size)
 
     test_data = input_function((all_positions_test, all_species_encoder_test,
-                                all_natoms_test, cells_test,replica_idx_test,
+                                all_natoms_test, cells_test,replica_idx_test, all_C6_test,
                                 all_energies_test, all_forces_test),
                                 shuffle=True, batch_size=batch_size)
 
