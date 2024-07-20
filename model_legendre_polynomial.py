@@ -13,6 +13,8 @@ import itertools, os
 from ase.io import read, write
 from tensorflow.keras import backend as K
 from tensorflow.keras import regularizers
+import tensorflow_graphics as tfg
+import tensorflow_graphics.math.spherical_harmonics as sph
 
 def Networks(input_size, layer_sizes, 
              activations,
@@ -46,8 +48,8 @@ def Networks(input_size, layer_sizes,
         model.add(tf.keras.layers.Dense(layer_sizes[-1],
                                         kernel_initializer=weight_initializer,
                                         bias_initializer=bias_initializer,
-                                        kernel_regularizer=regularizers.L1L2(l1=l1,l2=l2),
-                                        bias_regularizer=regularizers.L1L2(l1=l1,l2=l2),
+                                        kernel_regularizer=None,
+                                        bias_regularizer=None,
                                         activity_regularizer=None,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
@@ -58,8 +60,8 @@ def Networks(input_size, layer_sizes,
         model.add(tf.keras.layers.Dense(layer_sizes[-1], activation=activations[-1],
                                         kernel_initializer=weight_initializer,
                                         bias_initializer=bias_initializer,
-                                        kernel_regularizer=regularizers.L1L2(l1=l1,l2=l2),
-                                        bias_regularizer=regularizers.L1L2(l1=l1,l2=l2),
+                                        kernel_regularizer=None,
+                                        bias_regularizer=None,
                                         activity_regularizer=None,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
@@ -78,7 +80,6 @@ class mBP_model(tf.keras.Model):
                 thetaN,width_ang,zeta,
                 params_trainable=True,
                 fcost=0.0,
-                ecost=1.0,
                 pbc=True,
                 nelement=118,
                 train_writer=None,
@@ -90,10 +91,7 @@ class mBP_model(tf.keras.Model):
                 rmax_u=5.0,
                 rmin_d=11.0,
                 rmax_d=12.0,
-                higher_order=False,
-                Nzeta=None,
-                dcenters=1.0,
-                variable_width=False):
+                lp_lmax=16):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -112,15 +110,9 @@ class mBP_model(tf.keras.Model):
         self.thetaN = thetaN
         self.zeta = float(zeta)
         self.width_ang = float(width_ang)
-        self.higher_order = higher_order
-        
         self.feature_size = self.RsN_rad + (self.RsN_ang * self.thetaN)
-        if self.higher_order:
-            self.feature_size += self.RsN_ang * self.thetaN + (self.RsN_ang * self.thetaN)**2
-
         self.pbc = pbc
         self.fcost = float(fcost)
-        self.ecost = float(ecost)
         self.nspecies = len(self.species_identity)
         self.train_writer = train_writer
         self.nspec_embedding = nspec_embedding
@@ -132,9 +124,8 @@ class mBP_model(tf.keras.Model):
         self.rmax_u = rmax_u
         self.rmin_d = rmin_d
         self.rmax_d = rmax_d
-        self.dcenters = dcenters
-        self.variable_width = variable_width
-     
+        self.lp_lmax = lp_lmax
+        
         # Layer is currectly noyt compactible with modelcheckpoints call back
         #self.width_nets = Linear(trainable=self._width_trainable)
         
@@ -145,83 +136,36 @@ class mBP_model(tf.keras.Model):
         #self.nelement  = nelement
         self.nelement = nelement
         # create a species embedding network Nembedding x Nspecies
-        self.species_nets = Networks(self.nelement, [self.nspec_embedding,1], ['sigmoid','sigmoid'], prefix='species_encoder')
+        self.species_nets = Networks(self.nelement, [self.nspec_embedding,1], ['sigmoid','linear'], prefix='species_encoder')
 
-        constraint = None
         if self._params_trainable:
             #constraint = tf.keras.constraints.MinMaxNorm(min_value=1e-2, 
             #                                             max_value=1.0, 
             #                                             rate=1.0, axis=0)
             #constraint = tf.keras.constraints.NonNeg()
-           # constraint = None
-            
-#            init = tf.keras.initializers.RandomNormal(mean=0.25, stddev=0.05)
-             
-            Nwidth_rad = 1
-            Nwidth_ang = 1
-            if self.variable_width:
-                Nwidth_rad = self.RsN_rad
-                Nwidth_ang = self.RsN_ang
-            #init = 'ones'
-            init = tf.keras.initializers.GlorotNormal(987)
+            constraint = None
 
-
-            #self.width_nets = Networks(self.RsN_rad, [64,Nwidth_rad], ['sigmoid','softplus'],
-            self.width_nets = Networks(self.RsN_rad, [Nwidth_rad], ['softplus'],
-                                      weight_initializer=init,
-                                      bias_initializer=init,
+            self.width_nets = Networks(self.RsN_rad, [64,self.RsN_rad], ['sigmoid','softplus'],
+                                      weight_initializer='ones',
+                                      bias_initializer='ones',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint, prefix='radial_width')
-            #self.width_nets_ang = Networks(self.RsN_ang, [64,Nwidth_ang], ['sigmoid','softplus'],
-            init = tf.keras.initializers.GlorotNormal(876)
-            self.width_nets_ang = Networks(self.RsN_ang, [Nwidth_ang], ['softplus'],
-                                      weight_initializer=init,
-                                      bias_initializer=init,
+            self.width_nets_ang = Networks(self.RsN_ang, [64,self.RsN_ang], ['sigmoid','softplus'],
+                                      weight_initializer='ones',
+                                      bias_initializer='ones',
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint,prefix='ang_width')
-            if self.train_zeta:
-                #init = 'ones'
-                init = tf.keras.initializers.GlorotNormal(765)
-                #self.zeta_nets = Networks(self.thetaN, [64, 1], ['sigmoid','softplus'],
-                self.zeta_nets = Networks(self.thetaN, [1], ['softplus'],
-                                      weight_initializer=init,
-                                      bias_initializer=init,
+            self.lambda1_nets = Networks(self.thetaN, [64,self.thetaN], ['tanh','linear'],
+                                      weight_initializer='random_normal',
+                                      bias_initializer='random_normal',
                                       kernel_constraint=constraint,
-                                      bias_constraint=constraint, prefix='zeta')
-#        init = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
-        constraint = None
-        if self.dcenters == 1.0:
-            init = tf.keras.initializers.GlorotNormal(seed=12345)
-            #self.Rs_rad_nets = Networks(self.RsN_rad, [64,self.RsN_rad], ['relu','relu'],
-            #self.Rs_rad_nets = Networks(self.RsN_rad, [64,self.RsN_rad], ['sigmoid','sigmoid'],
-            self.Rs_rad_nets = Networks(self.RsN_rad, [self.RsN_rad], ['sigmoid'],
-                                          weight_initializer=init,
-                                          bias_initializer=init,
-                                          kernel_constraint=constraint,
-                                          bias_constraint=constraint, prefix='Rs_rad')
-            #self.Rs_ang_nets = Networks(self.RsN_ang, [64,self.RsN_ang], ['relu','relu'],
-            init = tf.keras.initializers.GlorotNormal(seed=34567)
-            #self.Rs_ang_nets = Networks(self.RsN_ang, [64,self.RsN_ang], ['sigmoid','sigmoid'],
-            self.Rs_ang_nets = Networks(self.RsN_ang, [self.RsN_ang], ['sigmoid'],
-                                          weight_initializer=init,
-                                          bias_initializer=init,
-                                          kernel_constraint=constraint,
-                                          bias_constraint=constraint, prefix='Rs_ang')
-            init = tf.keras.initializers.GlorotNormal(seed=56789)
-            #self.thetas_nets = Networks(self.thetaN, [64,self.thetaN], ['sigmoid','sigmoid'],
-            self.thetas_nets = Networks(self.thetaN, [self.thetaN], ['sigmoid'],
-                                          weight_initializer=init,
-                                          bias_initializer=init,
-                                          kernel_constraint=constraint,
-                                          bias_constraint=constraint, prefix='thetas')
-
-        #init = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.05)
-#        init = tf.keras.initializers.GlorotNormal()
-#        self.lambda2_nets = Networks(self.thetaN, [64,self.thetaN], ['softplus','softplus'],
-#                                      weight_initializer=init,
-#                                      bias_initializer='zeros',
+                                      bias_constraint=constraint, prefix='lambda1')
+#        self.lambda2_nets = Networks(self.thetaN, [64,self.thetaN], ['tanh','tanh'],
+#                                      weight_initializer='random_normal',
+#                                      bias_initializer='random_normal',
 #                                      kernel_constraint=constraint,
-#                                      bias_constraint=constraint, prefix='lambda2')
+#                                      bias_constraint=constraint, prefix='lambda2_ijik')
+
     def switch(self, r, rmin,rmax):
         x = (r-rmin)/(rmax-rmin)
         res  = tf.zeros(tf.shape(x))
@@ -246,19 +190,33 @@ class mBP_model(tf.keras.Model):
         energy = 0.5 * tf.reduce_sum(energy)
         return [energy]
 
+    
+    @tf.function(
+                input_signature=[(
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32)
+                )])
+    def evaluate_single_LP(self,x):
+        l = x[0]
+        m = x[1]
+        y = x[2]
+        return tf.cast(sph.evaluate_legendre_polynomial([l],[m],y), tf.float32)
+
+    def tf_legendre_p(self, x, l):
+        
+        lindx = tf.range(l+1)
+        order_m = tf.range(l+1) * 0
+        X = tf.tile([x], [l+1,1])
+        p = tf.map_fn(self.evaluate_single_LP, (lindx,order_m,X), fn_output_signature=tf.float32)
+        return p
+
     @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                                  tf.TensorSpec(shape=(), dtype=tf.float32)])
     def tf_fcut(self,r,rc):
         dim = tf.shape(r)
         pi = tf.constant(math.pi, dtype=tf.float32)
-        return tf.where(tf.logical_and(r<=rc,r>1e-8), 0.5*(1.0 + tf.cos(pi*r/rc)), tf.zeros(dim, dtype=tf.float32))
-    @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                                 tf.TensorSpec(shape=(), dtype=tf.float32)])
-    def _tf_fcut(self,r,rc):
-        dim = tf.shape(r)
-        #pi = tf.constant(math.pi, dtype=tf.float32)
-        x = tf.tanh(1 - r / rc)
-        return tf.where(tf.logical_and(r<=rc,r>1e-8), x*x*x, tf.zeros(dim, dtype=tf.float32))
+        return tf.where(tf.logical_and(r<=rc,r>0), 0.5*(1.0 + tf.cos(pi*r/rc)), tf.zeros(dim, dtype=tf.float32))
     @tf.function(input_signature=[tf.TensorSpec(shape=(None,None,None), dtype=tf.float32)])
     def tf_app_gaussian(self,x):
         # we approximate gaussians with polynomials (1+alpha x^2 / p)^(-p) ~ exp(-alpha x^2); 
@@ -286,22 +244,18 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(3,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-#                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32)
                 )])
     def tf_predict_energy_forces(self,x):
 
+        #rc = tf.cast(x[0],dtype=tf.float32)
         rc = tf.cast(self.rcut,dtype=tf.float32)
         Ngauss = tf.cast(self.RsN_rad, dtype=tf.int32)
         rc_ang = tf.cast(self.rcut_ang, dtype=tf.float32)
         Ngauss_ang = tf.cast(self.RsN_ang, dtype=tf.int32)
         thetasN = tf.cast(self.thetaN, dtype=tf.int32)
 
-
+        
 
         nat = tf.cast(x[4], dtype=tf.int32)
         nmax_diff = tf.cast(x[3], dtype=tf.int32)
@@ -310,50 +264,45 @@ class mBP_model(tf.keras.Model):
         positions = tf.reshape(x[2][:nat*3], [nat,3])
         positions = tf.cast(positions, tf.float32)
 
-        #zeta cannot be a fraction
-        zeta = tf.cast(x[5], dtype=tf.float32)
-#        zeta = tf.math.round(zeta)
+        lambda1 = tf.cast(x[5], dtype=tf.float32)
         width_ang = tf.cast(x[6], dtype=tf.float32)
+
+        #positions = tf.reshape(x[4])
         
         cell = tf.cast(x[7], tf.float32)
         replica_idx = tf.cast(x[8], tf.float32)
-       # lambda1 = tf.cast(x[9], tf.float32)
-        lambda2 = tf.cast(x[9], tf.float32)
-        Rs = tf.cast(x[10], tf.float32)
-        Rs_ang = tf.cast(x[11], tf.float32)
-        theta_s = tf.cast(x[12], tf.float32)
         evdw = 0.0
-        
         if self.include_vdw:
-            C6 = tf.cast(x[13], tf.float32)
-        
+            C6 = tf.cast(x[9], tf.float32)
+        #lambda1 = tf.cast(x[14], tf.float32)
+
         
         
        # print(width) 
        # needs to be padded
         #file is a panna json for now
-        #r0 = tf.constant(0.25, dtype=tf.float32)
+        r0 = tf.constant(0.25, dtype=tf.float32)
         
         #nat = len(positions)
 
         #Vectors = tf.zeros((nat, Ngauss), dtype=tf.float32)
-        #Rs = r0 + tf.range(Ngauss, dtype=tf.float32) * (rc-r0)/tf.cast(Ngauss, dtype=tf.float32)
+        Rs = r0 + tf.range(Ngauss, dtype=tf.float32) * (rc-r0)/tf.cast(Ngauss, dtype=tf.float32)
         #eps = tf.constant(1e-3, dtype=tf.float32)
 #        norm_ang = 1.0 + tf.sqrt(1.0 + eps)
         #adding the new tensor product increases the maximum
         # I am not sure what the appropriate normalization would be at the moment.
 
 
-        #tf_pi = tf.constant(math.pi, dtype=tf.float32)
+        tf_pi = tf.constant(math.pi, dtype=tf.float32)
 
-        #Rs_ang = r0 + tf.range(Ngauss_ang, dtype=tf.float32) * (rc_ang-r0)/tf.cast(Ngauss_ang, dtype=tf.float32)
-        #theta_s = tf.range(thetasN, dtype=tf.float32) * tf_pi / tf.cast(thetasN, dtype=tf.float32)
+        Rs_ang = r0 + tf.range(Ngauss_ang, dtype=tf.float32) * (rc_ang-r0)/tf.cast(Ngauss_ang, dtype=tf.float32)
+        
+        theta_s = tf.range(thetasN, dtype=tf.float32) * tf_pi / tf.cast(thetasN, dtype=tf.float32)
 
         sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
         sin_theta_s2 = sin_theta_s * sin_theta_s
-        
-        
+
         with tf.GradientTape() as g:
             g.watch(positions)
             
@@ -439,10 +388,7 @@ class mBP_model(tf.keras.Model):
             
             
             #nat x Ngauss x Nneigh
-            if self.variable_width:
-                gauss_args = width[tf.newaxis,:,tf.newaxis] * (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2
-            else:
-                gauss_args = width * (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2
+            gauss_args = width[tf.newaxis,:,tf.newaxis] * (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2
             #mask the non-zero values after ragged tensor is converted to fixed shape
             # This is very important to avoid adding contributions from atoms outside the sphere
             #nonzero_val = tf.where(all_rij_norm > 1e-8, 1.0,0.0)
@@ -511,50 +457,51 @@ class mBP_model(tf.keras.Model):
 
             #cond = tf.where(tf.logical_and(tf.logical_and(row!=col, col!=dep), row!=dep))
             cos_theta_ijk = tf.reshape(cos_theta_ijk, [nat,-1])
-            
-            #cos_theta_ijk = tf.reshape(tf.RaggedTensor.from_value_rowids(cos_theta_ijk, cond[:,0]).to_tensor(default_value=1e-8), [nat,-1])
             reg2 = 1e-6
             cos_theta_ijk = tf.clip_by_value(cos_theta_ijk, clip_value_min=-1.0+reg2, clip_value_max=1.0-reg2)
-
             cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
-            #nat x thetasN x N_unique
-            #sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2[:,tf.newaxis,:] + eps * sin_theta_s2[tf.newaxis,:,tf.newaxis])
-            sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
-            _cos_theta_ijk_theta_s = cos_theta_ijk[:,tf.newaxis,:] * cos_theta_s[tf.newaxis,:,tf.newaxis] 
-            _sin_theta_ijk_theta_s = sin_theta_ijk[:,tf.newaxis,:] * sin_theta_s[tf.newaxis,:,tf.newaxis]
-            cos_theta_ijk_theta_s = 1.0 + _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s
-            tf.debugging.check_numerics(cos_theta_ijk_theta_s, message='cos_theta_ijk_theta_s contains NaN')
-            #cos_theta_ijk_theta_s += tensors_contrib
-            
-            norm_ang = 2.0 #+ tf.sqrt(2.0/3.0)
-            #norm_ang = tf.reduce_max(1.0 + lambda2)
-            #cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang[tf.newaxis,:,tf.newaxis])**zeta[tf.newaxis,:,tf.newaxis]
-            #cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta[tf.newaxis,:,tf.newaxis]
-            cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta
-            tf.debugging.check_numerics(cos_theta_ijk_theta_s_zeta, message='cos_theta_ijk_theta_s_zeta contains NaN')
+            sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2 - 1e-6)
+
+            _cos_theta_ijk_theta_s = cos_theta_ijk[:,:,tf.newaxis] * cos_theta_s[tf.newaxis,tf.newaxis,:]
+            _sin_theta_ijk_theta_s = sin_theta_ijk[:,:,tf.newaxis] * sin_theta_s[tf.newaxis,tf.newaxis,:]
+            cos_theta_ijk_theta_s = _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s
+            #cos_theta_ijk_theta_s = _cos_theta_ijk_theta_s
+
+
+            #compute the polinomials up to max l: currently lmax = thetasN
+            legendre_polynomials = self.tf_legendre_p(tf.reshape(cos_theta_ijk_theta_s, [-1]), self.lp_lmax)
+            legendre_polynomials = tf.reduce_sum(legendre_polynomials, axis=0) / tf.cast(self.lp_lmax+1, tf.float32)
+            #legendre_polynomials is of shape nat*Neigh*Neigh*thetasN
+            legendre_polynomials = tf.reshape(legendre_polynomials, [nat,-1,thetasN])
+
+
+            legendre_polynomials_weights = legendre_polynomials * lambda1[tf.newaxis,tf.newaxis,:] 
+            tf.debugging.check_numerics(legendre_polynomials, message='legendre_polynomials contains NaN')
+            tf.debugging.check_numerics(lambda1, message='lambda contains NaN')
+            tf.debugging.check_numerics(legendre_polynomials_weights, message='legendre_polynomials_weights contains NaN')
 
             #(rij + rik) / 2
             #dim : nat,neigh,neigh
             rij_p_rik = all_rij_norm[:,tf.newaxis,:] + all_rij_norm[:,:,tf.newaxis]
             #Nat x Nneigh**2
             rij_p_rik = tf.reshape(rij_p_rik, [nat, -1])
+            tf.debugging.check_numerics(rij_p_rik, message='rij_p_rik contains NaN')
             #Nat x Ngauss_ang * Nneigh**2
-
-            if self.variable_width:
-                rij_p_rik_rs = width_ang[tf.newaxis,:,tf.newaxis] * (rij_p_rik[:,tf.newaxis,:]/2.0  - Rs_ang[tf.newaxis,:,tf.newaxis])**2
-            else:
-                rij_p_rik_rs = width_ang * (rij_p_rik[:,tf.newaxis,:]/2.0  - Rs_ang[tf.newaxis,:,tf.newaxis])**2
+            rij_p_rik_rs = width_ang[tf.newaxis,tf.newaxis,:] * (rij_p_rik[:,:,tf.newaxis]/2.0  - Rs_ang[tf.newaxis,tf.newaxis,:])**2
+            tf.debugging.check_numerics(width_ang, message='width_ang contains NaN')
+            tf.debugging.check_numerics(rij_p_rik_rs, message='rij_p_rik_rs contains NaN')
             #mask the non-zero values after ragged tensor is converted to fixed shape
             #nonzero_val = tf.where(rij_p_rik > 1e-8, 1.0,0.0)
             #nonzero_val = tf.cast(nonzero_val, tf.float32)
-            #rij_p_rik_rs = rij_p_rik_rs * nonzero_val[:,tf.newaxis,:]
+            #rij_p_rik_rs = rij_p_rik_rs * nonzero_val[:,:,tf.newaxis]
 
 
             #compute the exponetial term
             exp_ang_term = self.tf_app_gaussian(rij_p_rik_rs)
+            tf.debugging.check_numerics(exp_ang_term, message='exp_ang_term contains NaN')
             
-            exp_ang_theta_ijk = cos_theta_ijk_theta_s_zeta[:,tf.newaxis,:,:] * exp_ang_term[:,:,tf.newaxis,:]
-            exp_ang_theta_ijk = tf.reshape(exp_ang_theta_ijk, [nat,thetasN*Ngauss_ang,-1])
+            exp_ang_theta_ijk = legendre_polynomials_weights[:,:,:,tf.newaxis] * exp_ang_term[:,:,tf.newaxis,:]
+            exp_ang_theta_ijk = tf.reshape(exp_ang_theta_ijk, [nat,-1, thetasN*Ngauss_ang])
             
             #exp_ang_tensor_ijk = tensors_contrib[:,tf.newaxis,:,:] * exp_ang_term[:,:,tf.newaxis,:]
             #exp_ang_tensor_ijk = tf.reshape(exp_ang_tensor_ijk, [nat,thetasN*Ngauss_ang,-1])
@@ -571,14 +518,17 @@ class mBP_model(tf.keras.Model):
             spec_encoder_fcjk = species_encoder_jk * fc_rij_rik
             #nat x Neigh**2
             spec_encoder_fcjk = tf.reshape(spec_encoder_fcjk, [nat, -1])
-            _descriptor_ang = spec_encoder_fcjk[:,tf.newaxis,:] * exp_ang_theta_ijk
-            descriptor_ang = tf.reduce_sum(_descriptor_ang, axis=-1)
+            _descriptor_ang = spec_encoder_fcjk[:,:,tf.newaxis] * exp_ang_theta_ijk
+            descriptor_ang = tf.reduce_sum(_descriptor_ang, axis=1)
+            tf.debugging.check_numerics(descriptor_ang, message='descriptor_ang contains NaN')
 
             #_descriptor_tensor = spec_encoder_fcjk[:,tf.newaxis,:] * exp_ang_tensor_ijk
             #descriptor_tensor = tf.reduce_sum(_descriptor_tensor, axis=-1)
 
             #atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang, descriptor_tensor], axis=1)
             atomic_descriptors = tf.concat([atomic_descriptors, descriptor_ang], axis=1)
+            tf.debugging.check_numerics(atomic_descriptors, message='atomic_descriptors contains NaN')
+            
             #feature_size = Ngauss + Ngauss_ang * thetasN
             #the descriptors can be scaled
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
@@ -619,82 +569,37 @@ class mBP_model(tf.keras.Model):
         #batch_thetaN = tf.tile([self.thetaN], [batch_size])
 
         if self._params_trainable:
-            #inputs_width = tf.ones(self.RsN_rad) * self._width
-            inputs_width = tf.ones(self.RsN_rad)
-            #inputs_width = self._width  + 0.005*tf.range(-tf.cast(self.RsN_rad/2,tf.int32), tf.cast(self.RsN_rad/2,tf.int32), dtype=tf.float32)
+            inputs_width = tf.ones(self.RsN_rad) * self._width
             #exponentially samples gaussian width
-#            m = tf.range(1,self.RsN_rad+1, dtype=tf.float32)
- #           N = tf.cast(self.RsN_rad, tf.float32)
+            #m = tf.range(1,self.RsN_rad+1, dtype=tf.float32)
+            #N = tf.cast(self.RsN_rad, tf.float32)
             #inputs_width = (N**(m/N) / self.rcut)**2
             self.width_value = tf.reshape(self.width_nets(inputs_width[tf.newaxis, :]), [-1])
-
-
 
             #m = tf.range(1,self.RsN_ang+1, dtype=tf.float32)
             #N = tf.cast(self.RsN_ang, tf.float32)
             #inputs_width_ang = (N**(m/N) / self.rcut_ang)**2
-            #inputs_width_ang = tf.ones(self.RsN_ang) * self.width_ang
-            inputs_width_ang = tf.ones(self.RsN_ang)
+            inputs_width_ang = tf.ones(self.RsN_ang) * self.width_ang
             self.width_value_ang = tf.reshape(self.width_nets_ang(inputs_width_ang[tf.newaxis, :]), [-1])
             #self.width_value_ang += self.width_ang
-            if self.train_zeta:
-                #inputs_zeta = tf.ones(self.thetaN) * self.zeta
-                inputs_zeta = tf.ones(self.thetaN)
-                #inputs_zeta = tf.range(-tf.cast(self.thetaN/2,tf.int32), tf.cast(self.thetaN/2,tf.int32), dtype=tf.float32) / self.thetaN
-
-                self.zeta_value = tf.reshape(self.zeta_nets(inputs_zeta[tf.newaxis, :]), [-1])
-            #    self.zeta_value = tf.Variable(initial_value=inputs_zeta, trainable=True)
-                #self.zeta_value = tf.cast(self.zeta_value, tf.float32)
-            else:
-                self.zeta_value = tf.ones(self.thetaN) * self.zeta
-            #self.zeta_value += self.zeta
+            _in_lambda = tf.ones(self.thetaN)
+            self.lambda1 = tf.reshape(self.lambda1_nets(_in_lambda[tf.newaxis, :]), [-1])
+            #self.lambda1 = tf.ones(self.thetaN)
         else:
             self.width_value = tf.ones(self.RsN_rad) * self._width
             self.width_value_ang = tf.ones(self.RsN_ang) * self.width_ang
-            self.zeta_value = tf.ones(self.thetaN) * self.zeta
-
-                
-        #inputs for center networks
-        tf_pi = tf.constant(math.pi, dtype=tf.float32)
-        if self.dcenters==1.0:
-            #Rs = tf.range(self.RsN_rad, dtype=tf.float32) * (self.rcut)/tf.cast(self.RsN_rad, dtype=tf.float32)
-            #Rs = (Rs - tf.reduce_mean(Rs)) / tf.reduce_std(Rs)
-            Rs = tf.ones(self.RsN_rad)
-            #Rs_ang = tf.range(self.RsN_ang, dtype=tf.float32) * (self.rcut_ang)/tf.cast(self.RsN_ang, dtype=tf.float32)
-            #Rs_ang = (Rs_ang - tf.reduce_mean(Rs_ang)) / tf.reduce_std(Rs_ang)
-            Rs_ang = tf.ones(self.RsN_ang)
-            #theta_s = tf.range(self.thetaN, dtype=tf.float32) * tf_pi / tf.cast(self.thetaN, dtype=tf.float32)
-            #theta_s = (theta_s - tf.reduce_mean(theta_s)) / tf.reduce_std(theta_s)
-            theta_s = tf.ones(self.thetaN)
-            self._Rs_rad = tf.reshape(self.Rs_rad_nets(Rs[tf.newaxis,:]), [-1]) * self.rcut
-            #self._Rs_rad = tf.Variable(initial_value=Rs, trainable=True)
-            self._Rs_ang = tf.reshape(self.Rs_ang_nets(Rs_ang[tf.newaxis,:]), [-1]) * self.rcut_ang
-            #self._Rs_ang = tf.Variable(initial_value=Rs_ang, trainable=True)
-            #theta_s_net returns a value in [0,1] but should be [0,pi]
-            self._thetas = tf.reshape(self.thetas_nets(theta_s[tf.newaxis,:]), [-1]) * tf_pi
-            #self._thetas = tf.Variable(initial_value=theta_s, trainable=True)
-        
-        else:
-            self._Rs_rad = tf.zeros(self.RsN_rad)
-            self._Rs_ang = tf.zeros(self.RsN_ang)
-            #self._thetas = tf.zeros(self.thetaN)
-            self._thetas = tf.range(self.thetaN, dtype=tf.float32) * tf_pi / tf.cast(self.thetaN, dtype=tf.float32)
+            self.lambda1 = tf.ones(self.thetaN)
 
         batch_width = tf.tile([self.width_value], [batch_size,1])
         batch_width_ang = tf.tile([self.width_value_ang], [batch_size,1])
-        batch_zeta = tf.tile([self.zeta_value], [batch_size,1])
-        batch_Rs_rad = tf.tile([self._Rs_rad], [batch_size,1])
-        batch_Rs_ang = tf.tile([self._Rs_ang], [batch_size,1])
-        batch_theta_s = tf.tile([self._thetas], [batch_size,1])
+        batch_lambda = tf.tile([self.lambda1], [batch_size,1])
 
-   #     lambda_init = tf.ones(self.thetaN)[tf.newaxis,:]
-     
+        #lambda_init = tf.ones(self.thetaN)[tf.newaxis,:]
         #self.lambda1 = tf.reshape(self.lambda1_nets(lambda_init), [-1])
         #batch_lambda1 = tf.tile([self.lambda1], [batch_size,1])
 
-        #self.lambda2 = tf.reshape(self.lambda2_nets(lambda_init), [-1])
-        self.lambda2 = tf.ones(self.thetaN)
-        batch_lambda2 = tf.tile([self.lambda2], [batch_size,1])
+#        lambda2 = tf.reshape(self.lambda2_nets(lambda_init), [-1])
+#        batch_lambda2 = tf.tile([lambda2], [batch_size,1])
 
         #positions = tf.reshape(inputs[0], (self.batch_size, -1))
         #species_encoder = tf.reshape(inputs[1], (self.batch_size, -1))
@@ -733,8 +638,7 @@ class mBP_model(tf.keras.Model):
 
         elements = (batch_species_encoder, batch_width,
                 positions, nmax_diff, batch_nats,
-                batch_zeta, batch_width_ang, cells, replica_idx,batch_lambda2,
-                batch_Rs_rad, batch_Rs_ang, batch_theta_s, C6)
+                batch_lambda, batch_width_ang, cells, replica_idx, C6)
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32])
         return energies, forces
@@ -805,7 +709,7 @@ class mBP_model(tf.keras.Model):
 
             #loss = self.compute_loss(y=target, y_pred=e_pred)
             #loss += self.fcost * self.compute_loss(y=target_f, y_pred=forces)
-            loss = self.ecost*emse_loss
+            loss = emse_loss
             loss += self.fcost * fmse_loss
         # Compute gradients
         trainable_vars = self.trainable_variables
@@ -858,8 +762,6 @@ class mBP_model(tf.keras.Model):
         with self.train_writer.as_default(step=self._train_counter):
 
             tf.summary.scalar('1. Losses/1. Total',loss,self._train_counter)
-            tf.summary.scalar('1. Losses/2. Energy',emse_loss,self._train_counter)
-            tf.summary.scalar('1. Losses/3. Forces',fmse_loss,self._train_counter)
             tf.summary.scalar('2. Metrics/1. RMSE/atom',rmse,self._train_counter)
             tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter)
             tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter)
@@ -867,12 +769,10 @@ class mBP_model(tf.keras.Model):
             tf.summary.scalar('4. LearningRate/1. LR',lr,self._train_counter)
             tf.summary.histogram('3. Parameters/1. width',self.width_value,self._train_counter)
             tf.summary.histogram('3. Parameters/2. width_ang',self.width_value_ang,self._train_counter)
-            tf.summary.histogram('3. Parameters/3. zeta',self.zeta_value,self._train_counter)
-            tf.summary.histogram('3. Parameters/4. Rs_rad',self._Rs_rad,self._train_counter)
-            tf.summary.histogram('3. Parameters/5. Rs_ang',self._Rs_ang,self._train_counter)
-            tf.summary.histogram('3. Parameters/6. thetas',self._thetas,self._train_counter)
-#            tf.summary.histogram('3. Parameters/4. lambda1',self.lambda1,self._train_counter)
-            #tf.summary.histogram('3. Parameters/5. lambda2',self.lambda2,self._train_counter)
+#            tf.summary.histogram('3. Parameters/3. zeta',self.zeta_value,self._train_counter)
+            tf.summary.histogram('3. Parameters/3. lambda',self.lambda1,self._train_counter)
+#            tf.summary.histogram('3. Parameters/4. lambda',self.lambda1,self._train_counter)
+
         #self.metrics.update(metrics)
 
         #for metric in self.metrics:

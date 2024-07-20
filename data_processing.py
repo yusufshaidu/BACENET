@@ -21,7 +21,7 @@ except:
     from .pbc import replicas_max_idx
 
 
-def convert_json2ASE_atoms(atomic_energy, file, C6_spec):
+def convert_json2ASE_atoms(atomic_energy, file, C6_spec, species):
     Ry2eV = 13.6057039763
     data = json.load(open(file))
     try:
@@ -174,7 +174,7 @@ def data_preparation(data_dir, species, data_format,
     #this should be parellize at some point   
     for file in files:
         if data_format == 'panna_json':
-            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec)
+            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec,species)
         elif data_format == 'ase' or data_format == 'xyz' :
             atoms = file.copy()
             symbols = list(atoms.symbols)

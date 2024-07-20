@@ -9,7 +9,9 @@ import os
 
 import argparse
 from data_processing import data_preparation
-from model import mBP_model
+#from model import mBP_model
+#from model_legendre_polynomial import mBP_model
+from model_modified_zchannel import mBP_model
 from model_modified import mBP_model as mBP_model_v1
 
 def default_config():
@@ -24,6 +26,7 @@ def default_config():
     configs['rc_rad'] = None
     configs['rc_ang'] = None
     configs['fcost'] = None
+    configs['ecost'] = 1.0
     #trainable linear model
     configs['params_trainable'] = False
     configs['pbc'] = True
@@ -32,7 +35,7 @@ def default_config():
     #this is the global step
     configs['decay_step'] = None
     configs['decay_rate'] = None
-    #activations are basically sigmoid and linear for now
+    #activations are basically tanh and linear for now
     configs['species'] = None
     configs['batch_size'] = 4
     configs['outdir'] = './train'
@@ -53,6 +56,12 @@ def default_config():
     configs['rmax_u'] = 5.0
     configs['rmin_d'] = 10.0
     configs['rmax_d'] = 12.0
+    configs['lp_lmax'] = 16
+    configs['Nzeta'] = None
+    configs['dcenters'] = 1.0
+    configs['variable_width'] = False
+    configs['opt_method'] = 'adam'
+    configs['fixed_lr'] = False
     return configs
 
 def create_model(configs):
@@ -71,6 +80,7 @@ def create_model(configs):
     save_freq = configs['save_freq']
     zeta = configs['zeta']
     thetaN = configs['thetaN']
+    Nzeta = configs['Nzeta']
     RsN_rad = configs['RsN_rad']
     RsN_ang = configs['RsN_ang']
     rc_rad = configs['rc_rad'] 
@@ -79,10 +89,11 @@ def create_model(configs):
     width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
     width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
     fcost = configs['fcost']
+    ecost = configs['ecost']
     #trainable linear model
     params_trainable = configs['params_trainable']
-    pbc = configs['pbc'] 
-    if pbc:
+    _pbc = configs['pbc'] 
+    if _pbc:
         pbc = [True,True,True]
     else:
         pbc = [False,False,False]
@@ -98,8 +109,8 @@ def create_model(configs):
     #this is the global step
     decay_step = configs['decay_step']
     decay_rate = configs['decay_rate']
-    #activations are basically sigmoid and linear for now
-    activations = ['sigmoid', 'sigmoid', 'linear']
+    #activations are basically tanh and linear for now
+    activations = ['tanh', 'tanh', 'linear']
     species = configs['species']
     batch_size = configs['batch_size']
     model_outdir = configs['outdir']
@@ -121,7 +132,16 @@ def create_model(configs):
     rmax_u = configs['rmax_u']
     rmin_d = configs['rmin_d']
     rmax_d = configs['rmax_d']
-    rc = np.max([rc_rad,rc_ang,rmax_d])
+    lp_lmax = configs['lp_lmax']
+    dcenters = configs['dcenters']
+    variable_width = configs['variable_width']
+    opt_method = configs['opt_method']
+    fixed_lr = configs['fixed_lr']
+
+    if include_vdw:
+        rc = np.max([rc_rad,rc_ang,rmax_d])
+    else:
+        rc = np.max([rc_rad,rc_ang])
     train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
                      energy_key, force_key,
                      rc, pbc, batch_size,
@@ -137,25 +157,56 @@ def create_model(configs):
                       thetaN,width_ang,zeta,
                       params_trainable,
                       fcost=fcost,
-                      pbc=pbc,
+                      ecost=ecost,
+                      pbc=_pbc,
                       nelement=nelement,
                       train_writer=train_writer,
                       train_zeta=train_zeta,
                       l1=l1_norm,l2=l2_norm,
                       include_vdw=include_vdw,
                       rmin_u=rmin_u,rmax_u=rmax_u,
-                      rmin_d=rmin_d,rmax_d=rmax_d)
+                      rmin_d=rmin_d,rmax_d=rmax_d,
+                      Nzeta=Nzeta, 
+                      dcenters=dcenters,
+                      variable_width=variable_width)
 
     initial_learning_rate = initial_lr
+    if fixed_lr:
+        lr_schedule = initial_learning_rate
+    else:
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate,
+            decay_steps=decay_step,
+            decay_rate=decay_rate,
+            staircase=True)
+    if opt_method in ['adamW', 'AdamW', 'adamw']:
+        optimizer = tf.keras.optimizers.AdamW(
+            learning_rate=lr_schedule,
+            weight_decay=0.004,
+            amsgrad=True,
+            clipnorm=None,
+            clipvalue=None,
+            use_ema=True,
+            name='adamw')
 
-    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate,
-        decay_steps=decay_step,
-        decay_rate=decay_rate,
-        staircase=True)
-
-    optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-
+        print('using adamW as the optimizer')
+    elif opt_method in ['Adadelta', 'adadelta']:
+        optimizer = tf.keras.optimizers.Adadelta(
+            learning_rate=lr_schedule,
+            weight_decay=0.004,
+            clipnorm=None,
+            clipvalue=None,
+            use_ema=True,
+            name='adadelta')
+        print('using adadelta as the optimizer')
+    else:
+        print('using adam as the optimizer')
+        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule, 
+                                             use_ema=True,
+                                             weight_decay=0.004, 
+                                             clipnorm=None,
+                                             clipvalue=None,
+                                             )
     
 
     # Create a callback that saves the model's weights every 5 epochs
@@ -173,7 +224,7 @@ def create_model(configs):
                                                     options=None),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
                                                   update_freq='batch'),
-                   tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup"),
+                   tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
 
 

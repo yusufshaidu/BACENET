@@ -2,7 +2,9 @@ import tensorflow as tf
 #from NNP_Directfrom_json_pbc import mBP_model, data_preparation
 
 from data_processing import data_preparation
-from model import mBP_model
+#from model import mBP_model
+#from model_legendre_polynomial import mBP_model
+from model_modified_zchannel import mBP_model
 from model_modified import mBP_model as mBP_model_v1
 
 import os, sys, yaml,argparse
@@ -37,13 +39,14 @@ def create_model(configs):
     #trainable linear model
     params_trainable = configs['params_trainable']
 
-    pbc = configs['pbc']
-    if pbc:
+    _pbc = configs['pbc']
+    print(_pbc)
+    if _pbc:
         pbc = [True,True,True]
     else:
         pbc = [False,False,False]
-    #activations are basically sigmoid and linear for now
-    activations = ['sigmoid', 'sigmoid', 'linear']
+    #activations are basically tanh and linear for now
+    activations = ['tanh', 'tanh', 'linear']
     species = configs['species']
     batch_size = configs['batch_size']
     model_outdir = configs['model_outdir']
@@ -63,8 +66,15 @@ def create_model(configs):
     rmax_u = configs['rmax_u']
     rmin_d = configs['rmin_d']
     rmax_d = configs['rmax_d']
+    lp_lmax = configs['lp_lmax']
+    Nzeta = configs['Nzeta']
+    dcenters = configs['dcenters']
+    variable_width = configs['variable_width']
 
-    rc = np.max([rc_rad,rc_ang,rmax_d])
+    if include_vdw:
+        rc = np.max([rc_rad,rc_ang,rmax_d])
+    else:
+        rc = np.max([rc_rad,rc_ang])
 
     model_call = mBP_model
     print('model_version' in list(configs.keys()))
@@ -88,13 +98,16 @@ def create_model(configs):
                       thetaN,width_ang,zeta,
                       fcost=fcost,
                       params_trainable=True,
-                      pbc=pbc,
+                      pbc=_pbc,
                       nelement=nelement,
                       train_zeta=train_zeta,
                       nspec_embedding=nspec_embedding,
                       include_vdw=include_vdw,
                       rmin_u=rmin_u,rmax_u=rmax_u,
-                      rmin_d=rmin_d,rmax_d=rmax_d)
+                      rmin_d=rmin_d,rmax_d=rmax_d,
+                      Nzeta=Nzeta,
+                      dcenters=dcenters,
+                      variable_width=variable_width)
     
     #load the last check points
     
@@ -106,9 +119,15 @@ def create_model(configs):
     #print(ckpts)
 
     if epoch == -1: 
-        epoch = int(ckpts[-1].split('-')[-1].split('.')[0])
-        model.load_weights(ckpts[-1]).expect_partial()
-        print(f'evaluating {ckpts[-1]}')
+        ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        ckpts_idx.sort()
+        epoch = ckpts_idx[-1]
+        idx=f"{epoch:04d}"
+        ck = model_outdir+"/models/"+f"ckpts-{idx}.ckpt"
+        model.load_weights(ck).expect_partial()
+
+        #model.load_weights(ckpts[-1]).expect_partial()
+        print(f'evaluating {ck}')
     else:
         idx=f"{epoch:04d}"
         ck = model_outdir+"/models/"+f"ckpts-{idx}.ckpt"
@@ -116,15 +135,16 @@ def create_model(configs):
         print(f'evaluating {ck}')
 
 #    model.compile()
-#    print(model.get_weights())
+    weights = model.get_weights()
+#    print(weights.shape)
+
     e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
-    mae = np.mean(metrics['MAE'])
-    #rmse = np.mean(metrics['RMSE'])
-    rmse = np.sqrt(np.mean(metrics['RMSE']**2))
-    print(f'Energy: the test rmse = {rmse} and mae = {mae}')
-    mae = np.mean(metrics['MAE_F'])
-    rmse = np.sqrt(np.mean(metrics['RMSE_F']**2))
-    print(f'Forces: the test rmse = {rmse} and mae = {mae}')
+   # mae = np.mean(metrics['MAE'])
+   # #rmse = np.mean(metrics['RMSE'])
+   # rmse = np.sqrt(np.mean(metrics['RMSE']**2))
+   # mae = np.mean(metrics['MAE_F'])
+   # rmse = np.sqrt(np.mean(metrics['RMSE_F']**2))
+#    print(f'Forces: the test rmse = {rmse} and mae = {mae}')
     _f_ref = []
     _f_pred = []
     for i, j in enumerate(nat):
@@ -136,10 +156,17 @@ def create_model(configs):
     force_ref = tf.reshape(_f_ref, [-1,3])
     #force_pred = [tf.reshape(_f_pred[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
     force_pred = tf.reshape(_f_pred, [-1,3])
-
+    mae = tf.reduce_mean(tf.abs(e_ref-e_pred))
+    rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2))
+    print(f'Energy: the test rmse = {rmse} and mae = {mae}')
+    mae = tf.reduce_mean(tf.abs(_f_ref-_f_pred))
+    rmse = tf.sqrt(tf.reduce_mean((_f_ref-_f_pred)**2))
+    print(f'Forces: the test rmse = {rmse} and mae = {mae}')
     np.savetxt(os.path.join(outdir, f'energy_last_test_{epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
     np.savetxt(os.path.join(outdir, f'forces_last_test_{epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
 
+#    print(weights)
+#    np.save(os.path.join(outdir, f'weights_{epoch}.dat'),weights)
     #model.predict(train_data)
     '''e_ref, e_pred, metrics, force_ref, force_pred, nat = model.predict(train_data)
     mae = np.mean(metrics['MAE'])
