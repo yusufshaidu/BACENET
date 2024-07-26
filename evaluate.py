@@ -4,7 +4,8 @@ import tensorflow as tf
 from data_processing import data_preparation
 #from model import mBP_model
 #from model_legendre_polynomial import mBP_model
-from model_modified_zchannel import mBP_model
+#from model_modified_zchannel import mBP_model
+from model_modified_manybody import mBP_model
 from model_modified import mBP_model as mBP_model_v1
 
 import os, sys, yaml,argparse
@@ -66,9 +67,9 @@ def create_model(configs):
     rmax_u = configs['rmax_u']
     rmin_d = configs['rmin_d']
     rmax_d = configs['rmax_d']
-    lp_lmax = configs['lp_lmax']
+    body_order = configs['body_order']
     Nzeta = configs['Nzeta']
-    dcenters = configs['dcenters']
+    learnable_centers = configs['learnable_centers']
     variable_width = configs['variable_width']
 
     if include_vdw:
@@ -106,8 +107,9 @@ def create_model(configs):
                       rmin_u=rmin_u,rmax_u=rmax_u,
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       Nzeta=Nzeta,
-                      dcenters=dcenters,
-                      variable_width=variable_width)
+                      learnable_centers=learnable_centers,
+                      variable_width=variable_width,
+                      body_order=body_order)
     
     #load the last check points
     
@@ -134,17 +136,11 @@ def create_model(configs):
         model.load_weights(ck).expect_partial()
         print(f'evaluating {ck}')
 
-#    model.compile()
     weights = model.get_weights()
-#    print(weights.shape)
+
+    #print(weights)
 
     e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
-   # mae = np.mean(metrics['MAE'])
-   # #rmse = np.mean(metrics['RMSE'])
-   # rmse = np.sqrt(np.mean(metrics['RMSE']**2))
-   # mae = np.mean(metrics['MAE_F'])
-   # rmse = np.sqrt(np.mean(metrics['RMSE_F']**2))
-#    print(f'Forces: the test rmse = {rmse} and mae = {mae}')
     _f_ref = []
     _f_pred = []
     for i, j in enumerate(nat):
@@ -164,24 +160,6 @@ def create_model(configs):
     print(f'Forces: the test rmse = {rmse} and mae = {mae}')
     np.savetxt(os.path.join(outdir, f'energy_last_test_{epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
     np.savetxt(os.path.join(outdir, f'forces_last_test_{epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
-
-#    print(weights)
-#    np.save(os.path.join(outdir, f'weights_{epoch}.dat'),weights)
-    #model.predict(train_data)
-    '''e_ref, e_pred, metrics, force_ref, force_pred, nat = model.predict(train_data)
-    mae = np.mean(metrics['MAE'])
-    rmse = np.mean(metrics['RMSE'])
-    print(f'Energy: the training rmse = {rmse} and mae = {mae}')
-    mae = np.mean(metrics['MAE_F'])
-    rmse = np.mean(metrics['RMSE_F'])
-    print(f'Forces: the training rmse = {rmse} and mae = {mae}')
-    force_ref = tf.reshape(force_ref, [-1,3])
-    force_pred = tf.reshape(force_pred, [-1,3])
-
-    np.savetxt(os.path.join(outdir, 'energy_last_train.dat'), np.stack([e_ref, e_pred, nat]).T)
-    np.savetxt(os.path.join(outdir, 'forces_last_train.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
-    #model.predict(test_data)
-    '''
     
 if __name__ == '__main__':
 

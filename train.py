@@ -11,7 +11,7 @@ import argparse
 from data_processing import data_preparation
 #from model import mBP_model
 #from model_legendre_polynomial import mBP_model
-from model_modified_zchannel import mBP_model
+from model_modified_manybody import mBP_model
 from model_modified import mBP_model as mBP_model_v1
 
 def default_config():
@@ -58,10 +58,11 @@ def default_config():
     configs['rmax_d'] = 12.0
     configs['lp_lmax'] = 16
     configs['Nzeta'] = None
-    configs['dcenters'] = 1.0
+    configs['learnable_centers'] = True
     configs['variable_width'] = False
     configs['opt_method'] = 'adam'
     configs['fixed_lr'] = False
+    configs['body_order'] = 3
     return configs
 
 def create_model(configs):
@@ -132,11 +133,11 @@ def create_model(configs):
     rmax_u = configs['rmax_u']
     rmin_d = configs['rmin_d']
     rmax_d = configs['rmax_d']
-    lp_lmax = configs['lp_lmax']
-    dcenters = configs['dcenters']
+    learnable_centers = configs['learnable_centers']
     variable_width = configs['variable_width']
     opt_method = configs['opt_method']
     fixed_lr = configs['fixed_lr']
+    body_order = configs['body_order']
 
     if include_vdw:
         rc = np.max([rc_rad,rc_ang,rmax_d])
@@ -167,8 +168,9 @@ def create_model(configs):
                       rmin_u=rmin_u,rmax_u=rmax_u,
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       Nzeta=Nzeta, 
-                      dcenters=dcenters,
-                      variable_width=variable_width)
+                      learnable_centers=learnable_centers,
+                      variable_width=variable_width,
+                      body_order=body_order)
 
     initial_learning_rate = initial_lr
     if fixed_lr:
@@ -206,6 +208,7 @@ def create_model(configs):
                                              weight_decay=0.004, 
                                              clipnorm=None,
                                              clipvalue=None,
+                                             amsgrad=False,
                                              )
     
 
