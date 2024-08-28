@@ -105,7 +105,7 @@ def atomic_number(species):
                 'Lr','Rf','Db','Sg','Bh','Hs','Mt','Ds','Rg','Cn',
                 'Nh','Fl','Mc','Lv','Ts','Og']
 
-    return symbols.index(species)
+    return symbols.index(species) + 1
 
 def input_function(x, shuffle=True, batch_size=32): # inner function that will be returned
     dataset = tf.data.Dataset.from_tensor_slices(x)

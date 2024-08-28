@@ -7,11 +7,16 @@ from data_processing import data_preparation
 #from model_modified_zchannel import mBP_model
 from model_modified_manybody import mBP_model
 from model_modified import mBP_model as mBP_model_v1
-from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
 
-import os, sys, yaml,argparse
+import os, sys, yaml,argparse,json
 import numpy as np
 import train
+
+def rescale_params(x, a,b):
+    rsmin = np.min(x)
+    rsmax = np.max(x)
+    #rescale between 0.5 and rc for the angular part
+    return a + (b - a) * (x - rsmin) / (rsmax - rsmin + 1e-12)
 
 def create_model(configs):
 
@@ -39,6 +44,8 @@ def create_model(configs):
     #trainable linear model
     fcost = configs['fcost']
     #trainable linear model
+    params_trainable = configs['params_trainable']
+
     _pbc = configs['pbc']
     print(_pbc)
     if _pbc:
@@ -60,14 +67,17 @@ def create_model(configs):
     force_key = configs['force_key']
     test_fraction = configs['test_fraction']
     atomic_energy = configs['atomic_energy']
+    train_zeta = configs['train_zeta']
     include_vdw = configs['include_vdw']
     rmin_u = configs['rmin_u']
     rmax_u = configs['rmax_u']
     rmin_d = configs['rmin_d']
     rmax_d = configs['rmax_d']
     body_order = configs['body_order']
+    Nzeta = configs['Nzeta']
+    learnable_centers = configs['learnable_centers']
+    variable_width = configs['variable_width']
     min_radial_center = configs['min_radial_center']
-    species_out_act = configs['species_out_act']
 
     if include_vdw:
         rc = np.max([rc_rad,rc_ang,rmax_d])
@@ -78,8 +88,8 @@ def create_model(configs):
     print('model_version' in list(configs.keys()))
     if 'model_version' in list(configs.keys()):
         model_v = configs['model_version']
-        if model_v == 'linear':
-            model_call = mBP_model_linear
+        if model_v == 'v1':
+            model_call = mBP_model_v1
 
     nspec_embedding = configs['nspec_embedding']
 
@@ -95,15 +105,19 @@ def create_model(configs):
                       rc_ang,RsN_rad,RsN_ang,
                       thetaN,width_ang,zeta,
                       fcost=fcost,
+                      params_trainable=True,
                       pbc=_pbc,
                       nelement=nelement,
+                      train_zeta=train_zeta,
                       nspec_embedding=nspec_embedding,
                       include_vdw=include_vdw,
                       rmin_u=rmin_u,rmax_u=rmax_u,
                       rmin_d=rmin_d,rmax_d=rmax_d,
+                      Nzeta=Nzeta,
+                      learnable_centers=learnable_centers,
+                      variable_width=variable_width,
                       body_order=body_order,
-                      min_radial_center=min_radial_center,
-                      species_out_act=species_out_act)
+                      min_radial_center=min_radial_center)
     
     #load the last check points
     
@@ -130,31 +144,77 @@ def create_model(configs):
         model.load_weights(ck).expect_partial()
         print(f'evaluating {ck}')
 
-    weights = model.get_weights()
+    layer_names = ['main','species_encoder', 'radial_width', 'ang_width', 'zeta', 'Rs_rad', 'Rs_ang', 'thetas']
+    '''prefix = 'main'
+    i=0
+    for layer,a in zip(layer_sizes,activations):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    i=0
+    prefix = 'species_encoder'
+    for layer,a in zip([64,118],['sigmoid', 'sigmoid']):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    prefix = 'radial_width'
+    i=0
+    for layer,a in zip([RsN_rad],['softplus']):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    prefix = 'ang_width'
+    i=0
+    for layer,a in zip([RsN_ang],['softplus']):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    prefix = 'zeta'
+    i=0
+    for layer,a in zip([thetaN],['softplus']):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    prefix = 'Rs_rad'
+    i=0
+    for layer,a in zip([RsN_rad],['sigmoid']):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    prefix = 'Rs_ang'
+    i=0
+    for layer,a in zip([RsN_ang],['sigmoid']):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    prefix = 'thetas'
+    i=0
+    for layer,a in zip([thetaN],['sigmoid']):
+        layer_names.append(f'{prefix}_{i}_layer_{layer}_activation_{a}')
+        i+=1
+    '''
+#    print(layer_names, len(layer_names), len(model.layers), model.layers)
+    parameters = {}
+    for i, layer in enumerate(model.layers):
+        if i < 2:
+            continue
+        w,b = layer.get_weights()
+        params = w+b
+        if layer_names[i] in ['Rs_rad', 'Rs_ang', 'thetas']:
+            params = 1 / (1+np.exp(-params))
+            if layer_names[i] == 'Rs_rad':
+                a = 0.5
+                b = rc_rad
+            elif layer_names[i] == 'Rs_ang':
+                a = 0.5
+                b = rc_ang
+            else:
+                a = 0
+                b = np.pi
+            params = rescale_params(params, a,b)
+        parameters[layer_names[i]] = params.flatten().tolist()
 
-    #print(weights)
+    out_file = open("parameters.json", "w")
 
-    e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
-    _f_ref = []
-    _f_pred = []
-    for i, j in enumerate(nat):
-        j = tf.cast(j, tf.int32)
-        _f_ref = np.append(_f_ref, force_ref[i][:j])
-        _f_pred = np.append(_f_pred, force_pred[i][:j])
-
-    #force_ref = [tf.reshape(force_ref[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
-    force_ref = tf.reshape(_f_ref, [-1,3])
-    #force_pred = [tf.reshape(_f_pred[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
-    force_pred = tf.reshape(_f_pred, [-1,3])
-    mae = tf.reduce_mean(tf.abs(e_ref-e_pred))
-    rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2))
-    print(f'Energy: the test rmse = {rmse} and mae = {mae}')
-    mae = tf.reduce_mean(tf.abs(_f_ref-_f_pred))
-    rmse = tf.sqrt(tf.reduce_mean((_f_ref-_f_pred)**2))
-    print(f'Forces: the test rmse = {rmse} and mae = {mae}')
-    np.savetxt(os.path.join(outdir, f'energy_last_test_{epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
-    np.savetxt(os.path.join(outdir, f'forces_last_test_{epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
-    
+    json.dump(parameters, out_file, indent = 6)
+        #print(layer_names[i], w+b)
+        #print(layer_names[i], w+b)
+#    print(parameters)
+ #   weights = model.get_weights()
+#    print(len(weights), weights)
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='create ML model')

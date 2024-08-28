@@ -4,6 +4,7 @@ from IPython.display import clear_output
 #import tensorflow
 import tensorflow.compat.v2.feature_column as fc
 import tensorflow as tf
+from swa.tfkeras import SWA
 import math 
 import os
 
@@ -12,7 +13,7 @@ from data_processing import data_preparation
 #from model import mBP_model
 #from model_legendre_polynomial import mBP_model
 from model_modified_manybody import mBP_model
-from model_modified import mBP_model as mBP_model_v1
+from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
 
 def default_config():
     configs = {}
@@ -28,10 +29,9 @@ def default_config():
     configs['fcost'] = None
     configs['ecost'] = 1.0
     #trainable linear model
-    configs['params_trainable'] = False
     configs['pbc'] = True
     configs['initial_lr'] = 0.001
-    configs['model_version'] = 'v1'
+    configs['model_version'] = 'linear'
     #this is the global step
     configs['decay_step'] = None
     configs['decay_rate'] = None
@@ -49,20 +49,20 @@ def default_config():
     
     configs['l1_norm'] = 0.0
     configs['l2_norm'] = 0.0
-    configs['train_zeta'] = True
     configs['include_vdw'] = False
     configs['atomic_energy'] = []
     configs['rmin_u'] = 3.0
     configs['rmax_u'] = 5.0
     configs['rmin_d'] = 10.0
     configs['rmax_d'] = 12.0
-    configs['lp_lmax'] = 16
-    configs['Nzeta'] = None
-    configs['learnable_centers'] = True
-    configs['variable_width'] = False
     configs['opt_method'] = 'adam'
     configs['fixed_lr'] = False
     configs['body_order'] = 3
+    configs['min_radial_center'] = 0.5
+    configs['species_out_act'] = 'linear'
+    configs['start_swa'] = -1
+    configs['swa_lr'] = 0.0001
+    configs['swa_lr2'] = 0.001
     return configs
 
 def create_model(configs):
@@ -81,7 +81,6 @@ def create_model(configs):
     save_freq = configs['save_freq']
     zeta = configs['zeta']
     thetaN = configs['thetaN']
-    Nzeta = configs['Nzeta']
     RsN_rad = configs['RsN_rad']
     RsN_ang = configs['RsN_ang']
     rc_rad = configs['rc_rad'] 
@@ -92,7 +91,6 @@ def create_model(configs):
     fcost = configs['fcost']
     ecost = configs['ecost']
     #trainable linear model
-    params_trainable = configs['params_trainable']
     _pbc = configs['pbc'] 
     if _pbc:
         pbc = [True,True,True]
@@ -103,8 +101,8 @@ def create_model(configs):
     print('model_version' in list(configs.keys()))
     if 'model_version' in list(configs.keys()):
         model_v = configs['model_version']
-        if model_v == 'v1':
-            model_call = mBP_model_v1
+        if model_v == 'linear':
+            model_call = mBP_model_linear
 
         print('I am using variable width')
     #this is the global step
@@ -126,18 +124,20 @@ def create_model(configs):
     l1_norm = 0.0
     l2_norm = 0.0
 
-    train_zeta = configs['train_zeta']
     atomic_energy = configs['atomic_energy']
     include_vdw = configs['include_vdw']
     rmin_u = configs['rmin_u']
     rmax_u = configs['rmax_u']
     rmin_d = configs['rmin_d']
     rmax_d = configs['rmax_d']
-    learnable_centers = configs['learnable_centers']
-    variable_width = configs['variable_width']
     opt_method = configs['opt_method']
     fixed_lr = configs['fixed_lr']
     body_order = configs['body_order']
+    min_radial_center = configs['min_radial_center']
+    species_out_act = configs['species_out_act']
+    start_swa = configs['start_swa']
+    swa_lr = configs['swa_lr']
+    swa_lr2 = configs['swa_lr2']
 
     if include_vdw:
         rc = np.max([rc_rad,rc_ang,rmax_d])
@@ -148,30 +148,6 @@ def create_model(configs):
                      rc, pbc, batch_size,
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy)
-    
-    train_writer = tf.summary.create_file_writer(model_outdir+'/train')
-
-    model = model_call(layer_sizes,
-                      rc_rad, species_identity, width, batch_size,
-                      activations,
-                      rc_ang,RsN_rad,RsN_ang,
-                      thetaN,width_ang,zeta,
-                      params_trainable,
-                      fcost=fcost,
-                      ecost=ecost,
-                      pbc=_pbc,
-                      nelement=nelement,
-                      train_writer=train_writer,
-                      train_zeta=train_zeta,
-                      l1=l1_norm,l2=l2_norm,
-                      include_vdw=include_vdw,
-                      rmin_u=rmin_u,rmax_u=rmax_u,
-                      rmin_d=rmin_d,rmax_d=rmax_d,
-                      Nzeta=Nzeta, 
-                      learnable_centers=learnable_centers,
-                      variable_width=variable_width,
-                      body_order=body_order)
-
     initial_learning_rate = initial_lr
     if fixed_lr:
         lr_schedule = initial_learning_rate
@@ -185,7 +161,7 @@ def create_model(configs):
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=0.004,
-            amsgrad=True,
+            amsgrad=False,
             clipnorm=None,
             clipvalue=None,
             use_ema=True,
@@ -211,8 +187,8 @@ def create_model(configs):
                                              amsgrad=False,
                                              )
     
-
-    # Create a callback that saves the model's weights every 5 epochs
+    train_writer = tf.summary.create_file_writer(model_outdir+'/train')
+    
     if not os.path.exists(model_outdir):
         os.mkdir(model_outdir)
     checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}.ckpt"
@@ -220,23 +196,80 @@ def create_model(configs):
     checkpoint_dir = os.path.dirname(checkpoint_path)
 
     # Create a callback that saves the model's weights
-    cp_callback = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
+    if start_swa > -1:
+
+        swa = SWA(start_epoch=start_swa, 
+              lr_schedule='manual', # other options are constant and cyclic (cycle between lr1 and lr2)
+              swa_lr=swa_lr, 
+              swa_lr2=swa_lr2,
+              swa_freq=5,
+              verbose=1)
+
+
+        cp_callback = [swa, tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                      save_weights_only=True,
                                                      verbose=1,
                                                     save_freq=save_freq,
                                                     options=None),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
-                                                  update_freq='batch'),
+                                                  update_freq='epoch'),
+                   tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False),
+                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
+    else:
+        cp_callback = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
+                                                     save_weights_only=True,
+                                                     verbose=1,
+                                                    save_freq=save_freq,
+                                                    options=None),
+                   tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
+                                                  update_freq='epoch'),
                    tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
 
 
-    model.save_weights(checkpoint_path.format(epoch=0))
-    #train the model
-    
-        
-    #load the last saved epoch
 
+
+ #   gpus = tf.config.list_logical_devices('GPU')
+  #  print(gpus)
+#    strategy = tf.distribute.MirroredStrategy(gpus)
+   # with strategy.scope():
+
+
+    model = model_call(layer_sizes,
+                  rc_rad, species_identity, width, batch_size,
+                  activations,
+                  rc_ang,RsN_rad,RsN_ang,
+                  thetaN,width_ang,zeta,
+                  fcost=fcost,
+                  ecost=ecost,
+                  pbc=_pbc,
+                  nelement=nelement,
+                  train_writer=train_writer,
+                  l1=l1_norm,l2=l2_norm,
+                  include_vdw=include_vdw,
+                  rmin_u=rmin_u,rmax_u=rmax_u,
+                  rmin_d=rmin_d,rmax_d=rmax_d,
+                  body_order=body_order,
+                  min_radial_center=min_radial_center,
+                  species_out_act=species_out_act)
+
+
+    #train the model
+
+    model.save_weights(checkpoint_path.format(epoch=0))
+
+    '''ckpt_dir = model_outdir+"/models"
+    ckpts = [os.path.join(ckpt_dir, x.split('.index')[0]) for x in os.listdir(ckpt_dir) if x.endswith('index')]
+    if len(ckpts) > 0:
+        ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        ckpts_idx.sort()
+        initial_epoch = ckpts_idx[-1]
+        #idx=f"{epoch:04d}"
+
+    latest = tf.train.latest_checkpoint(ckpt_dir)
+    print(latest)
+    model.load_weights(latest)
+    '''
     model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
  #   try:
  #       model.fit(train_data,

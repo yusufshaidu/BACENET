@@ -103,22 +103,22 @@ class mBP_model(tf.keras.Model):
         self.RsN_rad = RsN_rad
         self.RsN_ang = RsN_ang
         self.thetaN = thetaN
-        self.zeta = float(zeta)
+        self.zeta = int(zeta)
         self.width_ang = float(width_ang)
         self.body_order = body_order
         
-        base_size = self.RsN_ang * self.thetaN
+        base_size = self.RsN_ang * self.thetaN * 2
         self.feature_size = self.RsN_rad + base_size
         if self.body_order >= 4:
             for k in range(3,self.body_order):
                 self.feature_size += base_size
+
         self.pbc = pbc
         self.fcost = float(fcost)
         self.ecost = float(ecost)
         self.nspecies = len(self.species_identity)
         self.train_writer = train_writer
         self.nspec_embedding = nspec_embedding
-        self.train_zeta = train_zeta
         self.l1 = l1
         self.l2 = l2
         self.include_vdw = include_vdw
@@ -134,7 +134,13 @@ class mBP_model(tf.keras.Model):
         # the number of elements in the periodic table
         self.nelement = nelement
         # create a species embedding network with 1 hidden layer Nembedding x Nspecies
-        self.species_nets = Networks(self.nelement, [self.nspec_embedding,1], ['tanh',self.species_out_act], prefix='species_encoder')
+        self.species_nets = Networks(self.nelement, 
+                                     [self.nspec_embedding,1], 
+                                     ['tanh',self.species_out_act], 
+                                     #weight_initializer=init,
+                                     #bias_initializer='zeros',
+                                     prefix='species_encoder')
+        #self.species_nets = Networks(self.nelement, [1], [self.species_out_act], prefix='species_encoder')
 
         constraint = None
         Nwidth_rad = self.RsN_rad
@@ -153,13 +159,6 @@ class mBP_model(tf.keras.Model):
                                   bias_initializer='zeros',
                                   kernel_constraint=constraint,
                                   bias_constraint=constraint,prefix='ang_width')
-
-        init = tf.keras.initializers.RandomNormal(mean=self.zeta, stddev=0.05)
-        self.zeta_nets = Networks(1, [1], ['softplus'],
-                                  weight_initializer=init,
-                                  bias_initializer='zeros',
-                                  kernel_constraint=constraint,
-                                  bias_constraint=constraint, prefix='zeta')
         constraint = None
         init = tf.keras.initializers.GlorotNormal(seed=12345)
         self.Rs_rad_nets = Networks(1, [self.RsN_rad], ['sigmoid'],
@@ -173,13 +172,62 @@ class mBP_model(tf.keras.Model):
                                       bias_initializer=init,
                                       kernel_constraint=constraint,
                                       bias_constraint=constraint, prefix='Rs_ang')
-        init = tf.keras.initializers.GlorotNormal(seed=56789)
-        self.thetas_nets = Networks(1, [self.thetaN], ['sigmoid'],
-                                      weight_initializer=init,
-                                      bias_initializer=init,
-                                      kernel_constraint=constraint,
-                                      bias_constraint=constraint, prefix='thetas')
 
+        #define learnable parameter per lxlylz components
+        #this is the sum of all permutations = sum_{n=0}^zeta (n+2)^C_2
+        i = tf.constant(0)
+        res = tf.constant(0., dtype=tf.float32)
+        cond = lambda i, res: tf.less(i, self.zeta+1)
+        #compute (n+2)^C_2 = (n+2)!/n!/2!
+        body = lambda i, res: [i+1, res+tf.cast(tf.reduce_prod(tf.range(1,i+3, dtype=tf.float32)) / (tf.reduce_prod(tf.range(1,i+1, dtype=tf.float32)) * 2), tf.float32)]
+        n_perm = tf.while_loop(cond, body, [i, res])[1]
+        n_perm = tf.cast(n_perm, tf.int32)
+        self.n_perm = n_perm
+
+        init = tf.keras.initializers.GlorotNormal(seed=34569)
+        self.weights_lxlylz_nets = Networks(1, [self.thetaN * n_perm], ['sigmoid'],
+                                          weight_initializer=init,
+                                          bias_initializer=init,
+                                          kernel_constraint=constraint,
+                                          bias_constraint=constraint, prefix='weights_lxlylz')
+
+
+    #start functions from chatgpt
+    @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
+    def find_three_non_negative_integers(self, n):
+        # Create a tensor of integers from 0 to n
+        i = tf.range(0, n + 1)
+        j = tf.range(0, n + 1)
+        
+        # Create a meshgrid for all combinations of i and j
+        I, J = tf.meshgrid(i, j, indexing='ij')
+        
+        # Calculate k based on the sum condition
+        K = n - I - J
+        
+        # Create a mask to filter out invalid (negative) k values
+        valid_mask = tf.greater_equal(K, 0)
+
+        # Use the mask to extract valid triplets
+        valid_i = tf.boolean_mask(I, valid_mask)
+        valid_j = tf.boolean_mask(J, valid_mask)
+        valid_k = tf.boolean_mask(K, valid_mask)
+        
+        # Stack valid triplets together
+        valid_triplets = tf.stack([valid_i, valid_j, valid_k], axis=1)
+        
+        return tf.reshape(valid_triplets, [-1])
+         
+    @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
+    def factorial(self, n):
+        # Create a tensor of integers from 1 to n
+        # Use tf.range to create a sequence from 1 to n + 1
+        numbers = tf.range(1, n + 1, dtype=tf.float32)
+
+        # Calculate the factorial using tf.reduce_prod to multiply all elements
+        result = tf.reduce_prod(numbers)
+
+        return result
     def generate_periodic_images(self, species_vectors, positions, lattice_vectors, image_range, C6=None):
         """
         Generate periodic image points for given atomic positions with a cutoff distance.
@@ -198,25 +246,25 @@ class mBP_model(tf.keras.Model):
         translations_y = tf.range(-image_range[1], image_range[1] + 1)
         translations_z = tf.range(-image_range[2], image_range[2] + 1)
         tx, ty, tz = tf.meshgrid(translations_x, translations_y, translations_z, indexing='ij')
-
+        
         # Stack translations to create a list of all translation vectors
         translation_vectors = tf.stack([tx, ty, tz], axis=-1)  # Shape: (image_range * 2 + 1, image_range * 2 + 1, image_range * 2 + 1, 3)
-
+        
         # Reshape translation vectors for broadcasting
         translation_vectors = tf.reshape(translation_vectors, [-1, 3])  # Shape: ((image_range * 2 + 1)^3, 3)
 
         # Repeat positions for each atom
         atom_positions = tf.expand_dims(positions, axis=1)  # Shape: (n_atoms, 1, 3)
         atom_positions = tf.repeat(atom_positions, tf.shape(translation_vectors)[0], axis=1)  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
-
-
+        
+        
         # Generate periodic images
         # Expand the translation_vectors for proper broadcasting
         expanded_translations = tf.expand_dims(translation_vectors, axis=0)  # Shape: (1, (image_range * 2 + 1)^3, 3)
-
+        
         # Perform the addition
         periodic_images = atom_positions + tf.tensordot(tf.cast(expanded_translations,tf.float32), lattice_vectors, axes=[2, 0])  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
-
+        
         species_vectors = tf.expand_dims(species_vectors, axis=1)
         species_vectors = tf.repeat(species_vectors, tf.shape(translation_vectors)[0], axis=1)
 
@@ -232,6 +280,27 @@ class mBP_model(tf.keras.Model):
         #valid_images = tf.boolean_mask(periodic_images, distances < cutoff)  # Shape: (n_valid_images, 3)
 
         return periodic_images, species_vectors
+
+
+    def calculate_image_range_per_vector(self, cutoff, lattice_vectors):
+        """
+        Calculate the image range for each lattice vector based on a cutoff distance.
+
+        Parameters:
+            cutoff (float): The cutoff distance for interactions.
+            lattice_vectors (tf.Tensor): Tensor of lattice vectors (shape: (3, 3)).
+
+        Returns:
+            tf.Tensor: A tensor containing the determined image ranges for each lattice vector.
+        """
+        # Calculate the lengths of the lattice vectors
+        lattice_lengths = tf.norm(lattice_vectors, axis=1)  # Shape: (3,)
+
+        # Calculate the image range for each lattice vector
+        image_ranges = tf.floor(cutoff / lattice_lengths)
+
+        return tf.cast(image_ranges, tf.int32)
+    #end chatgpt sections
 
     def switch(self, r, rmin,rmax):
         x = (r-rmin)/(rmax-rmin)
@@ -257,20 +326,20 @@ class mBP_model(tf.keras.Model):
         energy = 0.5 * tf.reduce_sum(energy)
         return [energy]
 
-    @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None,tf.newaxis), dtype=tf.float32),
                                  tf.TensorSpec(shape=(), dtype=tf.float32)])
     def tf_fcut(self,r,rc):
         dim = tf.shape(r)
         pi = tf.constant(math.pi, dtype=tf.float32)
         return tf.where(tf.logical_and(r<=rc,r>1e-8), 0.5*(1.0 + tf.cos(pi*r/rc)), tf.zeros(dim, dtype=tf.float32))
-    @tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None,tf.newaxis), dtype=tf.float32),
                                  tf.TensorSpec(shape=(), dtype=tf.float32)])
     def _tf_fcut(self,r,rc):
         dim = tf.shape(r)
         #pi = tf.constant(math.pi, dtype=tf.float32)
         x = tf.tanh(1 - r / rc)
         return tf.where(tf.logical_and(r<=rc,r>1e-8), x*x*x, tf.zeros(dim, dtype=tf.float32))
-    @tf.function(input_signature=[tf.TensorSpec(shape=(None,None,None), dtype=tf.float32)])
+    @tf.function(input_signature=[tf.TensorSpec(shape=(None,tf.newaxis,tf.newaxis), dtype=tf.float32)])
     def tf_app_gaussian(self,x):
         # we approximate gaussians with polynomials (1+alpha x^2 / p)^(-p) ~ exp(-alpha x^2); 
         #p=64 is an even number
@@ -285,6 +354,21 @@ class mBP_model(tf.keras.Model):
         args32 = args16 * args16
         return args32 * args32
 
+    def help_func(self, n):
+        return tf.ones(n+1, tf.int32) * n
+    def get_all_lxyz_idx(self, n):
+        '''all terms in the lx,lylz summation for the cross product'''
+        i = tf.range(0, n[0] + 1)
+        j = tf.range(0, n[1] + 1)
+        k = tf.range(0, n[2] + 1)
+        X = tf.meshgrid(i,j,k, indexing='ij')
+        return tf.reshape(tf.transpose(X), [-1])
+
+    def generate_all_lxyz(self, n):
+        '''terms needed to compute the lxyz factorial'''
+        _n = tf.reduce_prod(n+1)
+        v = tf.repeat(tf.expand_dims(n, axis=0), _n, axis=0)
+        return tf.reshape(v, [-1])
 
     @tf.function(
                 input_signature=[(
@@ -294,14 +378,18 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(3,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+#                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 )])
+                #elements = (batch_species_encoder, batch_width,
+                #positions, nmax_diff, batch_nats,
+                #batch_width_ang, cells, replica_idx,
+                #batch_Rs_rad, batch_Rs_ang, batch_lambdas, weights_lxlylz, C6)
     def tf_predict_energy_forces(self,x):
 
         rc = tf.cast(self.rcut,dtype=tf.float32)
@@ -320,41 +408,35 @@ class mBP_model(tf.keras.Model):
         positions = tf.cast(positions, tf.float32)
 
         #zeta cannot be a fraction
-        zeta = tf.cast(x[5], dtype=tf.float32)
-        width_ang = tf.cast(x[6], dtype=tf.float32)
+        zeta = tf.cast(self.zeta, dtype=tf.int32)
+        width_ang = tf.cast(x[5], dtype=tf.float32)
         
-        cell = tf.cast(x[7], tf.float32)
-        replica_idx = tf.cast(x[8], tf.float32)
-        Rs = tf.cast(x[9], tf.float32)
-        Rs_ang = tf.cast(x[10], tf.float32)
-        theta_s = tf.cast(x[11], tf.float32)
+        cell = tf.cast(x[6], tf.float32)
+        replica_idx = tf.cast(x[7], tf.float32)
+        Rs = tf.cast(x[8], tf.float32)
+        Rs_ang = tf.cast(x[9], tf.float32)
+        _lambda = tf.constant([-1.0, 1.0], tf.float32)
+
+        _weights_lxlylz = tf.reshape(x[10], [self.thetaN,self.n_perm])
         evdw = 0.0
         
         if self.include_vdw:
-            C6 = tf.cast(x[12], tf.float32)
+            C6 = tf.cast(x[11], tf.float32)
 
-        sin_theta_s = tf.sin(theta_s)
-        cos_theta_s = tf.cos(theta_s)
-        sin_theta_s2 = sin_theta_s * sin_theta_s
-        
-        
         with tf.GradientTape() as g:
             g.watch(positions)
             
             if self.pbc:
-
+                
                 species_encoder0 = tf.identity(species_encoder)
 
                 if self.include_vdw:
-                    positions_extended, species_encoder, C6_extended = generate_periodic_images(self, species_encoder, 
-                                                                                                positions, lattice_vectors, 
-                                                                                                replica_idx, C6)
+                    positions_extended, species_encoder, C6_extended = generate_periodic_images(self, species_encoder, positions, lattice_vectors, replica_idx, C6)
                     C6_extended = tf.reshape(C6_extended, [-1])
                 else:
                     positions_extended, species_encoder = generate_periodic_images(self, species_encoder, positions, lattice_vectors, replica_idx)
                 species_encoder = tf.reshape(species_encoder, [-1])
                 positions_extended = tf.reshape(positions_extended, [-1, 3])
-
             else:
                 positions_extended = tf.identity(positions)
                 species_encoder0 = tf.identity(species_encoder)
@@ -365,6 +447,7 @@ class mBP_model(tf.keras.Model):
             #rj-ri
             #Nneigh x nat x 3
             all_rij = positions - positions_extended[:, tf.newaxis, :]
+            #nat x Nneigh x 3
             all_rij = tf.transpose(all_rij, [1,0,2])
             
             #all_rij_norm = tf.linalg.norm(all_rij, axis=-1)
@@ -397,6 +480,8 @@ class mBP_model(tf.keras.Model):
 
             species_encoder_rad = tf.gather_nd(species_encoder_rad, inball_rad)
             species_encoder_rad = tf.RaggedTensor.from_value_rowids(species_encoder_rad, inball_rad[:,0]).to_tensor()
+
+            
             
             #nat x Ngauss x Nneigh
             gauss_args = width[tf.newaxis,:,tf.newaxis] * (all_rij_norm[:,tf.newaxis,:] - Rs[tf.newaxis,:,tf.newaxis])**2
@@ -419,109 +504,116 @@ class mBP_model(tf.keras.Model):
             atomic_descriptors = tf.reduce_sum(args, axis=-1)
 
 
+            #implement angular part: compute vect_rij dot vect_rik / rij / rik in a linear scaling form
+            gauss_ang_args = width_ang[tf.newaxis,:,tf.newaxis] * (all_rij_norm[:,tf.newaxis,:] - Rs_ang[tf.newaxis,:,tf.newaxis])**2
+            #nat x nrs x neigh
+            Radial_ij =  species_encoder_rad[:,tf.newaxis,:] * self.tf_app_gaussian(gauss_ang_args) * self.tf_fcut(all_rij_norm, rc_ang)[:,tf.newaxis,:]
 
-            #implement angular part: compute vect_rij dot vect_rik / rij / rik
-                   
-            inball_ang = tf.where(all_rij_norm <=rc_ang)
+            #expansion index
+            n = tf.range(zeta+1, dtype=tf.int32)
             
-            all_rij_norm = tf.gather_nd(all_rij_norm, inball_ang)
-            #produces a list of tensors with different shapes because atoms have different number of neighbors
-
-            all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, inball_ang[:,0]).to_tensor(default_value=1e-8)
+            lxlylz = tf.map_fn(self.find_three_non_negative_integers, n, 
+                               fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
             
-            all_rij = tf.gather_nd(all_rij, inball_ang)
-            #produces as list of tensors with different shapes because atoms have different number of neighbors
-            all_rij = tf.RaggedTensor.from_value_rowids(all_rij, inball_ang[:,0]).to_tensor(default_value=1e-8)
-            
-            species_encoder = tf.tile([species_encoder], [nat, 1]) 
-
-            species_encoder = tf.gather_nd(species_encoder, inball_ang)
-            species_encoder = tf.RaggedTensor.from_value_rowids(species_encoder, inball_ang[:,0]).to_tensor()
+            lxlylz = tf.reshape(lxlylz, [-1,3])
+            lxlylz_sum = tf.reduce_sum(lxlylz, axis=-1) # the value of n for each lx, ly and lz
 
             reg = 1e-20
             all_rij_norm_inv = 1.0 / (all_rij_norm + reg)
-            
-            #number of neighbors:
-            _Nneigh = tf.shape(all_rij)
-            Nneigh = _Nneigh[1]
-            
+            #tf.debugging.check_numerics(all_rij_norm_inv, message='all_rij_norm_inv contains NaN')
+
             rij_unit = all_rij * all_rij_norm_inv[:,:,tf.newaxis]
-            #nat x Nneigh X Nneigh
-            #cos_theta_ijk = tf.matmul(rij_unit, tf.transpose(rij_unit, (0,2,1)))
-            #rij.rik
-            cos_theta_ijk = tf.einsum('ijk, ilk -> ijl', rij_unit, rij_unit) 
 
-            #do we need to remove the case of j=k?
-            #i==j or i==k already contribute 0 because of 1/2**zeta or  constant,
-            #this is probably not correct if zeta is too small. We assume it is true for now
-            #lmn = tf.shape(rij_dot_rik)
-            #l = lmn[0]
-            #m = lmn[1]
-            #n = lmn[2]
-            #extract results outside i=j=k
-            #row_col_dep = tf.transpose(tf.where(rij_dot_rik!=1e20))
-            #row, col, dep = tf.transpose(tf.where(rij_dot_rik!=1e20))
-            #row = tf.reshape(row_col_dep[0], (l,m,n))
-            #col = tf.reshape(row_col_dep[1], (l,m,n))
-            #dep = tf.reshape(row_col_dep[2], (l,m,n))
+            #rx^lx * ry^ly * rz^lz
+            #this need to be regularized to avoid undefined derivatives
+            rij_lxlylz = (rij_unit[:,:,tf.newaxis,:] + 1e-20)**(tf.cast(lxlylz, tf.float32)[tf.newaxis,tf.newaxis,:,:])
+            g_ilxlylz = tf.reduce_prod(rij_lxlylz, axis=-1) #nat x neigh x n_lxlylz
+           
+            #sum over neighbors
+            g_ilxlylz = tf.reduce_sum(Radial_ij[:,:,:,tf.newaxis] * g_ilxlylz[:,tf.newaxis,:,:], axis=2)
 
-            #cond = tf.where(tf.logical_and(tf.logical_and(row!=col, col!=dep), row!=dep))
-            #cos_theta_ijk = tf.reshape(tf.RaggedTensor.from_value_rowids(cos_theta_ijk, cond[:,0]).to_tensor(default_value=1e-8), [nat,-1])
-            cos_theta_ijk = tf.reshape(cos_theta_ijk, [nat,Nneigh,Nneigh])
-            
-            #clip values to avoid divergence in the derivative with the division by sin(theta)
-            reg2 = 1e-6
+            #for the sum over k, we just square the gs to give 3 body terms
+            g3_ilxlylz = g_ilxlylz * g_ilxlylz
 
-            cos_theta_ijk = tf.clip_by_value(cos_theta_ijk, clip_value_min=-1.0+reg2, clip_value_max=1.0-reg2)
+            #compute normalizations n! / lx!/ly!/lz!
+            nfact = tf.map_fn(self.factorial, lxlylz_sum, fn_output_signature=tf.float32) #computed for all n_lxlylz
 
-            cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
-            #nat x thetasN x N_unique
-            sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
-            _cos_theta_ijk_theta_s = cos_theta_ijk[:,:,:, tf.newaxis] * cos_theta_s[tf.newaxis,tf.newaxis,tf.newaxis,:] 
-            _sin_theta_ijk_theta_s = sin_theta_ijk[:,:,:, tf.newaxis] * sin_theta_s[tf.newaxis,tf.newaxis,tf.newaxis,:]
-            cos_theta_ijk_theta_s = 1.0 + _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s
-            #tf.debugging.check_numerics(cos_theta_ijk_theta_s, message='cos_theta_ijk_theta_s contains NaN')
-            #cos_theta_ijk_theta_s += tensors_contrib
-            
-            norm_ang = 2.0 
-            #Nat,Nneigh, Nneigh,ThetasN
-            cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta
-            #tf.debugging.check_numerics(cos_theta_ijk_theta_s_zeta, message='cos_theta_ijk_theta_s_zeta contains NaN')
+            #lx!ly!lz!
+            fact_lxlylz = tf.reshape(tf.map_fn(self.factorial, tf.reshape(lxlylz, [-1]), fn_output_signature=tf.float32), [-1,3])
+            fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
 
-            rik_norm_rs = width_ang[tf.newaxis,tf.newaxis,:] * (all_rij_norm[:,:,tf.newaxis]  - Rs_ang[tf.newaxis,tf.newaxis,:])**2
+            nfact_lxlylz = nfact / fact_lxlylz # n_lxlylz
+            
+            #compute zeta! / (zeta-n)! / n!
 
-            #compute the exponetial term: Nat, Nneigh, RNs_ang
-            radial_ij = self.tf_app_gaussian(rik_norm_rs) * self.tf_fcut(all_rij_norm, rc_ang)[:,:,tf.newaxis] * \
-                           species_encoder[:,:,tf.newaxis]
+            zeta_fact = self.factorial(zeta)
+            zeta_fact_n = tf.map_fn(self.factorial, zeta-lxlylz_sum, fn_output_signature=tf.float32)
+
+            zetan_fact = zeta_fact / (zeta_fact_n * nfact)
+
+            fact_norm = nfact_lxlylz * zetan_fact
+
+            g3_ilxlylz *= fact_norm[tf.newaxis,tf.newaxis,:]
+
+            #compute lambda ^ n
+            lambda_n = _lambda[:,tf.newaxis] ** tf.cast(lxlylz_sum, tf.float32) #n_lambda x n_lxlylz
+            lambda_norm = 2.0 # (n_lambda,)
+
+            g3_ilxlylz = g3_ilxlylz[:,:,tf.newaxis,:] * lambda_n[tf.newaxis,tf.newaxis,:,:] #(nat,nrs,2, n_lxlylz)
+            g3_ilxlylz /=  lambda_norm ** tf.cast(zeta,tf.float32)
+
+            #mix all angular momentum components to improve functional flexibility
             
-            # dimension = [Nat, Nneigh, Nneigh, Ngauss_ang, thetaN]
-            exp_ang_theta_ijk = cos_theta_ijk_theta_s_zeta[:,:,:,tf.newaxis,:] * radial_ij[:,:,tf.newaxis,:,tf.newaxis]
-            exp_ang_theta_ijk = tf.reshape(exp_ang_theta_ijk, [nat,Nneigh,Nneigh,Ngauss_ang,thetasN])
-            
-            #dimension = [Nat, Nneigh, Ngauss_ang, thetaN]
-            Base_vector_ij_s = tf.reduce_sum(exp_ang_theta_ijk, axis=2)
-            Base_vector_ij_s = tf.reshape(Base_vector_ij_s, [nat, Nneigh, -1])
-            
-            radial_ij = tf.reshape(tf.tile(radial_ij[:,:,:,tf.newaxis],[1,1,1,thetasN]), [nat,Nneigh,-1])
-            body_descriptor_3 = tf.reduce_sum(Base_vector_ij_s * radial_ij, axis=1) #sum over neigh and Rs_ang
-            body_descriptor_3 = tf.reshape(body_descriptor_3, [nat, Ngauss_ang*thetasN])
-            
+            #natxnrsxnlambdaxn_lxlylz = n_lxlylz x n_lxlylz x nat x nrs x nlambda x n_lxlylz
+            #each lxlylz components is multiplied by a learnable parameter
+            #g3_ilxlylz =  tf.squeeze(tf.einsum('...jk,...kl->...jl', _weights_lxlylz, g3_ilxlylz[:,:,:,:,tf.newaxis]))
+            #same result can be achieved by tf.squeeze(tf.matmul(_weights_lxlylz, g3_ilxlylz[:,:,:,:,tf.newaxis]))
+
+            #g3_ilxlylz =  tf.squeeze(tf.einsum('...jk,...kl->...jl', _weights_lxlylz, g3_ilxlylz[:,:,:,:,tf.newaxis], optimize='auto')) # shape = natxnrsxnlambdaxn_lxlylz
+            #shape = tf.shape(g3_ilxlylz)
+            g3_i = tf.squeeze(tf.matmul(_weights_lxlylz, g3_ilxlylz[:,:,:,:,tf.newaxis])) # nat, nrs, 2, ntheta
+            #g3_ilxlylz = tf.reshape(tf.matmul(_weights_lxlylz, g3_ilxlylz[:,:,:,:,tf.newaxis]), shape)
+#            g3_i = tf.reduce_sum(g3_ilxlylz, axis=-1) #(nat,nrs,n_lambda) after sum over n and lxlylz
+
+            body_descriptor_3 = tf.reshape(g3_i, [nat, 2*Ngauss_ang*thetasN])
             atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_3], axis=1)
-            if self.body_order >= 4:
-                body_tensor_4 = Base_vector_ij_s * Base_vector_ij_s
-                body_descriptor_4 = tf.reduce_sum(body_tensor_4 * radial_ij, axis=1)
-                body_descriptor_4 = tf.reshape(body_descriptor_4, [nat, Ngauss_ang*thetasN])
-                atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_4], axis=1)
-            if self.body_order >= 5:
-                body_tensor_5 = body_tensor_4 * Base_vector_ij_s
-                body_descriptor_5 = tf.reduce_sum(body_tensor_5 * radial_ij, axis=1)
-                body_descriptor_5 = tf.reshape(body_descriptor_5, [nat, Ngauss_ang*thetasN])
-                atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_5], axis=1)
 
+            #four body descriptors 
+#            lxlylz_idx = tf.map(tf.range, tf.reshape(lxlylz, [-1]))
 
+            '''lxlylz_4 = tf.map_fn(self.get_all_lxyz_idx, t, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32)) 
+            lxlylz_4 = tf.reshape(lxlylz_4, [-1,3])
 
-            #feature_size = Ngauss + Ngauss_ang * thetasN
-            #the descriptors can be scaled
+            #lx = tf.map_fn(tf.range, lxlylz_4[:,0]+1, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
+            #ly = tf.map_fn(tf.range, lxlylz_4[:,1]+1, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
+            #lz = tf.map_fn(tf.range, lxlylz_4[:,2]+1, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
+            lx = lxlylz_4[:,0]
+            ly = lxlylz_4[:,1]
+            lz = lxlylz_4[:,2]
+            
+            # one per term in the sum
+            lxyz = tf.map_fn(self.generate_all_lxyz, , fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32)) 
+            lxyz = tf.reshape(idx, [-1,3])
+
+            #lx_rep = tf.map_fn(self.help_func, lxlylz[:,0], fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
+            #lx_rep = tf.reshape(lx_rep, [-1])
+            lx_ab = lxyz[:,0] - lx + ly
+            lx_ac = lxyz[:,0] - lx + lz
+            
+            #ly_rep = tf.map_fn(self.help_func, lxlylz[:,1], fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
+            #ly_rep = tf.reshape(ly_rep, [-1])
+            ly_ba = lxyz[:,1] - ly + lx
+            ly_bc = lxyz[:,1] - ly + lz
+            
+            #lz_rep = tf.map_fn(self.help_func, lxlylz[:,2], fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
+            #lz_rep = tf.reshape(lz_rep, [-1])
+            lz_ca = lxyz[:,2] - lz + lx
+            lz_cb = lxyz[:,2] - lz + ly
+            #next, compute lxyz[:,0]! / (lxyz[:,0]-lx)! / lx! and also for y and z components 
+
+#            lxlylz_sum = 
+            '''
+
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
             
             #mutiply by species weights per atom
@@ -539,9 +631,10 @@ class mBP_model(tf.keras.Model):
         forces = g.gradient(total_energy, positions)
         
         padding = tf.zeros((nmax_diff,3))
-        forces = tf.concat([forces, padding], 0)
+        forces = tf.concat([-forces, padding], 0)
         #forces = tf.zeros((nmax_diff+nat,3))   
-        return [tf.cast(total_energy, tf.float32), -tf.cast(forces, tf.float32)]
+        #return [tf.cast(total_energy, tf.float32), -tf.cast(forces, tf.float32)]
+        return [total_energy, forces]
     def rescale_params(self, x, a, b):
         rsmin = tf.reduce_min(x)
         rsmax = tf.reduce_max(x)
@@ -559,30 +652,31 @@ class mBP_model(tf.keras.Model):
 
         inputs_width_ang = tf.ones(1)
         self.width_value_ang = tf.reshape(self.width_nets_ang(inputs_width_ang[tf.newaxis, :]), [-1])
-        inputs_zeta = tf.ones(1)
-        self.zeta_value = tf.reshape(self.zeta_nets(inputs_zeta[tf.newaxis, :]), [-1])
+
                 
         #inputs for center networks
         tf_pi = tf.constant(math.pi, dtype=tf.float32)
         Rs = tf.ones(1)
         Rs_ang = tf.ones(1)
-        theta_s = tf.ones(1)
+        _lambdas = tf.ones(1)
         Rs_rad_pred = tf.reshape(self.Rs_rad_nets(Rs[tf.newaxis,:]), [-1])
         self._Rs_rad = self.rescale_params(Rs_rad_pred, self.min_radial_center, self.rcut)
 
         Rs_ang_pred = tf.reshape(self.Rs_ang_nets(Rs_ang[tf.newaxis,:]), [-1])
         self._Rs_ang = self.rescale_params(Rs_ang_pred, self.min_radial_center, self.rcut_ang)
         
-        ts_pred = tf.reshape(self.thetas_nets(theta_s[tf.newaxis,:]), [-1])
-        self._thetas = self.rescale_params(ts_pred, 0.0, tf_pi)
-
+    #    self.lambdas = tf.reshape(self.lambdas_nets(_lambdas[tf.newaxis,:]), [-1])
+        
+        
+        self.weights_lxlylz = tf.reshape(self.weights_lxlylz_nets(tf.ones(1)[tf.newaxis,:]), [-1])
 
         batch_width = tf.tile([self.width_value], [batch_size,1])
         batch_width_ang = tf.tile([self.width_value_ang], [batch_size,1])
-        batch_zeta = tf.tile([self.zeta_value], [batch_size,1])
         batch_Rs_rad = tf.tile([self._Rs_rad], [batch_size,1])
         batch_Rs_ang = tf.tile([self._Rs_ang], [batch_size,1])
-        batch_theta_s = tf.tile([self._thetas], [batch_size,1])
+     #   batch_lambdas = tf.tile([self.lambdas], [batch_size,1])
+        batch_weights_lxlylz = tf.tile([self.weights_lxlylz], [batch_size,1])
+
 
         batch_nats = inputs[2]
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
@@ -612,8 +706,9 @@ class mBP_model(tf.keras.Model):
 
         elements = (batch_species_encoder, batch_width,
                 positions, nmax_diff, batch_nats,
-                batch_zeta, batch_width_ang, cells, replica_idx,
-                batch_Rs_rad, batch_Rs_ang, batch_theta_s, C6)
+                batch_width_ang, cells, replica_idx,
+                batch_Rs_rad, batch_Rs_ang, batch_weights_lxlylz, C6)
+                #batch_Rs_rad, batch_Rs_ang, batch_lambdas, batch_weights_lxlylz, C6)
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32])
         return energies, forces
@@ -717,10 +812,10 @@ class mBP_model(tf.keras.Model):
 
             tf.summary.histogram('3. Parameters/1. width',self.width_value,self._train_counter)
             tf.summary.histogram('3. Parameters/2. width_ang',self.width_value_ang,self._train_counter)
-            tf.summary.histogram('3. Parameters/3. zeta',self.zeta_value,self._train_counter)
-            tf.summary.histogram('3. Parameters/4. Rs_rad',self._Rs_rad,self._train_counter)
-            tf.summary.histogram('3. Parameters/5. Rs_ang',self._Rs_ang,self._train_counter)
-            tf.summary.histogram('3. Parameters/6. thetas',self._thetas,self._train_counter)
+            tf.summary.histogram('3. Parameters/3. Rs_rad',self._Rs_rad,self._train_counter)
+            tf.summary.histogram('3. Parameters/4. Rs_ang',self._Rs_ang,self._train_counter)
+            #tf.summary.histogram('3. Parameters/5. lambda',self.lambdas,self._train_counter)
+            tf.summary.histogram('3. Parameters/5. weights_lxlylz',self.weights_lxlylz,self._train_counter)
         return {key: metrics[key] for key in metrics.keys()}
 
 
