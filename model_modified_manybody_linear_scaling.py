@@ -92,8 +92,8 @@ class mBP_model(tf.keras.Model):
         self.nelement = nelement
         # create a species embedding network with 1 hidden layer Nembedding x Nspecies
         self.species_nets = Networks(self.nelement, 
-                                     [self.nspec_embedding,1], 
-                                     ['tanh',self.species_out_act], 
+                                     [self.nspec_embedding], 
+                                     [self.species_out_act], 
                                      #weight_initializer=init,
                                      #bias_initializer='zeros',
                                      prefix='species_encoder')
@@ -289,12 +289,12 @@ class mBP_model(tf.keras.Model):
             arg = tf.reshape(arg, [-1])
             r = tf.einsum('l,ij->ijl',tf.ones(Ngauss), all_rij_norm)
             r = tf.reshape(r, [-1])
-            bf_radial = tf.reshape(help_fn.bessel_function(r,arg,rc), [-1, Ngauss])
+            bf_radial = tf.reshape(help_fn.bessel_function(r,arg,rc), [nat,-1, Ngauss])
 
 
-            radial_ij = tf.einsum('ij,il->ijl',bf_radial, tf.reshape(species_encoder_ij, [-1,self.nspec_embedding])) # shape=(na*nneigh,Ngauss*nspec)
+            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # shape=(na*nneigh,Ngauss*nspec)
+            radial_ij = tf.reshape(radial_ij, [nat,-1,self.nspec_embedding*Ngauss])
             # sum over neighbors j including periodic boundary conditions
-            radial_ij = tf.reshape(radial_ij, [nat,-1, self.nspec_embedding*Ngauss])
             atomic_descriptors = tf.reduce_sum(radial_ij, axis=1)
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, -1])
 
@@ -303,7 +303,7 @@ class mBP_model(tf.keras.Model):
 
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik in a linear scaling form
-            radial_ij = tf.reshape(radial_ij, [nat,-1,Ngauss*self.nspec_embedding])
+            
 
 
             #expansion index
@@ -392,9 +392,9 @@ class mBP_model(tf.keras.Model):
                 g_i34_lm = tf.einsum('ijk,ijl->ijkl',g_ilxlylz, g_ilxlylz) #nat x nrs x nl x nl
 #                tf.debugging.check_numerics(g_i34_lm, message='g_ij_lxlylz contains NaN')
                 g_ij_lm = tf.einsum('ijk,ijl->ijkl', g_ij_lxlylz, g_ij_lxlylz) # shape=(nat,neigh, nl, nl)
-                gi_2_lm = tf.einsum('ijk,ijlm->iklm',radial_ij, g_ij_lm) # shape=(nat, nrs, nl,nl)
+                gi_2_lm = tf.einsum('ijk,ijlm->iklm',radial_ij, g_ij_lm) # shape=(nat, nrs*nspec, nl,nl)
                    
-                g4_i_lm = tf.reshape(gi_2_lm * g_i34_lm, [nat,-1, self.n_perm*self.n_perm]) #nat x nrs x nl**2
+                g4_i_lm = tf.reshape(gi_2_lm * g_i34_lm, [nat,self.n_perm*self.n_perm,-1]) #nat x nrs x nl**2
                 #coefficients
 #                fact_norm_lm = fact_norm[:,tf.newaxis] * fact_norm[tf.newaxis,:] #nl x nl
                 lambda_n_lm = tf.reshape(tf.einsum('ij,ik->ijk',lambda_n, lambda_n), [2,-1]) # nlambda x nl x nl
