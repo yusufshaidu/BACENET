@@ -1,12 +1,16 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 import numpy as np
-from IPython.display import clear_output
+#from IPython.display import clear_output
 #import tensorflow
 import tensorflow.compat.v2.feature_column as fc
 import tensorflow as tf
 from swa.tfkeras import SWA
 import math 
 import os
+from tensorflow.keras.optimizers import Adam
+
+
+
 
 import argparse
 from data_processing import data_preparation
@@ -14,6 +18,10 @@ from data_processing import data_preparation
 #from model_legendre_polynomial import mBP_model
 from model_modified_manybody import mBP_model
 from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
+
+#from tensorflow.keras import mixed_precision
+#mixed_precision.set_global_policy('mixed_float16')
+
 
 def default_config():
     configs = {}
@@ -45,7 +53,7 @@ def default_config():
     configs['energy_key'] = 'energy'
     configs['force_key'] = 'forces'
     configs['test_fraction'] = 0.1
-    configs['nspec_embedding'] = 64
+    configs['nspec_embedding'] = 4
     
     configs['l1_norm'] = 0.0
     configs['l2_norm'] = 0.0
@@ -113,6 +121,9 @@ def create_model(configs):
     species = configs['species']
     batch_size = configs['batch_size']
     model_outdir = configs['outdir']
+    if not os.path.exists(model_outdir):
+        os.mkdir(model_outdir)
+
     num_epochs = configs['num_epochs']
     data_dir = configs['data_dir']
     data_format = configs['data_format']
@@ -147,16 +158,30 @@ def create_model(configs):
                      energy_key, force_key,
                      rc, pbc, batch_size,
                      test_fraction=test_fraction,
-                     atomic_energy=atomic_energy)
+                     atomic_energy=atomic_energy, 
+                     atomic_energy_file=os.path.join(model_outdir,'atomic_energy.json'))
     initial_learning_rate = initial_lr
-    if fixed_lr:
-        lr_schedule = initial_learning_rate
-    else:
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate,
-            decay_steps=decay_step,
-            decay_rate=decay_rate,
-            staircase=True)
+    #if fixed_lr:
+    #    lr_schedule = initial_learning_rate
+    #else:
+    #    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+    #        initial_learning_rate,
+    #        decay_steps=decay_step,
+    #        decay_rate=decay_rate,
+    #        staircase=True)
+    lr_schedule = initial_learning_rate
+
+    cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='RMSE_F',
+        factor=decay_rate,
+        patience=decay_step,
+        verbose=1,
+        mode='auto',
+        min_delta=0.0001,
+        cooldown=0,
+        min_lr=1e-6,
+        )
+
     if opt_method in ['adamW', 'AdamW', 'adamw']:
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
@@ -164,7 +189,7 @@ def create_model(configs):
             amsgrad=False,
             clipnorm=None,
             clipvalue=None,
-            use_ema=True,
+            use_ema=False,
             name='adamw')
 
         print('using adamW as the optimizer')
@@ -174,23 +199,26 @@ def create_model(configs):
             weight_decay=0.004,
             clipnorm=None,
             clipvalue=None,
-            use_ema=True,
+            use_ema=False,
             name='adadelta')
         print('using adadelta as the optimizer')
     else:
         print('using adam as the optimizer')
-        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule, 
-                                             use_ema=True,
+        optimizer = tf.keras.optimizers.Adam(
+                                             learning_rate=lr_schedule,
+                                             use_ema=False,
                                              weight_decay=0.004, 
                                              clipnorm=None,
                                              clipvalue=None,
                                              amsgrad=False,
                                              )
     
-    train_writer = tf.summary.create_file_writer(model_outdir+'/train')
+#    train_writer = tf.summary.create_file_writer(model_outdir+'/train')
     
     if not os.path.exists(model_outdir):
         os.mkdir(model_outdir)
+    #checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}-{val_loss:.5f}.keras"
+#    checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}.keras"
     checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}.ckpt"
 
     checkpoint_dir = os.path.dirname(checkpoint_path)
@@ -209,54 +237,56 @@ def create_model(configs):
         cp_callback = [swa, tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                      save_weights_only=True,
                                                      verbose=1,
-                                                    save_freq=save_freq,
-                                                    options=None),
+                                                    save_freq=save_freq),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
                                                   update_freq='epoch'),
-                   tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False),
-                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
+                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True),
+                       cb_ReduceLROnPlateau]
     else:
         cp_callback = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                      save_weights_only=True,
                                                      verbose=1,
-                                                    save_freq=save_freq,
-                                                    options=None),
+                                                    save_freq=save_freq),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
                                                   update_freq='epoch'),
-                   tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False),
-                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
+                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True),
+                       cb_ReduceLROnPlateau]
 
 
 
+    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
 
  #   gpus = tf.config.list_logical_devices('GPU')
   #  print(gpus)
 #    strategy = tf.distribute.MirroredStrategy(gpus)
    # with strategy.scope():
+#    mirrored_strategy = tf.distribute.MirroredStrategy()
 
+#    with mirrored_strategy.scope():
 
     model = model_call(layer_sizes,
-                  rc_rad, species_identity, width, batch_size,
-                  activations,
-                  rc_ang,RsN_rad,RsN_ang,
-                  thetaN,width_ang,zeta,
-                  fcost=fcost,
-                  ecost=ecost,
-                  pbc=_pbc,
-                  nelement=nelement,
-                  train_writer=train_writer,
-                  l1=l1_norm,l2=l2_norm,
-                  include_vdw=include_vdw,
-                  rmin_u=rmin_u,rmax_u=rmax_u,
-                  rmin_d=rmin_d,rmax_d=rmax_d,
-                  body_order=body_order,
-                  min_radial_center=min_radial_center,
-                  species_out_act=species_out_act)
+              rc_rad, species_identity, width, batch_size,
+              activations,
+              rc_ang,RsN_rad,RsN_ang,
+              thetaN,width_ang,zeta,
+              fcost=fcost,
+              ecost=ecost,
+              pbc=_pbc,
+              nelement=nelement,
+              nspec_embedding=configs['nspec_embedding'],
+              train_writer=model_outdir,
+              l1=l1_norm,l2=l2_norm,
+              include_vdw=include_vdw,
+              rmin_u=rmin_u,rmax_u=rmax_u,
+              rmin_d=rmin_d,rmax_d=rmax_d,
+              body_order=body_order,
+              min_radial_center=min_radial_center,
+              species_out_act=species_out_act)
 
 
     #train the model
 
-    model.save_weights(checkpoint_path.format(epoch=0))
+#    model.save_weights(checkpoint_path.format(epoch=0))
 
     '''ckpt_dir = model_outdir+"/models"
     ckpts = [os.path.join(ckpt_dir, x.split('.index')[0]) for x in os.listdir(ckpt_dir) if x.endswith('index')]
@@ -270,22 +300,24 @@ def create_model(configs):
     print(latest)
     model.load_weights(latest)
     '''
+    #model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
     model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
- #   try:
- #       model.fit(train_data,
- #            epochs=num_epochs,
- #            batch_size=batch_size,
- #            validation_data=test_data,
- #            validation_freq=10,
- #            callbacks=[cp_callback])
- #   except:
+    # avoid error due to the absence or currupt restored folder
+    try:
+        model.fit(train_data,
+             epochs=num_epochs,
+             batch_size=batch_size,
+             validation_data=test_data,
+             validation_freq=10,
+             callbacks=[cp_callback,backupandrestore])
+    except:
 #      pass
 
-    model.fit(train_data,
+        model.fit(train_data,
               epochs=num_epochs,
               batch_size=batch_size,
              validation_data=test_data,
-             validation_freq=5,
+             validation_freq=10,
              callbacks=[cp_callback])
 
 if __name__ == '__main__':
