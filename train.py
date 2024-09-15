@@ -6,7 +6,7 @@ import tensorflow.compat.v2.feature_column as fc
 import tensorflow as tf
 from swa.tfkeras import SWA
 import math 
-import os
+import os, json
 from tensorflow.keras.optimizers import Adam
 
 
@@ -117,7 +117,15 @@ def create_model(configs):
     decay_step = configs['decay_step']
     decay_rate = configs['decay_rate']
     #activations are basically tanh and linear for now
-    activations = ['tanh', 'tanh', 'linear']
+    activations = configs['activations']
+    
+    assert len(activations) == len(layer_sizes),'the number of activations must be same as the number of layer'
+
+    if activations[-1] != 'linear':
+        print(f'You have set the last layer to {activations[-1]} but must be st to linear')
+        print(f'we set it to linear')
+        activations[-1] = 'linear'
+    
     species = configs['species']
     batch_size = configs['batch_size']
     model_outdir = configs['outdir']
@@ -179,13 +187,13 @@ def create_model(configs):
         mode='auto',
         min_delta=0.0001,
         cooldown=0,
-        min_lr=1e-6,
+        min_lr=1e-5,
         )
 
     if opt_method in ['adamW', 'AdamW', 'adamw']:
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
-            weight_decay=0.004,
+            weight_decay=0.0001,
             amsgrad=False,
             clipnorm=None,
             clipvalue=None,
@@ -196,7 +204,7 @@ def create_model(configs):
     elif opt_method in ['Adadelta', 'adadelta']:
         optimizer = tf.keras.optimizers.Adadelta(
             learning_rate=lr_schedule,
-            weight_decay=0.004,
+            weight_decay=0.0001,
             clipnorm=None,
             clipvalue=None,
             use_ema=False,
@@ -207,7 +215,7 @@ def create_model(configs):
         optimizer = tf.keras.optimizers.Adam(
                                              learning_rate=lr_schedule,
                                              use_ema=False,
-                                             weight_decay=0.004, 
+                                             weight_decay=0.0, 
                                              clipnorm=None,
                                              clipvalue=None,
                                              amsgrad=False,
@@ -255,54 +263,56 @@ def create_model(configs):
 
 
     backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
-
- #   gpus = tf.config.list_logical_devices('GPU')
-  #  print(gpus)
-#    strategy = tf.distribute.MirroredStrategy(gpus)
-   # with strategy.scope():
-#    mirrored_strategy = tf.distribute.MirroredStrategy()
-
-#    with mirrored_strategy.scope():
-
-    model = model_call(layer_sizes,
-              rc_rad, species_identity, width, batch_size,
-              activations,
-              rc_ang,RsN_rad,RsN_ang,
-              thetaN,width_ang,zeta,
-              fcost=fcost,
-              ecost=ecost,
-              pbc=_pbc,
-              nelement=nelement,
-              nspec_embedding=configs['nspec_embedding'],
-              train_writer=model_outdir,
-              l1=l1_norm,l2=l2_norm,
-              include_vdw=include_vdw,
-              rmin_u=rmin_u,rmax_u=rmax_u,
-              rmin_d=rmin_d,rmax_d=rmax_d,
-              body_order=body_order,
-              min_radial_center=min_radial_center,
-              species_out_act=species_out_act)
-
-
-    #train the model
-
 #    model.save_weights(checkpoint_path.format(epoch=0))
-
-    '''ckpt_dir = model_outdir+"/models"
-    ckpts = [os.path.join(ckpt_dir, x.split('.index')[0]) for x in os.listdir(ckpt_dir) if x.endswith('index')]
-    if len(ckpts) > 0:
-        ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
-        ckpts_idx.sort()
-        initial_epoch = ckpts_idx[-1]
-        #idx=f"{epoch:04d}"
-
-    latest = tf.train.latest_checkpoint(ckpt_dir)
-    print(latest)
-    model.load_weights(latest)
     '''
-    #model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
+    try:
+        # This should work well on multiple GPUs on a single computer
+        mirrored_strategy = tf.distribute.MirroredStrategy()
+        with mirrored_strategy.scope():
+
+            model = model_call(layer_sizes,
+                      rc_rad, species_identity, width, batch_size,
+                      activations,
+                      rc_ang,RsN_rad,RsN_ang,
+                      thetaN,width_ang,zeta,
+                      fcost=fcost,
+                      ecost=ecost,
+                      pbc=_pbc,
+                      nelement=nelement,
+                      nspec_embedding=configs['nspec_embedding'],
+                      train_writer=model_outdir,
+                      l1=l1_norm,l2=l2_norm,
+                      include_vdw=include_vdw,
+                      rmin_u=rmin_u,rmax_u=rmax_u,
+                      rmin_d=rmin_d,rmax_d=rmax_d,
+                      body_order=body_order,
+                      min_radial_center=min_radial_center,
+                      species_out_act=species_out_act)
+            #train the model
+            model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
+    except:
+    '''
+        # It should work on CPU platform
+    model = model_call(layer_sizes,
+                      rc_rad, species_identity, width, batch_size,
+                      activations,
+                      rc_ang,RsN_rad,RsN_ang,
+                      thetaN,width_ang,zeta,
+                      fcost=fcost,
+                      ecost=ecost,
+                      pbc=_pbc,
+                      nelement=nelement,
+                      nspec_embedding=configs['nspec_embedding'],
+                      train_writer=model_outdir,
+                      l1=l1_norm,l2=l2_norm,
+                      include_vdw=include_vdw,
+                      rmin_u=rmin_u,rmax_u=rmax_u,
+                      rmin_d=rmin_d,rmax_d=rmax_d,
+                      body_order=body_order,
+                      min_radial_center=min_radial_center,
+                      species_out_act=species_out_act)
+
     model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
-    # avoid error due to the absence or currupt restored folder
     try:
         model.fit(train_data,
              epochs=num_epochs,
@@ -319,7 +329,6 @@ def create_model(configs):
              validation_data=test_data,
              validation_freq=10,
              callbacks=[cp_callback])
-
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='create ML model')

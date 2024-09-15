@@ -202,10 +202,8 @@ class mBP_model(tf.keras.Model):
 
         evdw = 0.0
 
-        '''
-        if self.include_vdw:
-            C6 = tf.cast(x[10], tf.float32)
-        '''
+#        if self.include_vdw:
+        C6 = tf.cast(x[10], tf.float32)
 
         sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
@@ -223,10 +221,10 @@ class mBP_model(tf.keras.Model):
                 if self.include_vdw:
                     positions_extended, species_encoder_extended, C6_extended = self.generate_periodic_images(species_encoder, 
                                                                                                 positions, cell, 
-                                                                                                 replica_idx, C6)
+                                                                                                 replica_idx, C6, self.include_vdw)
                     C6_extended = tf.reshape(C6_extended, [-1])
                 else:
-                    positions_extended, species_encoder_extended = help_fn.generate_periodic_images(species_encoder, positions, cell, replica_idx)
+                    positions_extended, species_encoder_extended = help_fn.generate_periodic_images(species_encoder, positions, cell, replica_idx, C6, self.include_vdw)
 
                 species_encoder_extended = tf.reshape(species_encoder_extended, [-1, self.nspec_embedding])
                 positions_extended = tf.reshape(positions_extended, [-1, 3])
@@ -240,11 +238,9 @@ class mBP_model(tf.keras.Model):
             #positions_extended has nat x nreplica x 3 for periodic systems and nat x 1 x 3 for molecules
             
             #rj-ri
-            #Nneigh x nat x 3
-            all_rij = positions - positions_extended[:, tf.newaxis, :]
-            all_rij = tf.transpose(all_rij, [1,0,2])
-            species_encoder_ij = tf.transpose(species_encoder * species_encoder_extended[:,tf.newaxis,:], [1,0,2]) #nat, nneigh, nembedding
-            
+            all_rij = positions_extended - positions[:, tf.newaxis, :] #shape=(nat, nneigh, nembedding)
+            species_encoder_ij = species_encoder[:,tf.newaxis,:] * species_encoder_extended #nat, nneigh, nembedding
+
             all_rij_norm = tf.linalg.norm(all_rij + 1e-16, axis=-1)
             #all_rij_norm = tf.linalg.norm(all_rij, axis=-1)
             #nat, Nneigh: Nneigh = nat * n_replicas
@@ -300,9 +296,9 @@ class mBP_model(tf.keras.Model):
             #fcut = tf.reshape(help_fn.tf_fcut(tf.reshape(all_rij_norm, [-1]), rc), tf.shape(all_rij_norm))
             tf_pi = tf.constant(math.pi, dtype=tf.float32)
             arg = tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Ngauss+1, dtype=tf.float32) * kn_rad, all_rij_norm)
-            arg = tf.reshape(arg, [-1])
+            #arg = tf.reshape(arg, [-1])
             r = tf.einsum('l,ij->ijl',tf.ones(Ngauss), all_rij_norm)
-            r = tf.reshape(r, [-1])
+            #r = tf.reshape(r, [-1])
             bf_radial = tf.reshape(help_fn.bessel_function(r,arg,rc), [nat, -1, Ngauss])
             #bf_radial = tf.reshape(help_fn.bessel_function(r,arg,rc), [-1, Ngauss])
             
@@ -394,9 +390,9 @@ class mBP_model(tf.keras.Model):
             #fcut = tf.reshape(help_fn.tf_fcut(tf.reshape(all_rij_norm, [-1]), rc_ang), tf.shape(all_rij_norm))
             #'''
             arg = tf_pi / rc_ang * tf.einsum('l,ij->ijl',tf.range(1, Ngauss_ang+1, dtype=tf.float32) * kn_ang, all_rij_norm)
-            arg = tf.reshape(arg, [-1])
+            #arg = tf.reshape(arg, [-1])
             r = tf.einsum('l,ij->ijl',tf.ones(Ngauss_ang), all_rij_norm)
-            r = tf.reshape(r, [-1])
+            #r = tf.reshape(r, [-1])
             bf_radial_ang = tf.reshape(help_fn.bessel_function(r,arg,rc_ang), [nat,-1, Ngauss_ang])
             #'''
             #radial_ij = tf.einsum('ijk,ij->ijk',gauss_term, fcut)

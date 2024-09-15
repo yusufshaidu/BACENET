@@ -39,7 +39,15 @@ def factorial( n):
 
     return result
 
-def generate_periodic_images(species_vectors, positions, lattice_vectors, image_range, C6=None, include_vdw=False):
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                             tf.TensorSpec(shape=(3,3), dtype=tf.float32),
+                             tf.TensorSpec(shape=(3,), dtype=tf.int32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                             tf.TensorSpec(shape=(), dtype=tf.bool),
+                              ])
+
+def generate_periodic_images(species_vectors, positions, lattice_vectors, image_range, C6, include_vdw):
     """
     Generate periodic image points for given atomic positions with a cutoff distance.
 
@@ -151,7 +159,7 @@ def _tf_fcut(r,rc):
     x = tf.tanh(1 - r / rc)
     return tf.where(r<=rc, x*x*x, tf.zeros(dim, dtype=tf.float32))
 
-@tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
                              tf.TensorSpec(shape=(), dtype=tf.float32)])
 def tf_fcut_rbf(r,rc):
     p = tf.constant(6, dtype=tf.float32)
@@ -177,8 +185,8 @@ def tf_app_gaussian(x):
     args16 = args8 * args8
     args32 = args16 * args16
     return args32 * args32
-@tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
                               tf.TensorSpec(shape=(), dtype=tf.float32)])
 def bessel_function(r,rn,rc):
     dim = tf.shape(r)

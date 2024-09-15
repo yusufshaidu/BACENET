@@ -62,8 +62,10 @@ class mBP_model(tf.keras.Model):
         n_perm = tf.while_loop(cond, body, [i, res])[1]
         n_perm = tf.cast(n_perm, tf.int32)
         self.n_perm = n_perm
+        self.n_perm = tf.get_static_value(self.n_perm)
 
-        base_size = self.RsN_rad * 2 * self.n_perm
+        base_size = self.RsN_ang * self.thetaN
+        #base_size = self.RsN_ang * (self.zeta+1) * 2
 
         self.feature_size = self.RsN_rad + base_size
         if self.body_order >= 4:
@@ -149,14 +151,12 @@ class mBP_model(tf.keras.Model):
         '''
         #        self.n_perm = 20
 
-        '''
         init = tf.keras.initializers.GlorotNormal(seed=45)
-        self.weights_lxlylz_nets = Networks(1, [self.n_perm * self.n_perm], ['tanh'],
+        self.weights_lxlylz_nets = Networks(1, [(self.zeta+1)*self.thetaN*2], ['linear'],
                                           weight_initializer=init,
                                           bias_initializer=init,
                                           kernel_constraint=constraint,
                                        bias_constraint=constraint, prefix='weights_lxlylz')
-        '''
     @tf.function(
                 input_signature=[(
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -167,6 +167,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(3,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 )])
     def tf_predict_energy_forces(self,x):
@@ -186,13 +187,13 @@ class mBP_model(tf.keras.Model):
         nat = x[4]
         nmax_diff = x[3]
         species_encoder = tf.reshape(x[0][:nat*self.nspec_embedding], [nat,self.nspec_embedding])
-        kn_rad = tf.cast(x[1], dtype=tf.float32)
+        kn_rad = x[1]
         positions = tf.reshape(x[2][:nat*3], [nat,3])
         #positions = positions
 
         #zeta cannot be a fraction
         zeta = tf.cast(self.zeta, dtype=tf.int32)
-        kn_ang = tf.cast(x[5], dtype=tf.float32)
+        kn_ang = x[5]
         
         cell = x[6]
         replica_idx = tf.cast(x[7], tf.int32)
@@ -201,11 +202,11 @@ class mBP_model(tf.keras.Model):
         #_lambda = tf.constant([-1.0, 1.0], tf.float32)
         #_lambda = x[10]
 
-        #_weights_lxlylz = tf.reshape(x[11], [self.n_perm,self.n_perm])
+        _weights = tf.reshape(x[8], [2*(self.zeta+1),thetasN])
         evdw = 0.0
         
-        if self.include_vdw:
-            C6 = tf.cast(x[8][:nat], tf.float32)
+        #if self.include_vdw:
+        C6 = x[9][:nat]
 
         with tf.GradientTape() as g:
             g.watch(positions)
@@ -215,10 +216,10 @@ class mBP_model(tf.keras.Model):
                 #species_encoder0 = tf.identity(species_encoder)
 
                 if self.include_vdw:
-                    positions_extended, species_encoder, C6_extended = help_fn.generate_periodic_images(species_encoder, positions, cell, replica_idx, C6, self.include_vdw)
+                    positions_extended, species_encoder_extended, C6_extended = help_fn.generate_periodic_images(species_encoder, positions, cell, replica_idx, C6, self.include_vdw)
                     C6_extended = tf.reshape(C6_extended, [-1])
                 else:
-                    positions_extended, species_encoder = help_fn.generate_periodic_images(species_encoder, positions, cell, replica_idx)
+                    positions_extended, species_encoder_extended = help_fn.generate_periodic_images(species_encoder, positions, cell, replica_idx,C6,self.include_vdw)
                 species_encoder_extended = tf.reshape(species_encoder_extended, [-1, self.nspec_embedding])
                 positions_extended = tf.reshape(positions_extended, [-1, 3])
             else:
@@ -230,13 +231,11 @@ class mBP_model(tf.keras.Model):
             #positions_extended has nat x nreplica x 3 for periodic systems and nat x 1 x 3 for molecules
             
             #rj-ri
-            #Nneigh x nat x 3
-            all_rij = positions - positions_extended[:, tf.newaxis, :]
-            #nat x Nneigh x 3
-            all_rij = tf.transpose(all_rij, [1,0,2])
-            species_encoder_ij = tf.transpose(species_encoder * species_encoder_extended[:,tf.newaxis,:], [1,0,2]) #nat, nneigh, nembedding
             
-            #all_rij_norm = tf.linalg.norm(all_rij, axis=-1)
+            all_rij = positions_extended - positions[:, tf.newaxis, :] #shape=(nat, nneigh, nembedding)
+            species_encoder_ij = species_encoder[:,tf.newaxis,:] * species_encoder_extended #nat, nneigh, nembedding
+            
+            #all_rij_norm = tf.linalg.norm(all_rij+1e-16, axis=-1)
             #nat, Nneigh: Nneigh = nat * n_replicas
             #regularize the norm to avoid divition by zero in the derivatives
             all_rij_norm = tf.sqrt(tf.reduce_sum(all_rij * all_rij, axis=-1) + 1e-16)
@@ -286,9 +285,9 @@ class mBP_model(tf.keras.Model):
 
             tf_pi = tf.constant(math.pi, dtype=tf.float32)
             arg = tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Ngauss+1, dtype=tf.float32) * kn_rad, all_rij_norm)
-            arg = tf.reshape(arg, [-1])
+            #arg = tf.reshape(arg, [-1])
             r = tf.einsum('l,ij->ijl',tf.ones(Ngauss), all_rij_norm)
-            r = tf.reshape(r, [-1])
+            #r = tf.reshape(r, [-1])
             bf_radial = tf.reshape(help_fn.bessel_function(r,arg,rc), [nat,-1, Ngauss])
 
 
@@ -303,6 +302,16 @@ class mBP_model(tf.keras.Model):
 
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik in a linear scaling form
+            arg = tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Ngauss_ang+1, dtype=tf.float32) * kn_ang, all_rij_norm)
+            #arg = tf.reshape(arg, [-1])
+            r = tf.einsum('l,ij->ijl',tf.ones(Ngauss_ang), all_rij_norm)
+            #r = tf.reshape(r, [-1])
+            bf_radial_ang = tf.reshape(help_fn.bessel_function(r,arg,rc), [nat,-1, Ngauss_ang])
+
+
+            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial_ang, species_encoder_ij) # shape=(na*nneigh,Ngauss*nspec)
+            radial_ij = tf.reshape(radial_ij, [nat,-1,self.nspec_embedding*Ngauss_ang])
+
             
 
 
@@ -330,11 +339,11 @@ class mBP_model(tf.keras.Model):
             
             #compute normalizations n! / lx!/ly!/lz!
             nfact = tf.map_fn(help_fn.factorial, lxlylz_sum, fn_output_signature=tf.float32,
-                              parallel_iterations=4) #computed for all n_lxlylz
+                              parallel_iterations=self.n_perm) #computed for all n_lxlylz
 
             #lx!ly!lz!
             fact_lxlylz = tf.reshape(tf.map_fn(help_fn.factorial, tf.reshape(lxlylz, [-1]), fn_output_signature=tf.float32,
-                                               parallel_iterations=4), [-1,3])
+                                               parallel_iterations=self.n_perm*3), [-1,3])
             fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
 
             nfact_lxlylz = nfact / fact_lxlylz # n_lxlylz
@@ -344,7 +353,7 @@ class mBP_model(tf.keras.Model):
             zeta_fact = help_fn.factorial(zeta)
             zeta_fact_n = tf.map_fn(help_fn.factorial, zeta-lxlylz_sum, 
                                     fn_output_signature=tf.float32,
-                                    parallel_iterations=4)
+                                    parallel_iterations=self.n_perm)
 
             zetan_fact = zeta_fact / (zeta_fact_n * nfact)
 
@@ -352,60 +361,77 @@ class mBP_model(tf.keras.Model):
 
             g_ij_lxlylz = tf.einsum('ijk,k->ijk',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
 
-            #mix all angular momentum components to improve functional flexibility
+            #normalize and mix all angular momentum components to improve functional flexibility
+            #divide by 2 corresponding to the sqrt which since lambda enters once per body order above 2 
+            lambda_n = tf.constant([-1.0, 1.0], dtype=tf.float32)[:,tf.newaxis] ** tf.range(self.zeta+1, dtype=tf.float32) # shape=(2,n_lxlylz)
+            lambda_norm = 2.0
+            lambda_n = lambda_n / (lambda_norm ** tf.cast(zeta,tf.float32))
+            #g_ij_lxlylz = tf.einsum('ijk,lk->ijkl',g_ij_lxlylz, lambda_n)
+            g_ij_lxlylz = tf.reshape(g_ij_lxlylz, [nat,-1,self.n_perm])
+
+            #g_ij_lxlylz = tf.einsum('ijk,kl->ijl', g_ij_lxlylz, _weights) #shape=(nat,nneigh,2*thetaN)
             #g_ij_lxlylz = tf.squeeze(tf.matmul(_weights_lxlylz, g_ij_lxlylz[:,:,:,tf.newaxis])) # nat, neigh, n_lxlylz
  #           tf.debugging.check_numerics(g_ij_lxlylz, message='g_ij_lxlylz contains NaN')
            
             #sum over neighbors = nat x nrs x nl
             g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij, g_ij_lxlylz) #shape=(nat,nrad,n_lxlylz)
+            g3_ilxlylz = g_ilxlylz * g_ilxlylz * lambda_norm
+
+               #for now. This should be vectorized
+            nr_nspec = self.nspec_embedding*Ngauss_ang
+            lxlylz_sum_expanded = tf.tile(lxlylz_sum[None,None,:], [nat,nr_nspec,1])
+            g3_i_n = []
+
+            for k in range(self.zeta+1):
+                values = tf.where(lxlylz_sum_expanded==k, g3_ilxlylz, tf.zeros((nat,nr_nspec,self.n_perm)))
+
+                g3_i_n.append(tf.reduce_sum(values, axis=-1))
+            g3_i_n = tf.transpose(g3_i_n, [1,2,0])
+            g3_i_n_lambda = tf.einsum('ijk,lk->ijkl',g3_i_n, lambda_n) 
+            g3_i_n_lambda = tf.reshape(g3_i_n_lambda, [nat,nr_nspec,-1])
+            g3_i = tf.einsum('ijk,kl->ijl', g3_i_n_lambda, _weights) #shape=(nat,self.nspec_embedding*Ngauss_ang,thetaN)
 
   #          tf.debugging.check_numerics(g_ilxlylz, message='g_ilxlylz contains NaN')
 
             #for the sum over k, we just square the gs to give 3 body terms
-            g3_ilxlylz = g_ilxlylz * g_ilxlylz
+            #g3_i = g_i_n * g_i_n  * lambda_norm
+
    #         tf.debugging.check_numerics(g3_ilxlylz, message='g3_ilxlylz contains NaN')
-
             
-            #g3_ilxlylz *= fact_norm[tf.newaxis,tf.newaxis,:]
+            g3_i  = tf.reshape(g3_i, [nat,-1])
 
-            #compute lambda ^ n
-
-            lambda_n = tf.constant([-1.0, 1.0], dtype=tf.float32)[:,tf.newaxis] ** tf.cast(lxlylz_sum, tf.float32) # shape=(2,n_lxlylz)
-            lambda_n = tf.reshape(lambda_n, [2, -1])
-#            lambda_n =(_lambda[:,tf.newaxis] + 1e-16) ** tf.cast(lxlylz_sum, tf.float32) #n_lambda x n_lxlylz
-            lambda_norm = 2.0
-            #lambda_norm = 1. + tf.abs(_lambda) # (n_lambda,)
-            #lambda2 = _lambda * _lambda
-            #lambda_norm = 1. + tf.sqrt(lambda2 + 1e-16) # (n_lambda,)
-            lambda_n /= (lambda_norm ** tf.cast(zeta,tf.float32))
-            #tf.debugging.check_numerics(lambda_n, message='lambda_n contains NaN')
-
-            g3_ilxlylz = tf.einsum('ijk,lk->ijlk', g3_ilxlylz, lambda_n) #(nat,nrs,n_lambda, n_lxlylz)
-            g3_i = tf.reshape(g3_ilxlylz, [nat,-1]) #(nat,nrs*n_lambda*n_lxlylz) after sum over n and lxlylz
+            #g3_i = tf.reshape(g3_ilxlylz * lambda_n, [nat,-1]) #(nat,nrs*n_lambda*n_lxlylz) after sum over n and lxlylz
             #g3_i = tf.reduce_sum(g3_i, axis=-1) #(nat,nrs,n_lambda) after sum over n and lxlylz
 
-            #body_descriptor_3 = tf.reshape(g3_i, [nat, Ngauss_ang*thetasN])
             atomic_descriptors = tf.concat([atomic_descriptors, g3_i], axis=1)
-
+            '''
             if self.body_order >= 4:
                 #compute sum over k and l
-                g_i34_lm = tf.einsum('ijk,ijl->ijkl',g_ilxlylz, g_ilxlylz) #nat x nrs x nl x nl
+
+                g_i34_lm = tf.einsum('ijk,ijl->ijkl',g_ilxlylz, g_ilxlylz) #nat x nrs*spec x nl x nl
 #                tf.debugging.check_numerics(g_i34_lm, message='g_ij_lxlylz contains NaN')
                 g_ij_lm = tf.einsum('ijk,ijl->ijkl', g_ij_lxlylz, g_ij_lxlylz) # shape=(nat,neigh, nl, nl)
                 gi_2_lm = tf.einsum('ijk,ijlm->iklm',radial_ij, g_ij_lm) # shape=(nat, nrs*nspec, nl,nl)
                    
-                g4_i_lm = tf.reshape(gi_2_lm * g_i34_lm, [nat,self.n_perm*self.n_perm,-1]) #nat x nrs x nl**2
+                g4_i_lm = gi_2_lm * g_i34_lm #nat x nrs x nl x nl
+                lxlylz_sum_expanded = tf.tile(lxlylz_sum[None,None,:], [nat,self.nspec_embedding*Ngauss_ang,1])
+                g4_i_n = []
+                for k in range(self.zeta+1):
+                    values = tf.where(lxlylz_sum_expanded==k, g3_ilxlylz, tf.zeros((nat,self.nspec_embedding*Ngauss_ang,self.n_perm)))
+
+                    g3_i_n.append(tf.reduce_sum(values, axis=-1))
+                g3_i_n = tf.transpose(g3_i_n, [1,2,0])
+                g3_i = tf.einsum('ijk,kl->ijl', g3_i_n, _weights) #shape=(nat,self.nspec_embedding*Ngauss_ang,thetaN)
+
+
                 #coefficients
 #                fact_norm_lm = fact_norm[:,tf.newaxis] * fact_norm[tf.newaxis,:] #nl x nl
-                lambda_n_lm = tf.reshape(tf.einsum('ij,ik->ijk',lambda_n, lambda_n), [2,-1]) # nlambda x nl x nl
-                #tf.debugging.check_numerics(lambda_n_lm, message='lambda_lm contains NaN')
-                g4_i = tf.einsum('ijk,lk->ijlk',g4_i_lm, lambda_n_lm) # shape=(nat, nrs, nlambda=2,nl**2)
+                #g4_i = tf.einsum('ijkl, mkl->ijmkl', g4_i_lm, lambda_n_lm) # shape=(nat, nrs, nlambda=2,nl**2)
  #               tf.debugging.check_numerics(g4_i, message='g4_i contains NaN')
-
-                body_descriptor_4 = tf.reshape(g4_i, [nat, -1])
+                  
+                body_descriptor_4 = tf.reshape(g4_i * lambda_norm**2, [nat, -1])
                 atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_4], axis=1)
-
-
+            '''
             #four body descriptors 
 #            lxlylz_idx = tf.map(tf.range, tf.reshape(lxlylz, [-1]))
 
@@ -457,7 +483,7 @@ class mBP_model(tf.keras.Model):
         forces = g.gradient(total_energy, positions)
         
         padding = tf.zeros((nmax_diff,3))
-        forces = tf.concat([-forces, padding], 0)
+        forces = -tf.concat([forces, padding], 0)
         #forces = tf.zeros((nmax_diff+nat,3))   
         #return [tf.cast(total_energy, tf.float32), -tf.cast(forces, tf.float32)]
         return [total_energy, forces]
@@ -497,7 +523,7 @@ class mBP_model(tf.keras.Model):
 
         
         
-        #self.weights_lxlylz = tf.reshape(self.weights_lxlylz_nets(tf.ones(1)[tf.newaxis,:]), [-1])
+        self.weights_lxlylz = tf.reshape(self.weights_lxlylz_nets(tf.ones(1)[tf.newaxis,:]), [-1])
         batch_kn_rad = tf.tile([self.kn_rad], [batch_size,1])
         batch_kn_ang = tf.tile([self.kn_ang], [batch_size,1])
 
@@ -506,7 +532,7 @@ class mBP_model(tf.keras.Model):
         #batch_Rs_rad = tf.tile([self._Rs_rad], [batch_size,1])
         #batch_Rs_ang = tf.tile([self._Rs_ang], [batch_size,1])
         #batch_lambdas = tf.tile([self.lambdas], [batch_size,1])
-        #batch_weights_lxlylz = tf.tile([self.weights_lxlylz], [batch_size,1])
+        batch_weights_lxlylz = tf.tile([self.weights_lxlylz], [batch_size,1])
 
 
         batch_nats = inputs[2]
@@ -539,7 +565,7 @@ class mBP_model(tf.keras.Model):
 
         elements = (batch_species_encoder, batch_kn_rad,
                 positions, nmax_diff, batch_nats,
-                batch_kn_ang, cells, replica_idx,C6)
+                batch_kn_ang, cells, replica_idx,batch_weights_lxlylz,C6)
                 #batch_Rs_rad, batch_Rs_ang, batch_lambdas, C6)
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32],
@@ -622,7 +648,7 @@ class mBP_model(tf.keras.Model):
             #tf.summary.histogram('3. Parameters/3. Rs_rad',self._Rs_rad,self._train_counter)
             #tf.summary.histogram('3. Parameters/4. Rs_ang',self._Rs_ang,self._train_counter)
             #tf.summary.histogram('3. Parameters/5. lambda',self.lambdas,self._train_counter)
-            #tf.summary.histogram('3. Parameters/6. weights_lxlylz',self.weights_lxlylz,self._train_counter)
+            tf.summary.histogram('3. Parameters/3. weights_lxlylz',self.weights_lxlylz,self._train_counter)
         return {key: metrics[key] for key in metrics.keys()}
 
 

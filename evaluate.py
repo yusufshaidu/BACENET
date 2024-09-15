@@ -27,6 +27,11 @@ def create_model(configs):
     rc_ang = configs['rc_ang']
     nelement = configs['nelement']
     epoch = configs['epoch']
+    try:
+        interval = configs['interval']
+    except:
+        interval = 1
+        print('all saved checkpoints will be evaluated')
     #estimate initial parameters
     width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
     width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
@@ -40,7 +45,10 @@ def create_model(configs):
     else:
         pbc = [False,False,False]
     #activations are basically tanh and linear for now
-    activations = ['tanh', 'tanh', 'linear']
+    activations = configs['activations']
+
+    assert len(activations) == len(layer_sizes),'the number of activations must be same as the number of layer'
+
     species = configs['species']
     batch_size = configs['batch_size']
     model_outdir = configs['model_outdir']
@@ -140,7 +148,7 @@ def create_model(configs):
 
         _epoch = ckpts_idx[i]
         if len(ck) > 1:
-            if int(_epoch) % 5 != 0:
+            if int(i) % interval != 0:
                 continue
 
 
