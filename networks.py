@@ -32,6 +32,7 @@ def Networks(input_size, layer_sizes,
                                         dtype=mixed_precision.set_global_policy('float32'),
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activation}'
                                         ))
+#        model.add(tf.keras.layers.BatchNormalization())
         i += 1
 
     if activations[-1] == 'linear':
@@ -47,6 +48,7 @@ def Networks(input_size, layer_sizes,
                                         dtype=tf.float32,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
+ #       model.add(tf.keras.layers.BatchNormalization())
     else:
         model.add(tf.keras.layers.Dense(layer_sizes[-1], activation=activations[-1],
                                         kernel_initializer=weight_initializer,
@@ -61,4 +63,5 @@ def Networks(input_size, layer_sizes,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
 
+  #      model.add(tf.keras.layers.BatchNormalization())
     return model

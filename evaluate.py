@@ -6,6 +6,7 @@ from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
 import os, sys, yaml,argparse, json
 import numpy as np
 import train
+from pathlib import Path
 
 def create_model(configs):
 
@@ -134,7 +135,9 @@ def create_model(configs):
         #model.load_weights(ckpts[-1]).expect_partial()
         print(f'evaluating {ck}')
     else:
-        print('I am evaluating all saved check points: may take some time')
+        print('############')
+        print('I am evaluating all saved check points: may take some time except some of them are already done!!!')
+        print('############')
         ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
         ckpts_idx.sort()
 
@@ -148,7 +151,8 @@ def create_model(configs):
 
         _epoch = ckpts_idx[i]
         if len(ck) > 1:
-            if int(i) % interval != 0:
+            pfile = Path(os.path.join(outdir, f'energy_last_test_{_epoch}.dat'))
+            if int(i) % interval != 0 or pfile.is_file():
                 continue
 
 
@@ -177,8 +181,8 @@ def create_model(configs):
         frmse = tf.sqrt(tf.reduce_mean((_f_ref-_f_pred)**2))
         print(f'Ermse = {rmse*1000:.3f} and Emae = {mae*1000:.3f} | Frmse = {frmse*1000:.3f} and Fmae = {fmae*1000:.3f}')
         #print(f'Forces: the test rmse = {rmse} and mae = {mae}')
-        np.savetxt(os.path.join(outdir, f'energy_last_test_{epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
-        np.savetxt(os.path.join(outdir, f'forces_last_test_{epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
+        np.savetxt(os.path.join(outdir, f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
+        np.savetxt(os.path.join(outdir, f'forces_last_test_{_epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
     
 if __name__ == '__main__':
 

@@ -70,7 +70,7 @@ class mBP_model(tf.keras.Model):
         self.feature_size = self.RsN_rad + base_size
         if self.body_order >= 4:
             for k in range(3,self.body_order):
-                self.feature_size += base_size*self.n_perm
+                self.feature_size += base_size
         self.nspec_embedding = nspec_embedding
         self.feature_size *= self.nspec_embedding
         self.pbc = pbc
@@ -104,12 +104,12 @@ class mBP_model(tf.keras.Model):
         constraint = None
         Nwidth_rad = self.RsN_rad
         Nwidth_ang = self.RsN_ang
-        init = tf.keras.initializers.RandomNormal(mean=10, stddev=0.05)
+        init = tf.keras.initializers.RandomNormal(mean=3.0, stddev=0.05)
         self.rbf_nets = Networks(1, [self.RsN_rad], ['sigmoid'], 
                                  weight_initializer=init,
                                  bias_initializer='zeros',
                                  prefix='rbf')
-        init = tf.keras.initializers.RandomNormal(mean=10, stddev=0.05)
+        init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
         self.rbf_nets_ang = Networks(1, [self.RsN_ang], ['sigmoid'], 
                                      weight_initializer=init,
                                      bias_initializer='zeros',
@@ -154,9 +154,13 @@ class mBP_model(tf.keras.Model):
         init = tf.keras.initializers.GlorotNormal(seed=45)
         self.weights_lxlylz_nets = Networks(1, [(self.zeta+1)*self.thetaN*2], ['linear'],
                                           weight_initializer=init,
-                                          bias_initializer=init,
-                                          kernel_constraint=constraint,
-                                       bias_constraint=constraint, prefix='weights_lxlylz')
+                                          prefix='weights_lxlylz')
+
+        init = tf.keras.initializers.GlorotNormal(seed=46)
+        self.weights_lxlylz_nets_bo4 = Networks(1, [(self.zeta+1)**2*self.thetaN*2], ['linear'],
+                                          weight_initializer=init,
+                                          prefix='weights_lxlylz_bo4')
+
     @tf.function(
                 input_signature=[(
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -167,6 +171,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(3,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 )])
@@ -203,10 +208,11 @@ class mBP_model(tf.keras.Model):
         #_lambda = x[10]
 
         _weights = tf.reshape(x[8], [2*(self.zeta+1),thetasN])
+        _weights_bo4 = tf.reshape(x[9], [2*(self.zeta+1)**2,thetasN])
         evdw = 0.0
         
         #if self.include_vdw:
-        C6 = x[9][:nat]
+        C6 = x[10][:nat]
 
         with tf.GradientTape() as g:
             g.watch(positions)
@@ -375,18 +381,47 @@ class mBP_model(tf.keras.Model):
            
             #sum over neighbors = nat x nrs x nl
             g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij, g_ij_lxlylz) #shape=(nat,nrad,n_lxlylz)
-            g3_ilxlylz = g_ilxlylz * g_ilxlylz * lambda_norm
+            g3_ilxlylz = g_ilxlylz * g_ilxlylz
 
                #for now. This should be vectorized
             nr_nspec = self.nspec_embedding*Ngauss_ang
             lxlylz_sum_expanded = tf.tile(lxlylz_sum[None,None,:], [nat,nr_nspec,1])
+            
+            g3_ilxlylz_flat = tf.reshape(g3_ilxlylz, (-1, self.n_perm))
+            lxlylz_sum_expanded_flat = tf.reshape(lxlylz_sum_expanded, (-1, self.n_perm))
+
+            # Compute sums by creating a mask and summing
+            g3_i_n = tf.reduce_sum(
+                          tf.where(tf.equal(tf.expand_dims(lxlylz_sum_expanded_flat, axis=-1), tf.range(self.zeta+1, dtype=tf.int32)),
+                          tf.expand_dims(g3_ilxlylz_flat, axis=-1),
+                          tf.zeros_like(tf.expand_dims(g3_ilxlylz_flat, axis=-1))),
+                     axis=1
+                     )
+            g3_i_n = tf.reshape(g3_i_n,[nat,-1,self.zeta+1])
+
+            ''' 
+            if self.body_order==4:
+                g_i34_lm = tf.einsum('ijk,ijl->ijkl',g_ilxlylz, g_ilxlylz) #nat x nrs*spec x nl x nl
+                g_ij_lm = tf.einsum('ijk,ijl->ijkl', g_ij_lxlylz, g_ij_lxlylz) # shape=(nat,neigh, nl, nl)
+                gi_2_lm = tf.einsum('ijk,ijlm->iklm',radial_ij, g_ij_lm) # shape=(nat, nrs*nspec, nl,nl)
+                g4_i_lm = tf.reshape(gi_2_lm * g_i34_lm, [nat,-1,self.n_perm*self.n_perm]) #shape=(nat, nspec*nrs, nl, nl)
+
+                g4_i_n = []
+
             g3_i_n = []
-
             for k in range(self.zeta+1):
-                values = tf.where(lxlylz_sum_expanded==k, g3_ilxlylz, tf.zeros((nat,nr_nspec,self.n_perm)))
-
+                values = tf.where(lxlylz_sum_expanded==k, g3_ilxlylz, tf.zeros_like(g3_ilxlylz))
+                gl = tf.where(lxlylz_sum_expanded==k, g4_i_lm, tf.zeros_like(g4_i_lm))
                 g3_i_n.append(tf.reduce_sum(values, axis=-1))
+                if self.body_order==4:
+                    for k2 in range(self.zeta+1):
+                        gm = tf.where(lxlylz_sum_expanded==k2, g4_i_lm, tf.zeros_like(g4_i_lm))
+                        values = tf.reduce_sum(gl[:,:,:,tf.newaxis] * gm[:,:,tf.newaxis,:], axis=(-2,-1))
+                        g4_i_n.append(values)
+                        
             g3_i_n = tf.transpose(g3_i_n, [1,2,0])
+            '''
+
             g3_i_n_lambda = tf.einsum('ijk,lk->ijkl',g3_i_n, lambda_n) 
             g3_i_n_lambda = tf.reshape(g3_i_n_lambda, [nat,nr_nspec,-1])
             g3_i = tf.einsum('ijk,kl->ijl', g3_i_n_lambda, _weights) #shape=(nat,self.nspec_embedding*Ngauss_ang,thetaN)
@@ -402,71 +437,49 @@ class mBP_model(tf.keras.Model):
 
             #g3_i = tf.reshape(g3_ilxlylz * lambda_n, [nat,-1]) #(nat,nrs*n_lambda*n_lxlylz) after sum over n and lxlylz
             #g3_i = tf.reduce_sum(g3_i, axis=-1) #(nat,nrs,n_lambda) after sum over n and lxlylz
-
+            
             atomic_descriptors = tf.concat([atomic_descriptors, g3_i], axis=1)
-            '''
             if self.body_order >= 4:
                 #compute sum over k and l
 
                 g_i34_lm = tf.einsum('ijk,ijl->ijkl',g_ilxlylz, g_ilxlylz) #nat x nrs*spec x nl x nl
-#                tf.debugging.check_numerics(g_i34_lm, message='g_ij_lxlylz contains NaN')
+                #_g_ij_lxlylz = tf.einsum('ijk,ijl->ijkl',radial_ij, g_ij_lxlylz)
                 g_ij_lm = tf.einsum('ijk,ijl->ijkl', g_ij_lxlylz, g_ij_lxlylz) # shape=(nat,neigh, nl, nl)
                 gi_2_lm = tf.einsum('ijk,ijlm->iklm',radial_ij, g_ij_lm) # shape=(nat, nrs*nspec, nl,nl)
                    
-                g4_i_lm = gi_2_lm * g_i34_lm #nat x nrs x nl x nl
-                lxlylz_sum_expanded = tf.tile(lxlylz_sum[None,None,:], [nat,self.nspec_embedding*Ngauss_ang,1])
-                g4_i_n = []
-                for k in range(self.zeta+1):
-                    values = tf.where(lxlylz_sum_expanded==k, g3_ilxlylz, tf.zeros((nat,self.nspec_embedding*Ngauss_ang,self.n_perm)))
+                g4_i_lm = gi_2_lm * g_i34_lm #shape=(nat, nspec*nrs, nl, nl)
 
-                    g3_i_n.append(tf.reduce_sum(values, axis=-1))
-                g3_i_n = tf.transpose(g3_i_n, [1,2,0])
-                g3_i = tf.einsum('ijk,kl->ijl', g3_i_n, _weights) #shape=(nat,self.nspec_embedding*Ngauss_ang,thetaN)
+                #create unique indices for the nlxnl lxlylz that are searched in the matrixe
+                lxlylz_sum_lm = (self.zeta+1) * lxlylz_sum[:,tf.newaxis] + lxlylz_sum
+                #
 
+                lxlylz_sum_expanded = tf.tile(lxlylz_sum_lm[tf.newaxis,tf.newaxis,:,:], 
+                                              [nat,self.nspec_embedding*Ngauss_ang,1,1])
+                g4_i_lm_flat = tf.reshape(g4_i_lm, [-1,self.n_perm*self.n_perm])
 
-                #coefficients
-#                fact_norm_lm = fact_norm[:,tf.newaxis] * fact_norm[tf.newaxis,:] #nl x nl
-                #g4_i = tf.einsum('ijkl, mkl->ijmkl', g4_i_lm, lambda_n_lm) # shape=(nat, nrs, nlambda=2,nl**2)
- #               tf.debugging.check_numerics(g4_i, message='g4_i contains NaN')
-                  
-                body_descriptor_4 = tf.reshape(g4_i * lambda_norm**2, [nat, -1])
+                lxlylz_sum_expanded_flat = tf.reshape(lxlylz_sum_expanded, [-1,self.n_perm*self.n_perm]) 
+                
+                range_of_classes = tf.reshape((self.zeta+1) * tf.range(self.zeta+1,dtype=tf.int32)[:,tf.newaxis]
+                                              + tf.range(self.zeta+1,dtype=tf.int32), [-1])
+                _cond = tf.equal(tf.expand_dims(lxlylz_sum_expanded_flat, axis=-1), range_of_classes)
+
+                g4_i_n = tf.reduce_sum(
+                          tf.where(_cond,
+                          tf.expand_dims(g4_i_lm_flat, axis=-1),
+                          tf.zeros_like(tf.expand_dims(g4_i_lm_flat, axis=-1))),
+                     axis=1
+                     ) #shape = (nat*nrs*nspec,(self.zeta+1)**2)
+                
+
+                #g4_i_n = tf.reshape(g4_i_n,[nat,-1,(self.zeta+1)**2]) #shape=(nat,nrs*nspec,(self.zeta+1)**2)
+                lambda_n_nl2 = tf.reshape(lambda_n[:,:,tf.newaxis] * lambda_n[:,tf.newaxis,:], (2, -1)) #shape=(2,(self.zeta+1)*(self.zeta+1))
+                #g4_i_n = tf.einsum('ijk,lk->ijlk', g4_i_n, lambda_n_nl2) #shape=(nat, nrs*nspec,2,(self.zeta+1)**2)
+                g4_i_n = g4_i_n[:,tf.newaxis,:] * lambda_n_nl2[tf.newaxis,:,:] #shape=(nat * nrs*nspec,2,(self.zeta+1)**2)
+                g4_i_n = tf.reshape(g4_i_n, [nat,-1, 2*(self.zeta+1)*(self.zeta+1)])
+
+                g4_i = tf.einsum('ijk,kl->ijl', g4_i_n, _weights_bo4) #shape=(nat,self.nspec_embedding*Ngauss_ang,thetaN)
+                body_descriptor_4 = tf.reshape(g4_i, [nat, -1])
                 atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_4], axis=1)
-            '''
-            #four body descriptors 
-#            lxlylz_idx = tf.map(tf.range, tf.reshape(lxlylz, [-1]))
-
-            '''lxlylz_4 = tf.map_fn(self.get_all_lxyz_idx, t, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32)) 
-            lxlylz_4 = tf.reshape(lxlylz_4, [-1,3])
-
-            #lx = tf.map_fn(tf.range, lxlylz_4[:,0]+1, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
-            #ly = tf.map_fn(tf.range, lxlylz_4[:,1]+1, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
-            #lz = tf.map_fn(tf.range, lxlylz_4[:,2]+1, fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
-            lx = lxlylz_4[:,0]
-            ly = lxlylz_4[:,1]
-            lz = lxlylz_4[:,2]
-            
-            # one per term in the sum
-            lxyz = tf.map_fn(self.generate_all_lxyz, , fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32)) 
-            lxyz = tf.reshape(idx, [-1,3])
-
-            #lx_rep = tf.map_fn(self.help_func, lxlylz[:,0], fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
-            #lx_rep = tf.reshape(lx_rep, [-1])
-            lx_ab = lxyz[:,0] - lx + ly
-            lx_ac = lxyz[:,0] - lx + lz
-            
-            #ly_rep = tf.map_fn(self.help_func, lxlylz[:,1], fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
-            #ly_rep = tf.reshape(ly_rep, [-1])
-            ly_ba = lxyz[:,1] - ly + lx
-            ly_bc = lxyz[:,1] - ly + lz
-            
-            #lz_rep = tf.map_fn(self.help_func, lxlylz[:,2], fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
-            #lz_rep = tf.reshape(lz_rep, [-1])
-            lz_ca = lxyz[:,2] - lz + lx
-            lz_cb = lxyz[:,2] - lz + ly
-            #next, compute lxyz[:,0]! / (lxyz[:,0]-lx)! / lx! and also for y and z components 
-
-#            lxlylz_sum = 
-            '''
 
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
             
@@ -524,6 +537,8 @@ class mBP_model(tf.keras.Model):
         
         
         self.weights_lxlylz = tf.reshape(self.weights_lxlylz_nets(tf.ones(1)[tf.newaxis,:]), [-1])
+        self.weights_lxlylz_bo4 = tf.reshape(self.weights_lxlylz_nets_bo4(tf.ones(1)[tf.newaxis,:]), [-1])
+
         batch_kn_rad = tf.tile([self.kn_rad], [batch_size,1])
         batch_kn_ang = tf.tile([self.kn_ang], [batch_size,1])
 
@@ -533,6 +548,7 @@ class mBP_model(tf.keras.Model):
         #batch_Rs_ang = tf.tile([self._Rs_ang], [batch_size,1])
         #batch_lambdas = tf.tile([self.lambdas], [batch_size,1])
         batch_weights_lxlylz = tf.tile([self.weights_lxlylz], [batch_size,1])
+        batch_weights_lxlylz_bo4 = tf.tile([self.weights_lxlylz_bo4], [batch_size,1])
 
 
         batch_nats = inputs[2]
@@ -565,7 +581,7 @@ class mBP_model(tf.keras.Model):
 
         elements = (batch_species_encoder, batch_kn_rad,
                 positions, nmax_diff, batch_nats,
-                batch_kn_ang, cells, replica_idx,batch_weights_lxlylz,C6)
+                batch_kn_ang, cells, replica_idx,batch_weights_lxlylz, batch_weights_lxlylz_bo4,C6)
                 #batch_Rs_rad, batch_Rs_ang, batch_lambdas, C6)
 
         energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements, fn_output_signature=[tf.float32, tf.float32],

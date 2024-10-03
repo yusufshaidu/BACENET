@@ -90,12 +90,12 @@ class mBP_model(tf.keras.Model):
         constraint = None
         Nwidth_rad = self.RsN_rad
         Nwidth_ang = self.RsN_ang
-        init = tf.keras.initializers.RandomNormal(mean=10, stddev=0.05)
+        init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
         self.rbf_nets = Networks(1, [self.RsN_rad], ['sigmoid'], 
                                  weight_initializer=init,
                                  bias_initializer='zeros',
                                  prefix='rbf')
-        init = tf.keras.initializers.RandomNormal(mean=10, stddev=0.05)
+        init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
         self.rbf_nets_ang = Networks(1, [self.RsN_ang], ['sigmoid'], 
                                      weight_initializer=init,
                                      bias_initializer='zeros',

@@ -69,6 +69,7 @@ def default_config():
     configs['min_radial_center'] = 0.5
     configs['species_out_act'] = 'linear'
     configs['start_swa'] = -1
+    configs['min_lr'] = 0.0001
     configs['swa_lr'] = 0.0001
     configs['swa_lr2'] = 0.001
     return configs
@@ -118,9 +119,9 @@ def create_model(configs):
     decay_rate = configs['decay_rate']
     #activations are basically tanh and linear for now
     activations = configs['activations']
+    print(activations)
     
     assert len(activations) == len(layer_sizes),'the number of activations must be same as the number of layer'
-
     if activations[-1] != 'linear':
         print(f'You have set the last layer to {activations[-1]} but must be st to linear')
         print(f'we set it to linear')
@@ -156,6 +157,7 @@ def create_model(configs):
     species_out_act = configs['species_out_act']
     start_swa = configs['start_swa']
     swa_lr = configs['swa_lr']
+    min_lr = configs['min_lr']
     swa_lr2 = configs['swa_lr2']
 
     if include_vdw:
@@ -187,9 +189,13 @@ def create_model(configs):
         mode='auto',
         min_delta=0.0001,
         cooldown=0,
-        min_lr=1e-5,
+        min_lr=min_lr,
         )
 
+    #callback_earlystop = tf.keras.callbacks.EarlyStopping(monitor='RMSE_F',
+    #                                          patience=decay_step,
+    #                                          baseline = 1e-5
+   #                                             )
     if opt_method in ['adamW', 'AdamW', 'adamw']:
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
@@ -263,7 +269,6 @@ def create_model(configs):
 
 
     backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
-#    model.save_weights(checkpoint_path.format(epoch=0))
     '''
     try:
         # This should work well on multiple GPUs on a single computer
@@ -292,7 +297,7 @@ def create_model(configs):
             model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
     except:
     '''
-        # It should work on CPU platform
+     # It should work on CPU platform
     model = model_call(layer_sizes,
                       rc_rad, species_identity, width, batch_size,
                       activations,
@@ -313,6 +318,7 @@ def create_model(configs):
                       species_out_act=species_out_act)
 
     model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
+    model.save_weights(checkpoint_path.format(epoch=0))
     try:
         model.fit(train_data,
              epochs=num_epochs,
