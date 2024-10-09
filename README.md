@@ -8,6 +8,11 @@ Implementing the modified Behler Parrinello symmentry functions with learnable s
 The species embedding starts with a one-hot encoding of species and pass it through a single layer multilayer perceptron of size 16 and returns a single number per species.
 The weights are learn from data.
 
+## todolist
+- Implement input normalization
+- start from known species embedding rather than one-jot-encoding [https://github.com/WMD-group/ElementEmbeddings] 
+
+
 Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
 
 ## Add your files
