@@ -2,6 +2,7 @@ import tensorflow as tf
 from data_processing import data_preparation
 from model_modified_manybody import mBP_model
 from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
+from model_modified_manybody_ase_atoms import mBP_model as mBP_model_ase
 
 import os, sys, yaml,argparse, json
 import numpy as np
@@ -62,6 +63,9 @@ def create_model(configs):
     energy_key = configs['energy_key']
     force_key = configs['force_key']
     test_fraction = configs['test_fraction']
+    if test_fraction < 1.0:
+        print(f'you are evaluating only on a {test_fraction*100} % of you test dataset')
+        
     atomic_energy = configs['atomic_energy']
     include_vdw = configs['include_vdw']
     rmin_u = configs['rmin_u']
@@ -83,8 +87,15 @@ def create_model(configs):
         model_v = configs['model_version']
         if model_v == 'linear':
             model_call = mBP_model_linear
+        if model_v == 'ase':
+            model_call = mBP_model_ase
 
     nspec_embedding = configs['nspec_embedding']
+    try:
+        error_file = configs['error_file']
+    except:
+        error_file = 'error_file'
+
     if len(atomic_energy)==0:
         with open (os.path.join(model_outdir,'atomic_energy.json')) as df:
             atomic_energy = json.load(df)
@@ -95,7 +106,8 @@ def create_model(configs):
                      energy_key, force_key,
                      rc, pbc, batch_size,
                      test_fraction=test_fraction,
-                     atomic_energy=atomic_energy)
+                     atomic_energy=atomic_energy,
+                     model_version=model_v, model_dir=model_outdir)
 
     model = model_call(layer_sizes,
                       rc_rad, species_identity, width, batch_size,
@@ -112,7 +124,8 @@ def create_model(configs):
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       body_order=body_order,
                       min_radial_center=min_radial_center,
-                      species_out_act=species_out_act)
+                      species_out_act=species_out_act,
+                       layer_normalize=configs['layer_normalize'])
     
     #load the last check points
     
@@ -145,7 +158,12 @@ def create_model(configs):
         ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.ckpt" for idx in ckpts_idx]
 
 
+    try:
+        errors = np.loadtxt(error_file, skiprows=1).tolist()
+    except:
+        errors = []
 
+    print(errors)
     for i,_ck in enumerate(ck):
         
 
@@ -177,12 +195,15 @@ def create_model(configs):
         force_pred = tf.reshape(_f_pred, [-1,3])
         mae = tf.reduce_mean(tf.abs(e_ref-e_pred))
         rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2))
-        fmae = tf.reduce_mean(tf.abs(_f_ref-_f_pred))
-        frmse = tf.sqrt(tf.reduce_mean((_f_ref-_f_pred)**2))
+        fmae = tf.reduce_mean(tf.abs(force_ref-force_pred))
+        frmse = tf.sqrt(tf.reduce_mean((force_ref-force_pred)**2))
+        errors.append([_epoch,rmse*1000,mae*1000,frmse*1000,fmae*1000])
+
         print(f'Ermse = {rmse*1000:.3f} and Emae = {mae*1000:.3f} | Frmse = {frmse*1000:.3f} and Fmae = {fmae*1000:.3f}')
         #print(f'Forces: the test rmse = {rmse} and mae = {mae}')
         np.savetxt(os.path.join(outdir, f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
         np.savetxt(os.path.join(outdir, f'forces_last_test_{_epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
+    np.savetxt(error_file, np.array(errors), header='E_rmse E_mae F_rmse F_mae', fmt='%10.3f')
     
 if __name__ == '__main__':
 

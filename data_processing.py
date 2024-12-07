@@ -13,6 +13,8 @@ from functools import partial
 import random
 from ase import Atoms
 import json
+import ase
+from ase.neighborlist import neighbor_list
 
 #from ml_potentials.pbc import replicas_max_idx
 try:
@@ -70,16 +72,15 @@ def convert_json2ASE_atoms(atomic_energy, file, C6_spec, species):
         cell = np.asarray(data['lattice_vectors'])
         pbc = True
     except:
-        #cell = np.array([[100.,0,0], [0,100,0.], [0,0,100.]])
-        cell = None
-        pbc=False
+        cell = [100.0,100.0,100.0]
+        #cell = None
+        pbc=True
     E0 = 0.0
     if len(atomic_energy)>0:
         for i,sp in enumerate(species):
             Nsp = len(np.where(np.asarray(symbols).astype(str)==sp)[0])
             E0 += Nsp * atomic_energy[i]
    # print(E0)
-
     positions = np.asarray(positions).astype(float)
     forces = np.asarray(forces).astype(float)
 #    encoder = all_species_encoder
@@ -164,20 +165,317 @@ def input_function(x, shuffle=True, batch_size=32): # inner function that will b
 #        dataset = dataset.shuffle(1000)
 #    dataset = dataset.batch(batch_size).repeat(num_epochs) # split dataset into batch_size batches and repeat process for num_epochs
 #    return dataset
+def prepare_and_split_data_pad(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec):
+    #this should be parellize at some point   
+    all_positions = []
+    all_species_encoder = []
+    all_energies = []
+    all_forces = []
+    all_natoms = []
+    cells = []
+    replica_idx = []
+    all_C6 = []
+    #get nmax atoms
+    nmax = -1000000
+    for file in files:
+        if data_format == 'panna_json':
+            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec,species)
+        elif data_format == 'ase' or data_format == 'xyz' :
+            atoms = file
+        nat = atoms.get_global_number_of_atoms()
+        nmax = np.max([nmax,nat])
+
+    for file in files:
+        if data_format == 'panna_json':
+            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec,species)
+
+            all_energies.append(atoms.info[energy_key])
+            all_forces.append(atoms.get_array(force_key))
+            nat = atoms.get_global_number_of_atoms()
+            ndiff = nmax - nat
+        elif data_format == 'ase' or data_format == 'xyz' :
+            atoms = file
+            symbols = list(atoms.symbols)
+            nat = atoms.get_global_number_of_atoms()
+            ndiff = nmax - nat
+            
+            #if not atoms.cell:
+            #    atoms.cell = np.eye(3) * 100
+            E0 = 0.0
+            for i,sp in enumerate(species):
+                Nsp = len(np.where(np.asarray(symbols).astype(str)==sp)[0])
+                E0 += Nsp * atomic_energy[i]
+ #           print(atoms.get_potential_energy())
+            all_energies.append(atoms.get_potential_energy()-E0)
+            forces = atoms.get_forces()
+            forces = np.pad(forces, pad_width=((0,ndiff),(0,0)))
+            all_forces.append(forces)
+
+            _encoder = np.asarray([atomic_number(ss) for ss in symbols])
+            atoms.new_array('encoder', _encoder)
+            # C6 are in Ha * au^6
+            to_eV = 27.211324570273 * 0.529177**6
+            C6 = np.asarray([C6_spec[ss] for ss in symbols])
+            atoms.new_array('C6', C6)
+
+
+        positions = atoms.positions 
+        positions = np.pad(positions, pad_width=((0,ndiff),(0,0)))
+        all_positions.append(positions)
+        encoder = atoms.get_array('encoder')
+        encoder = np.pad(encoder, pad_width=(0,ndiff))
+        all_species_encoder.append(encoder)
+        C6 = atoms.get_array('C6')
+        C6 = np.pad(C6, pad_width=(0,ndiff))
+
+        all_C6.append(C6)
+        all_natoms.append(atoms.get_global_number_of_atoms())
+        cells.append(atoms.cell)
+        replica_idx.append(replicas_max_idx(atoms.cell, rc, pbc=pbc))
+
+    Ntest = int(test_fraction*len(all_natoms))
+
+    cells_test = tf.constant(cells[:Ntest])
+    cells_train = tf.constant(cells[Ntest:])
+    replica_idx_test = tf.constant(replica_idx[:Ntest])
+    replica_idx_train = tf.constant(replica_idx[Ntest:])
+
+    all_positions_test = tf.constant(all_positions[:Ntest])
+    all_positions_train = tf.constant(all_positions[Ntest:])
+
+    #forces
+    all_forces_test = tf.constant(all_forces[:Ntest])
+    all_forces_train = tf.constant(all_forces[Ntest:])
+
+    #print(Ntest, len(all_positions_train), len(all_positions_test))
+    all_species_encoder_test = tf.constant(all_species_encoder[:Ntest], dtype=tf.float32)
+    all_species_encoder_train = tf.constant(all_species_encoder[Ntest:], dtype=tf.float32)
+
+    all_natoms_test = tf.constant(all_natoms[:Ntest])
+    all_natoms_train = tf.constant(all_natoms[Ntest:])
+
+    all_energies_test = tf.constant(all_energies[:Ntest])
+    all_energies_train = tf.constant(all_energies[Ntest:])
+    all_C6_test = tf.constant(all_C6[:Ntest])
+    all_C6_train = tf.constant(all_C6[Ntest:])
+
+
+    train_data = input_function((all_positions_train, all_species_encoder_train,
+                                 all_natoms_train,cells_train, replica_idx_train, all_C6_train,
+                                 all_energies_train, all_forces_train),
+                                shuffle=True, batch_size=batch_size)
+
+    test_data = input_function((all_positions_test, all_species_encoder_test,
+                                all_natoms_test, cells_test,replica_idx_test, all_C6_test,
+                                all_energies_test, all_forces_test),
+                                shuffle=True, batch_size=batch_size)
+    return train_data, test_data
+
+def prepare_and_split_data_ragged(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec,model_dir):
+    #this should be parellize at some point   
+    if not os.path.exists(model_dir):
+        os.mkdir(model_dir)
+
+    all_positions = []
+    all_species_encoder = []
+    all_energies = []
+    all_forces = []
+    all_natoms = []
+    cells = []
+    replica_idx = []
+    all_C6 = []
+    all_first_atom = []
+    all_second_atom = []
+    all_shift_vectors = []
+    all_neigh = []
+
+    for j,file in enumerate(files):
+        if data_format == 'panna_json':
+            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec,species)
+            all_energies.append(atoms.info[energy_key])
+            all_forces.append(atoms.get_array(force_key))
+            if atoms.cell is None or np.linalg.norm(atoms.cell)<1e-6:
+                atoms.set_cell(np.eye(3)*100)
+
+            #print(atoms.cell,np.linalg.norm(atoms.cell))
+        elif data_format == 'ase' or data_format == 'xyz' :
+            atoms = file
+            symbols = list(atoms.symbols)
+            if atoms.cell is None or np.linalg.norm(atoms.cell)<1e-6:
+                #atoms.cell = np.zeros((3,3))
+                atoms.set_cell(np.eye(3)*100)
+            E0 = 0.0
+            for i,sp in enumerate(species):
+                Nsp = len(np.where(np.asarray(symbols).astype(str)==sp)[0])
+                E0 += Nsp * atomic_energy[i]
+ #           print(atoms.get_potential_energy())
+            all_energies.append(atoms.get_potential_energy()-E0)
+            all_forces.append(atoms.get_forces())
+
+            _encoder = np.asarray([atomic_number(ss) for ss in symbols])
+            atoms.new_array('encoder', _encoder)
+            # C6 are in Ha * au^6
+            to_eV = 27.211324570273 * 0.529177**6
+            C6 = np.asarray([C6_spec[ss] for ss in symbols])
+            atoms.new_array('C6', C6)
+
+
+            
+        all_positions.append(atoms.positions.tolist())
+        all_species_encoder.append(atoms.get_array('encoder').tolist())
+        all_C6.append(atoms.get_array('C6').tolist())
+        all_natoms.append(atoms.get_global_number_of_atoms())
+        cells.append(atoms.cell.tolist())
+        #replica_idx.append(replicas_max_idx(atoms.cell, rc, pbc=pbc))
+        replica_idx.append([0,0,0])
+ #       all_species_symbols.append(atoms.get_chemical_symbols())
+        
+        first_atom_idx,second_atom_idx,shift_vector = neighbor_list('ijS', atoms, rc)
+        
+
+        all_first_atom.append(first_atom_idx.tolist())
+        all_second_atom.append(second_atom_idx.tolist())
+        all_shift_vectors.append(shift_vector.tolist())
+        all_neigh.append(len(first_atom_idx.tolist()))
+        if j % 1000 == 0:
+            print(j, len(first_atom_idx), rc)
+    Ntest = int(test_fraction*len(all_natoms))
+    '''
+    all_dict = {'positions':all_positions, 
+                'species_encoder':all_species_encoder, 
+                'C6':all_C6,
+                'cells':cells,
+                'natoms':all_natoms,
+                'replica_idx':replica_idx,
+                'i':all_first_atom,
+                'j':all_second_atom,
+                'S':all_shift_vectors,
+                'energy':all_energies,
+                'forces':all_forces}
+    with open(model_dir+'/processed_data.json', 'w') as out_file:
+        json.dump(all_dict, out_file)
+    '''
+    all_first_atom_test = tf.ragged.constant(all_first_atom[:Ntest],dtype=tf.int32,row_splits_dtype=tf.int32)
+    all_first_atom_train = tf.ragged.constant(all_first_atom[Ntest:],dtype=tf.int32,row_splits_dtype=tf.int32)
+    all_neigh_train = tf.constant(all_neigh[Ntest:],dtype=tf.int32)
+    all_neigh_test = tf.constant(all_neigh[:Ntest],dtype=tf.int32)
+    
+    all_second_atom_test = tf.ragged.constant(all_second_atom[:Ntest], dtype=tf.int32,row_splits_dtype=tf.int32)
+    all_second_atom_train = tf.ragged.constant(all_second_atom[Ntest:],dtype=tf.int32,row_splits_dtype=tf.int32)
+    all_shift_vectors_test = tf.ragged.constant(all_shift_vectors[:Ntest],dtype=tf.int32,row_splits_dtype=tf.int32)
+    all_shift_vectors_train = tf.ragged.constant(all_shift_vectors[Ntest:],dtype=tf.int32,row_splits_dtype=tf.int32)
+
+#    all_species_symbols_test = tf.ragged.constant(all_species_symbols[:Ntest])
+#    all_species_symbols_train = tf.ragged.constant(all_species_symbols[Ntest:])
+
+    cells_test = tf.constant(cells[:Ntest],dtype=tf.float32)
+    cells_train = tf.constant(cells[Ntest:],dtype=tf.float32)
+    replica_idx_test = tf.constant(replica_idx[:Ntest],dtype=tf.int32)
+    replica_idx_train = tf.constant(replica_idx[Ntest:],dtype=tf.int32)
+
+    all_positions_test = tf.ragged.constant(all_positions[:Ntest],dtype=tf.float32,row_splits_dtype=tf.int32)
+    all_positions_train = tf.ragged.constant(all_positions[Ntest:],dtype=tf.float32,row_splits_dtype=tf.int32)
+
+    #forces
+    all_forces_test = tf.ragged.constant(all_forces[:Ntest],dtype=tf.float32,row_splits_dtype=tf.int32)
+    all_forces_train = tf.ragged.constant(all_forces[Ntest:],dtype=tf.float32,row_splits_dtype=tf.int32)
+
+    #print(Ntest, len(all_positions_train), len(all_positions_test))
+    all_species_encoder_test = tf.ragged.constant(all_species_encoder[:Ntest], dtype=tf.float32,row_splits_dtype=tf.int32)
+    all_species_encoder_train = tf.ragged.constant(all_species_encoder[Ntest:], dtype=tf.float32,row_splits_dtype=tf.int32)
+
+    all_natoms_test = tf.constant(all_natoms[:Ntest],dtype=tf.int32)
+    all_natoms_train = tf.constant(all_natoms[Ntest:],dtype=tf.int32)
+
+    all_energies_test = tf.constant(all_energies[:Ntest],dtype=tf.float32)
+    all_energies_train = tf.constant(all_energies[Ntest:],dtype=tf.float32)
+    all_C6_test = tf.ragged.constant(all_C6[:Ntest],dtype=tf.float32,row_splits_dtype=tf.int32)
+    all_C6_train = tf.ragged.constant(all_C6[Ntest:],dtype=tf.float32,row_splits_dtype=tf.int32)
+
+    
+
+    train_data = input_function((all_positions_train, all_species_encoder_train,
+                                 all_natoms_train,cells_train, replica_idx_train, all_C6_train,
+                                 all_first_atom_train,all_second_atom_train,all_shift_vectors_train,
+                                 all_neigh_train,
+                                 all_energies_train, all_forces_train),
+                                shuffle=True, batch_size=batch_size)
+
+    test_data = input_function((all_positions_test, all_species_encoder_test,
+                                all_natoms_test, cells_test,replica_idx_test, all_C6_test, 
+                                all_first_atom_test,all_second_atom_test,all_shift_vectors_test,
+                                all_neigh_test,
+                                all_energies_test, all_forces_test),
+                                shuffle=True, batch_size=batch_size)
+    return train_data, test_data
+
+def prepare_and_split_atoms(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec):
+    #this should be parellize at some point   
+    all_atoms = []
+    for file in files:
+        if data_format == 'panna_json':
+            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec,species)
+        elif data_format == 'ase' or data_format == 'xyz' :
+            atoms = file
+            symbols = list(atoms.symbols)
+            #if not atoms.cell:
+            #    atoms.cell = np.eye(3) * 100
+            E0 = 0.0
+            for i,sp in enumerate(species):
+                Nsp = len(np.where(np.asarray(symbols).astype(str)==sp)[0])
+                E0 += Nsp * atomic_energy[i]
+ #           print(atoms.get_potential_energy())
+            #all_energies.append(atoms.get_potential_energy()-E0)
+            #all_forces.append(atoms.get_forces())
+
+            _encoder = np.asarray([atomic_number(ss) for ss in symbols])
+            atoms.new_array('encoder', _encoder)
+            # C6 are in Ha * au^6
+            to_eV = 27.211324570273 * 0.529177**6
+            C6 = np.asarray([C6_spec[ss] for ss in symbols])
+            atoms.new_array('C6', C6)
+            atoms.info = {'energy':atoms.get_potential_energy()-E0}
+
+        all_atoms.append(atoms)
+
+    Ntest = int(test_fraction*len(all_atoms))
+
+    all_atoms_test = tf.constant(all_atoms[:Ntest])
+    all_atoms_train = tf.constant(all_atoms[Ntest:])
+    train_data = input_function(all_atoms_train,
+                                shuffle=True, batch_size=batch_size)
+
+    test_data = input_function(all_atoms_test,
+                                shuffle=True, batch_size=batch_size)
+    return train_data, test_data
 
 def data_preparation(data_dir, species, data_format, 
                      energy_key, force_key,
                      rc, pbc, batch_size, 
                      test_fraction=0.1,
                      atomic_energy=[],
-                     atomic_energy_file=None):
+                     atomic_energy_file=None,
+                     model_version='v0',
+                     model_dir='tmp'):
     
 #    rc = np.max([rc_rad, rc_ang])
 
     if data_format == 'panna_json':
         files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.split('.')[-1]=='example']
     elif data_format == 'xyz':
-        # note, this is already atom object
+        # note, this is already ase atom object
         files = read(data_dir, index=':')
     elif data_format == 'ase':
         files = data_dir
@@ -190,22 +488,13 @@ def data_preparation(data_dir, species, data_format,
 
     random.Random(42).shuffle(files)
 
-    all_positions = []
-    all_species_encoder = []
-    all_energies = []
-    all_forces = []
-    all_natoms = []
-    cells = []
-    replica_idx = []
-    all_C6 = []
-
     #determine atomic zeros
     if len(atomic_energy)==0:
         print('estimating atomic reference from a linear fit')
         mat_A = []
         energy = []
         in_spec = []
-
+        #we can also estimate the mean and std of the descriptors
         for file in files:
             if data_format == 'panna_json':
                 Nspec, spec, ene = get_energy_json(file,species)
@@ -220,18 +509,28 @@ def data_preparation(data_dir, species, data_format,
             for s in species:
                 if s in in_spec:
                     check += 1
-            if len(energy) > len(species) + 3 and check == len(species):
+            #if len(energy) > int(0.1*len(files)) and check == len(species):
+            if len(energy) > len(species)+5 and check == len(species):
                 break
         #fit
 
         np.random.seed(42)
         mat_A = np.asarray(mat_A).astype(float)
         energy = np.asarray(energy)
+        #print(energy, mat_A)
 
         A = np.matmul(mat_A.T, mat_A)
-        A += np.random.normal(scale=1e-9, size=A.shape)
+        n,m = A.shape
+        A += np.eye(n) * 1e-3
+
         b = np.matmul(mat_A.T, energy)
         atomic_energy = np.matmul(np.linalg.inv(A), b)
+        print('atomic energy used are :', atomic_energy, 'mae: ', 
+          np.mean(np.abs(energy-np.matmul(mat_A,atomic_energy.T))))
+    
+    else:
+        print('atomic energy used are :', atomic_energy)
+
     #dump atomic energy to a json file
     E0 = {x:y for x,y in zip(species, atomic_energy)}
 
@@ -239,7 +538,6 @@ def data_preparation(data_dir, species, data_format,
         with open(atomic_energy_file, 'w') as out_file:
             json.dump(E0, out_file)
 
-    print('atomic energy used are :', atomic_energy)
     
 
 
@@ -260,78 +558,22 @@ def data_preparation(data_dir, species, data_format,
     #number of precesses
     #p = Pool(num_process)
     #Ndata = len(files)
-
-    #this should be parellize at some point   
-    for file in files:
-        if data_format == 'panna_json':
-            atoms = convert_json2ASE_atoms(atomic_energy,file,C6_spec,species)
-            all_energies.append(atoms.info[energy_key])
-            all_forces.append(atoms.get_array(force_key))
-        elif data_format == 'ase' or data_format == 'xyz' :
-            atoms = file
-            symbols = list(atoms.symbols)
-            #if not atoms.cell:
-            #    atoms.cell = np.eye(3) * 100
-            E0 = 0.0
-            for i,sp in enumerate(species):
-                Nsp = len(np.where(np.asarray(symbols).astype(str)==sp)[0])
-                E0 += Nsp * atomic_energy[i]
- #           print(atoms.get_potential_energy())
-            all_energies.append(atoms.get_potential_energy()-E0)
-            all_forces.append(atoms.get_forces())
-
-            _encoder = np.asarray([atomic_number(ss) for ss in symbols])
-            atoms.new_array('encoder', _encoder)
-            # C6 are in Ha * au^6
-            to_eV = 27.211324570273 * 0.529177**6
-            C6 = np.asarray([C6_spec[ss] for ss in symbols])
-            atoms.new_array('C6', C6)
-
-
-            
-        all_positions.append(atoms.positions)
-        all_species_encoder.append(atoms.get_array('encoder'))
-        all_C6.append(atoms.get_array('C6'))
-        all_natoms.append(atoms.get_global_number_of_atoms())
-        cells.append(atoms.cell)
-        replica_idx.append(replicas_max_idx(atoms.cell, rc, pbc=pbc))
-
-    Ntest = int(test_fraction*len(all_natoms))
-
-    cells_test = tf.constant(cells[:Ntest])
-    cells_train = tf.constant(cells[Ntest:])
-    replica_idx_test = tf.constant(replica_idx[:Ntest])
-    replica_idx_train = tf.constant(replica_idx[Ntest:])
-
-    all_positions_test = tf.ragged.constant(all_positions[:Ntest])
-    all_positions_train = tf.ragged.constant(all_positions[Ntest:])
-
-    #forces
-    all_forces_test = tf.ragged.constant(all_forces[:Ntest])
-    all_forces_train = tf.ragged.constant(all_forces[Ntest:])
-
-    #print(Ntest, len(all_positions_train), len(all_positions_test))
-    all_species_encoder_test = tf.ragged.constant(all_species_encoder[:Ntest], dtype=tf.float32)
-    all_species_encoder_train = tf.ragged.constant(all_species_encoder[Ntest:], dtype=tf.float32)
-
-    all_natoms_test = tf.constant(all_natoms[:Ntest])
-    all_natoms_train = tf.constant(all_natoms[Ntest:])
-
-    all_energies_test = tf.constant(all_energies[:Ntest])
-    all_energies_train = tf.constant(all_energies[Ntest:])
-    all_C6_test = tf.ragged.constant(all_C6[:Ntest])
-    all_C6_train = tf.ragged.constant(all_C6[Ntest:])
-
-
-    train_data = input_function((all_positions_train, all_species_encoder_train,
-                                 all_natoms_train,cells_train, replica_idx_train, all_C6_train,
-                                 all_energies_train, all_forces_train),
-                                shuffle=True, batch_size=batch_size)
-
-    test_data = input_function((all_positions_test, all_species_encoder_test,
-                                all_natoms_test, cells_test,replica_idx_test, all_C6_test,
-                                all_energies_test, all_forces_test),
-                                shuffle=True, batch_size=batch_size)
-
+    #train_data, test_data = prepare_and_split_data_pad(files, species, data_format,
+    #                 energy_key, force_key,
+    #                 rc, pbc, batch_size,
+    #                 test_fraction,
+    #                 atomic_energy,C6_spec)
+    if model_version == 'v0' or model_version=='linear':
+        train_data, test_data = prepare_and_split_data_ragged(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec,model_dir)
+    elif model_version=='ase':
+        train_data, test_data = prepare_and_split_atoms(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec)
 
     return [train_data, test_data, species_identity]

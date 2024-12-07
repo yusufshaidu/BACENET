@@ -39,15 +39,13 @@ def factorial( n):
 
     return result
 
-@tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                              tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                              tf.TensorSpec(shape=(3,3), dtype=tf.float32),
                              tf.TensorSpec(shape=(3,), dtype=tf.int32),
                              tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                             tf.TensorSpec(shape=(), dtype=tf.bool),
                               ])
-
-def generate_periodic_images(species_vectors, positions, lattice_vectors, image_range, C6, include_vdw):
+def generate_periodic_images_vdw(species_vectors, positions, lattice_vectors, image_range, C6):
     """
     Generate periodic image points for given atomic positions with a cutoff distance.
 
@@ -74,7 +72,8 @@ def generate_periodic_images(species_vectors, positions, lattice_vectors, image_
 
     # Repeat positions for each atom
     atom_positions = tf.expand_dims(positions, axis=1)  # Shape: (n_atoms, 1, 3)
-    atom_positions = tf.repeat(atom_positions, tf.shape(translation_vectors)[0], axis=1)  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
+    atom_positions = tf.repeat(atom_positions, 
+                               tf.shape(translation_vectors)[0], axis=1)  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
     
     
     # Generate periodic images
@@ -82,21 +81,63 @@ def generate_periodic_images(species_vectors, positions, lattice_vectors, image_
     expanded_translations = tf.expand_dims(translation_vectors, axis=0)  # Shape: (1, (image_range * 2 + 1)^3, 3)
     
     # Perform the addition
-    periodic_images = atom_positions + tf.tensordot(tf.cast(expanded_translations,tf.float32), lattice_vectors, axes=[2, 0])  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
+    periodic_images = atom_positions + tf.tensordot(tf.cast(expanded_translations,tf.float32), 
+                                                    lattice_vectors, axes=[2, 0])  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
     
     species_vectors = tf.expand_dims(species_vectors, axis=1) # Shape: (n_atoms, 1, embedding)
     species_vectors = tf.repeat(species_vectors, tf.shape(translation_vectors)[0], axis=1) # (n_atoms, (image_range * 2 + 1)^3, embedding)
 
-    if include_vdw:
-        C6_extended = tf.expand_dims(C6, axis=1)
-        C6_extended = tf.repeat(C6_extended, tf.shape(translation_vectors)[0], axis=1)
-        return periodic_images, species_vectors, C6_extended
+    C6_extended = tf.expand_dims(C6, axis=1)
+    C6_extended = tf.repeat(C6_extended, tf.shape(translation_vectors)[0], axis=1)
+    return periodic_images, species_vectors, C6_extended
 
-    # Calculate distances from the original positions
-    #distances = periodic_images - tf.expand_dims(positions, axis=1), axis=-1)  # Shape: (n_atoms, (image_range * 2 + 1)^3)
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                             tf.TensorSpec(shape=(3,3), dtype=tf.float32),
+                             tf.TensorSpec(shape=(3,), dtype=tf.int32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              ])
+def generate_periodic_images(species_vectors, positions, lattice_vectors, image_range, C6):
+    """
+    Generate periodic image points for given atomic positions with a cutoff distance.
 
-    # Apply the cutoff to filter out positions
-    #valid_images = tf.boolean_mask(periodic_images, distances < cutoff)  # Shape: (n_valid_images, 3)
+    Parameters:
+        positions (tf.Tensor): Tensor of atomic positions in Cartesian coordinates (shape: (n_atoms, 3)).
+        lattice_vectors (tf.Tensor): Tensor of lattice vectors (shape: (3, 3)).
+        image_range (int): The range of periodic images to generate in each direction.
+        cutoff (float): Cutoff distance to limit generated images.
+
+    Returns:
+        tf.Tensor: Tensor of periodic image positions within the cutoff distance.
+    """
+    # Create meshgrid for integer translations
+    translations_x = tf.range(-image_range[0], image_range[0] + 1)
+    translations_y = tf.range(-image_range[1], image_range[1] + 1)
+    translations_z = tf.range(-image_range[2], image_range[2] + 1)
+    tx, ty, tz = tf.meshgrid(translations_x, translations_y, translations_z, indexing='ij')
+    
+    # Stack translations to create a list of all translation vectors
+    translation_vectors = tf.stack([tx, ty, tz], axis=-1)  # Shape: (image_range * 2 + 1, image_range * 2 + 1, image_range * 2 + 1, 3)
+    
+    # Reshape translation vectors for broadcasting
+    translation_vectors = tf.reshape(translation_vectors, [-1, 3])  # Shape: ((image_range * 2 + 1)^3, 3)
+
+    # Repeat positions for each atom
+    atom_positions = tf.expand_dims(positions, axis=1)  # Shape: (n_atoms, 1, 3)
+    atom_positions = tf.repeat(atom_positions, 
+                               tf.shape(translation_vectors)[0], axis=1)  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
+    
+    
+    # Generate periodic images
+    # Expand the translation_vectors for proper broadcasting
+    expanded_translations = tf.expand_dims(translation_vectors, axis=0)  # Shape: (1, (image_range * 2 + 1)^3, 3)
+    
+    # Perform the addition
+    periodic_images = atom_positions + tf.tensordot(tf.cast(expanded_translations,tf.float32), 
+                                                    lattice_vectors, axes=[2, 0])  # Shape: (n_atoms, (image_range * 2 + 1)^3, 3)
+    
+    species_vectors = tf.expand_dims(species_vectors, axis=1) # Shape: (n_atoms, 1, embedding)
+    species_vectors = tf.repeat(species_vectors, tf.shape(translation_vectors)[0], axis=1) # (n_atoms, (image_range * 2 + 1)^3, embedding)
 
     return periodic_images, species_vectors
 

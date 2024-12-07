@@ -12,7 +12,8 @@ def Networks(input_size, layer_sizes,
             kernel_constraint=None,
             bias_constraint=None,
             prefix='main',
-            l1=0.0,l2=0.0):
+            l1=0.0,l2=0.0,
+            normalize=False):
 
     model = tf.keras.Sequential()
     model.add(tf.keras.Input(shape=(input_size,)))
@@ -33,6 +34,8 @@ def Networks(input_size, layer_sizes,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activation}'
                                         ))
 #        model.add(tf.keras.layers.BatchNormalization())
+        if normalize:
+            model.add(tf.keras.layers.LayerNormalization())
         i += 1
 
     if activations[-1] == 'linear':
@@ -48,6 +51,9 @@ def Networks(input_size, layer_sizes,
                                         dtype=tf.float32,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
+        #if normalize:
+        #    model.add(tf.keras.layers.LayerNormalization())
+
  #       model.add(tf.keras.layers.BatchNormalization())
     else:
         model.add(tf.keras.layers.Dense(layer_sizes[-1], activation=activations[-1],
@@ -62,6 +68,9 @@ def Networks(input_size, layer_sizes,
                                         dtype=tf.float32,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
+
+        #if normalize:
+        #    model.add(tf.keras.layers.LayerNormalization())
 
   #      model.add(tf.keras.layers.BatchNormalization())
     return model
