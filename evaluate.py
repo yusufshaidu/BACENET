@@ -107,7 +107,8 @@ def create_model(configs):
                      rc, pbc, batch_size,
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy,
-                     model_version=model_v, model_dir=model_outdir)
+                     model_version=model_v, model_dir=model_outdir,
+                     evaluate_test=True)
 
     model = model_call(layer_sizes,
                       rc_rad, species_identity, width, batch_size,

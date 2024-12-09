@@ -15,6 +15,8 @@ from ase import Atoms
 import json
 import ase
 from ase.neighborlist import neighbor_list
+from tfr_data_processing import write_tfr, get_tfrs
+import warnings
 
 #from ml_potentials.pbc import replicas_max_idx
 try:
@@ -279,7 +281,8 @@ def prepare_and_split_data_ragged(files, species, data_format,
                      energy_key, force_key,
                      rc, pbc, batch_size,
                      test_fraction,
-                     atomic_energy,C6_spec,model_dir):
+                     atomic_energy,C6_spec,model_dir,
+                     evaluate_test):
     #this should be parellize at some point   
     if not os.path.exists(model_dir):
         os.mkdir(model_dir)
@@ -329,11 +332,11 @@ def prepare_and_split_data_ragged(files, species, data_format,
 
 
             
-        all_positions.append(atoms.positions.tolist())
-        all_species_encoder.append(atoms.get_array('encoder').tolist())
-        all_C6.append(atoms.get_array('C6').tolist())
+        all_positions.append(atoms.positions)
+        all_species_encoder.append(atoms.get_array('encoder'))
+        all_C6.append(atoms.get_array('C6'))
         all_natoms.append(atoms.get_global_number_of_atoms())
-        cells.append(atoms.cell.tolist())
+        cells.append(atoms.cell)
         #replica_idx.append(replicas_max_idx(atoms.cell, rc, pbc=pbc))
         replica_idx.append([0,0,0])
  #       all_species_symbols.append(atoms.get_chemical_symbols())
@@ -341,28 +344,67 @@ def prepare_and_split_data_ragged(files, species, data_format,
         first_atom_idx,second_atom_idx,shift_vector = neighbor_list('ijS', atoms, rc)
         
 
-        all_first_atom.append(first_atom_idx.tolist())
-        all_second_atom.append(second_atom_idx.tolist())
-        all_shift_vectors.append(shift_vector.tolist())
-        all_neigh.append(len(first_atom_idx.tolist()))
+        all_first_atom.append(first_atom_idx)
+        all_second_atom.append(second_atom_idx)
+        all_shift_vectors.append(shift_vector)
+        all_neigh.append(len(first_atom_idx))
         if j % 1000 == 0:
             print(j, len(first_atom_idx), rc)
     Ntest = int(test_fraction*len(all_natoms))
-    '''
-    all_dict = {'positions':all_positions, 
-                'species_encoder':all_species_encoder, 
-                'C6':all_C6,
-                'cells':cells,
-                'natoms':all_natoms,
-                'replica_idx':replica_idx,
-                'i':all_first_atom,
-                'j':all_second_atom,
-                'S':all_shift_vectors,
-                'energy':all_energies,
-                'forces':all_forces}
-    with open(model_dir+'/processed_data.json', 'w') as out_file:
-        json.dump(all_dict, out_file)
-    '''
+    neigh_max = np.max(all_neigh[Ntest:])
+    nmax = np.max(all_natoms[Ntest:])
+    nelement = 50
+    all_dict = {'positions':all_positions[Ntest:], 
+                'species_encoder':all_species_encoder[Ntest:], 
+                'C6':all_C6[Ntest:],
+                'cells':cells[Ntest:],
+                'natoms':all_natoms[Ntest:],
+                'i':all_first_atom[Ntest:],
+                'j':all_second_atom[Ntest:],
+                'S':all_shift_vectors[Ntest:],
+                'nneigh':all_neigh[Ntest:],
+                'energy':all_energies[Ntest:],
+                'forces':all_forces[Ntest:]}
+    Ntrain = len(all_natoms) - Ntest
+    if Ntrain > 0:
+        write_tfr('train',all_dict,
+                  nmax,neigh_max, 
+                  nelement=nelement, tfr_dir=model_dir+'/tfrs_train')
+    else:
+        warnings.warn('there are no configurations for training!')
+
+    all_dict = {'positions':all_positions[:Ntest], 
+                'species_encoder':all_species_encoder[:Ntest],
+                'C6':all_C6[:Ntest],
+                'cells':cells[:Ntest],
+                'natoms':all_natoms[:Ntest],
+                'i':all_first_atom[:Ntest],
+                'j':all_second_atom[:Ntest],
+                'S':all_shift_vectors[:Ntest],
+                'nneigh':all_neigh[:Ntest],
+                'energy':all_energies[:Ntest],
+                'forces':all_forces[:Ntest]}
+
+    # this is just to distingush test and validation
+    test_dir = model_dir+'/tfrs_validate'
+    if evaluate_test:
+        test_dir = model_dir+'/tfrs_test'
+    neigh_max = np.max(all_neigh[:Ntest])
+    nmax = np.max(all_natoms[:Ntest])
+    if Ntest > 0:
+        write_tfr('test',all_dict, 
+                  nmax,neigh_max,
+                  nelement=nelement, tfr_dir=test_dir)
+    else:
+        warnings.warn('there are no configurations for validation!')
+
+    ''' 
+    filenames = tf.io.gfile.glob("tfrs_train/train*.tfrecords")
+    train_data = get_tfrs(filenames, batch_size)
+    
+    filenames = tf.io.gfile.glob("tfrs_test/test*.tfrecords")
+    test_data = get_tfrs(filenames, batch_size)
+
     all_first_atom_test = tf.ragged.constant(all_first_atom[:Ntest],dtype=tf.int32,row_splits_dtype=tf.int32)
     all_first_atom_train = tf.ragged.constant(all_first_atom[Ntest:],dtype=tf.int32,row_splits_dtype=tf.int32)
     all_neigh_train = tf.constant(all_neigh[Ntest:],dtype=tf.int32)
@@ -415,7 +457,8 @@ def prepare_and_split_data_ragged(files, species, data_format,
                                 all_neigh_test,
                                 all_energies_test, all_forces_test),
                                 shuffle=True, batch_size=batch_size)
-    return train_data, test_data
+    '''
+    return nmax,neigh_max
 
 def prepare_and_split_atoms(files, species, data_format,
                      energy_key, force_key,
@@ -468,7 +511,8 @@ def data_preparation(data_dir, species, data_format,
                      atomic_energy=[],
                      atomic_energy_file=None,
                      model_version='v0',
-                     model_dir='tmp'):
+                     model_dir='tmp',
+                     evaluate_test=False):
     
 #    rc = np.max([rc_rad, rc_ang])
 
@@ -554,15 +598,46 @@ def data_preparation(data_dir, species, data_format,
     to_eV = 27.211324570273 * 0.529177**6
     C6_spec = {ss:element(ss).c6_gb * to_eV for ss in species}
 
-    #partial_convert = convert_json2ASE_atoms(all_species_encoder,atomic_energy)
-    #number of precesses
-    #p = Pool(num_process)
-    #Ndata = len(files)
-    #train_data, test_data = prepare_and_split_data_pad(files, species, data_format,
-    #                 energy_key, force_key,
-    #                 rc, pbc, batch_size,
-    #                 test_fraction,
-    #                 atomic_energy,C6_spec)
+    # a quick check whether to create tfrs 
+    Nconf = len(files)
+    ntest = int(test_fraction*Nconf)
+    
+    filenames = tf.io.gfile.glob(model_dir+"/tfrs_train/train*.tfrecords")
+    if evaluate_test:
+        filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_test/test*.tfrecords")
+    else:
+        filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_validate/test*.tfrecords")
+
+    if len(filenames) < (Nconf-ntest) / 50 and not evaluate_test:
+        nmax,neigh_max = prepare_and_split_data_ragged(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec,model_dir,
+                     evaluate_test)
+        with open(model_dir+'/max_numbers.json', 'w') as out_file:
+            json.dump({"nmax":int(nmax), "neigh_max":int(neigh_max)}, out_file)
+
+    elif evaluate_test and len(filenames_test) < ntest / 50:
+        nmax,neigh_max = prepare_and_split_data_ragged(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec,model_dir,
+                     evaluate_test)
+    else:
+        nn = json.load(open(model_dir+'/max_numbers.json'))
+        nmax = int(nn['nmax'])
+        neigh_max = int(nn['neigh_max'])
+
+
+    #train_data = next(iter(get_tfrs(filenames, batch_size)))
+    train_data = get_tfrs(filenames, batch_size)
+    #print()
+    test_data = get_tfrs(filenames_test, batch_size)
+
+
+    '''
     if model_version == 'v0' or model_version=='linear':
         train_data, test_data = prepare_and_split_data_ragged(files, species, data_format,
                      energy_key, force_key,
@@ -575,5 +650,5 @@ def data_preparation(data_dir, species, data_format,
                      rc, pbc, batch_size,
                      test_fraction,
                      atomic_energy,C6_spec)
-
+    '''
     return [train_data, test_data, species_identity]

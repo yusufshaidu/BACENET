@@ -15,6 +15,7 @@ import helping_functions as help_fn
 import ase
 from ase.neighborlist import neighbor_list
 from ase import Atoms
+from unpack_tfr_data import unpack_data
 
 
 
@@ -213,8 +214,8 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+       #         tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
@@ -227,15 +228,11 @@ class mBP_model(tf.keras.Model):
 
     def tf_predict_energy_forces(self,x):
         ''' 
-         x = elements = (batch_species_encoder, batch_width,
-                positions, nmax_diff, batch_nats,
-                batch_zeta, batch_width_ang, cells, replica_idx,
-                batch_Rs_rad, batch_Rs_ang, batch_theta_s, C6)
-
         x = (batch_species_encoder, batch_kn_rad,
                 positions, nmax_diff, batch_nats,
-                batch_zeta, batch_kn_ang, cells, replica_idx,
-                batch_theta_s, C6)
+                batch_zeta, batch_kn_ang, cells,
+                batch_theta_s, C6,
+                first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
         '''
         rc = tf.constant(self.rcut,dtype=tf.float32)
         Ngauss = tf.constant(self.RsN_rad, dtype=tf.int32)
@@ -244,38 +241,33 @@ class mBP_model(tf.keras.Model):
         #Ngauss_ang = tf.constant(self.RsN_ang, dtype=tf.int32)
         Ngauss_ang = tf.constant(self.RsN_rad, dtype=tf.int32)
         thetasN = tf.constant(self.thetaN, dtype=tf.int32)
-
-
-
         nat = tf.cast(x[4], dtype=tf.int32)
         nmax_diff = tf.cast(x[3], dtype=tf.int32)
         species_encoder = tf.reshape(x[0][:nat*self.nspec_embedding], [nat,self.nspec_embedding])
-        
         #width = tf.cast(x[1], dtype=tf.float32)
         kn_rad = x[1]
         positions = tf.reshape(x[2][:nat*3], [nat,3])
         positions = tf.cast(positions, tf.float32)
-
         #zeta cannot be a fraction
         zeta = x[5]
         #width_ang = x[6]
         kn_ang = x[6]
         
-        cell = x[7]
-        replica_idx = x[8]
+        cell = tf.reshape(x[7], [3,3])
+        #replica_idx = x[8]
         #Rs = x[9]
         #Rs_ang = x[10]
-        theta_s = x[9]
+        theta_s = x[8]
 
         evdw = 0.0
 
 #        if self.include_vdw:
-        C6 = tf.cast(x[10], tf.float32)
+        C6 = tf.cast(x[9][:nat], tf.float32)
         #chem_symbols = tf.cast(x[11], tf.string)
-        num_neigh = tf.cast(x[14], tf.int32)
-        first_atom_idx = tf.cast(x[11][:num_neigh], tf.int32)
-        second_atom_idx = tf.cast(x[12][:num_neigh], tf.int32)
-        shift_vector = tf.cast(tf.reshape(x[13][:num_neigh*3], [num_neigh,3]), tf.float32)
+        num_neigh = tf.cast(x[13], tf.int32)
+        first_atom_idx = tf.cast(x[10][:num_neigh], tf.int32)
+        second_atom_idx = tf.cast(x[11][:num_neigh], tf.int32)
+        shift_vector = tf.cast(tf.reshape(x[12][:num_neigh*3], [num_neigh,3]), tf.float32)
 
         sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
@@ -569,11 +561,12 @@ class mBP_model(tf.keras.Model):
 
 
     def call(self, inputs, training=False):
-        '''inpu has a shape of batch_size x nmax_atoms x feature_size'''
+        '''input has a shape of batch_size x nmax_atoms x feature_size'''
         # may be just call the energy prediction here which will be needed in the train and test steps
         # the input are going to be filename from which descriptors and targets are going to be extracted
+        #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh]
 
-        batch_size = tf.shape(inputs[2])[0] 
+        batch_size = tf.shape(inputs[0])[0] 
         # the batch size may be different from the set batchsize saved in varaible self.batch_size
         # because the number of data point may not be exactly divisible by the self.batch_size.
 
@@ -618,13 +611,14 @@ class mBP_model(tf.keras.Model):
         batch_theta_s = tf.tile([self._thetas], [batch_size,1])
 
         # todo: we need to pass nmax if we use padded tensors
-        batch_nats = tf.cast(inputs[2], tf.int32)
+        batch_nats = tf.cast(tf.reshape(inputs[4], [-1]), tf.int32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
         batch_nmax = tf.tile([nmax], [batch_size])
-        nmax_diff = batch_nmax - batch_nats
+        nmax_diff = tf.reshape(batch_nmax - batch_nats, [-1])
 
         #positions and species_encoder are ragged tensors are converted to tensors before using them
-        positions = tf.reshape(inputs[0].to_tensor(shape=(-1,nmax,3)), (-1, 3*nmax))
+        #positions = tf.reshape(inputs[0].to_tensor(shape=(-1,nmax,3)), (-1, 3*nmax))
+        positions = tf.reshape(inputs[0][:,:nmax*3], (-1, nmax*3))
         #positions = tf.reshape(inputs[0], (-1, 3*nmax))
         positions = tf.cast(positions, dtype=tf.float32)
         #obtain species encoder
@@ -632,7 +626,8 @@ class mBP_model(tf.keras.Model):
         spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
         species_one_hot_encoder = tf.one_hot(spec_identity, depth=self.nelement)
         self.trainable_species_encoder = self.species_nets(species_one_hot_encoder)
-        species_encoder = inputs[1].to_tensor(shape=(-1, nmax)) #contains atomic number per atoms for all element in a batch
+        #species_encoder = inputs[1].to_tensor(shape=(-1, nmax)) #contains atomic number per atoms for all element in a batch
+        species_encoder = tf.reshape(inputs[1][:,:nmax], (-1,nmax)) #contains atomic number per atoms for all element in a batch
         
         #species_encoder = inputs[1] #contains atomic number per atoms for all element in a batch
         batch_species_encoder = tf.zeros([batch_size, nmax, self.nspec_embedding], dtype=tf.float32)
@@ -643,20 +638,20 @@ class mBP_model(tf.keras.Model):
                                                        tf.cast(spec,tf.float32)),
                     values, tf.zeros([batch_size, nmax, self.nspec_embedding]))
         batch_species_encoder = tf.reshape(batch_species_encoder, [-1,self.nspec_embedding*nmax])
-        cells = tf.cast(inputs[3], dtype=tf.float32)
-        replica_idx = inputs[4]
-        C6 = tf.cast(inputs[5], dtype=tf.float32)
+        C6 = tf.cast(inputs[2], dtype=tf.float32)
+        cells = tf.reshape(inputs[3], [batch_size, -1])
+        #cells = inputs[3]
 
         #first_atom_idx = tf.cast(inputs[6].to_tensor(shape=(self.batch_size, -1)), tf.int32)
-        num_neigh = tf.cast(inputs[9], tf.int32)
+        num_neigh = tf.cast(tf.reshape(inputs[8], [-1]), tf.int32)
         neigh_max = tf.reduce_max(num_neigh)
-        first_atom_idx = tf.cast(inputs[6], tf.int32)
-        second_atom_idx = tf.cast(inputs[7], tf.int32)
-        shift_vectors = tf.reshape(inputs[8].to_tensor(shape=(self.batch_size, neigh_max,3)), (-1,neigh_max*3))
+        first_atom_idx = tf.cast(inputs[5], tf.int32)
+        second_atom_idx = tf.cast(inputs[6], tf.int32)
+        shift_vectors = tf.reshape(tf.cast(inputs[7][:,:neigh_max*3],tf.int32), (-1, neigh_max*3))
 
         elements = (batch_species_encoder, batch_kn_rad,
                 positions, nmax_diff, batch_nats,
-                batch_zeta, batch_kn_ang, cells, replica_idx,
+                batch_zeta, batch_kn_ang, cells,
                 batch_theta_s, C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
 
@@ -682,19 +677,21 @@ class mBP_model(tf.keras.Model):
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
-        inputs_target = data
-        inputs = inputs_target[:10]
-        target = tf.cast(inputs_target[10], tf.float32)
 
-        batch_nats = tf.cast(inputs[2], tf.float32)
+        inputs_target = unpack_data(data)
+        #inputs = inputs_target[:9]
+
+        #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
+        target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
+        batch_nats = tf.cast(tf.reshape(inputs_target[4], [-1]), tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
-
-        target_f = tf.reshape(inputs_target[11].to_tensor(), [-1, 3*nmax])
+        
+        target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
         #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
 
         with tf.GradientTape() as tape:
-            e_pred, forces, _ = self(inputs, training=True)  # Forward pass
+            e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
             # Compute the loss value
             # (the loss function is configured in `compile()`)
             ediff = (e_pred - target)
@@ -761,18 +758,19 @@ class mBP_model(tf.keras.Model):
     def test_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
-        inputs_target = data
-        inputs = inputs_target[:10]
-        target = tf.cast(inputs_target[10], tf.float32)
+        inputs_target = unpack_data(data)
+        #inputs = inputs_target[:9]
 
-        e_pred, forces, _ = self(inputs, training=True)  # Forward pass
+        #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
+        target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
+        batch_nats = tf.cast(tf.reshape(inputs_target[4], [-1]), tf.float32)
 
-        batch_nats = tf.cast(inputs[2], tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
 
-        forces = tf.reshape(forces, [-1, nmax*3])
+        target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
 
-        target_f = tf.reshape(inputs_target[11].to_tensor(), [-1, 3*nmax])
+        e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
+        forces = tf.reshape(forces, [-1, nmax*3])
         #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
 
@@ -810,18 +808,17 @@ class mBP_model(tf.keras.Model):
     def predict_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
-        inputs_target = data
-        inputs = inputs_target[:10]
-        target = tf.cast(inputs_target[10], tf.float32)
-        e_pred, forces, _ = self(inputs, training=False)  # Forward pass
+        inputs_target = unpack_data(data)
+        #inputs = inputs_target[:9]
 
-        batch_nats = tf.cast(inputs[2], tf.float32)
+        #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
+
+        target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
+        batch_nats = tf.cast(tf.reshape(inputs_target[4], [-1]), tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
-
+        target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
+        e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
         forces = tf.reshape(forces, [-1, nmax*3])
-
-        target_f = tf.reshape(inputs_target[11].to_tensor(), [-1, 3*nmax])
-        #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
 
         ediff = (e_pred - target)
