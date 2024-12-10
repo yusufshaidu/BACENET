@@ -351,10 +351,12 @@ def prepare_and_split_data_ragged(files, species, data_format,
         if j % 1000 == 0:
             print(j, len(first_atom_idx), rc)
     Ntest = int(test_fraction*len(all_natoms))
-    neigh_max = np.max(all_neigh[Ntest:])
-    nmax = np.max(all_natoms[Ntest:])
     nelement = 50
-    all_dict = {'positions':all_positions[Ntest:], 
+    Ntrain = len(all_natoms) - Ntest
+    if Ntrain > 0:
+        neigh_max = np.max(all_neigh[Ntest:])
+        nmax = np.max(all_natoms[Ntest:])
+        all_dict = {'positions':all_positions[Ntest:], 
                 'atomic_number':all_species_encoder[Ntest:], 
                 'C6':all_C6[Ntest:],
                 'cells':cells[Ntest:],
@@ -365,15 +367,13 @@ def prepare_and_split_data_ragged(files, species, data_format,
                 'nneigh':all_neigh[Ntest:],
                 'energy':all_energies[Ntest:],
                 'forces':all_forces[Ntest:]}
-    Ntrain = len(all_natoms) - Ntest
-    if Ntrain > 0:
         write_tfr('train',all_dict,
                   nmax,neigh_max, 
                   nelement=nelement, tfr_dir=model_dir+'/tfrs_train')
     else:
         warnings.warn('there are no configurations for training!')
-
-    all_dict = {'positions':all_positions[:Ntest], 
+    if Ntest > 0:
+        all_dict = {'positions':all_positions[:Ntest], 
                 'atomic_number':all_species_encoder[:Ntest],
                 'C6':all_C6[:Ntest],
                 'cells':cells[:Ntest],
@@ -385,13 +385,12 @@ def prepare_and_split_data_ragged(files, species, data_format,
                 'energy':all_energies[:Ntest],
                 'forces':all_forces[:Ntest]}
 
-    # this is just to distingush test and validation
-    test_dir = model_dir+'/tfrs_validate'
-    if evaluate_test:
-        test_dir = model_dir+'/tfrs_test'
-    neigh_max = np.max(all_neigh[:Ntest])
-    nmax = np.max(all_natoms[:Ntest])
-    if Ntest > 0:
+        # this is just to distingush test and validation
+        test_dir = model_dir+'/tfrs_validate'
+        if evaluate_test:
+            test_dir = model_dir+'/tfrs_test'
+        neigh_max = np.max(all_neigh[:Ntest])
+        nmax = np.max(all_natoms[:Ntest])
         write_tfr('test',all_dict, 
                   nmax,neigh_max,
                   nelement=nelement, tfr_dir=test_dir)

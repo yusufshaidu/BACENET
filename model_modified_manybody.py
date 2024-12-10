@@ -44,7 +44,8 @@ class mBP_model(tf.keras.Model):
                 mean_descriptors=None,
                 std_descriptors=None,
                 features=False,
-                layer_normalize=False):
+                layer_normalize=False,
+                thetas_trainable=True):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -91,6 +92,8 @@ class mBP_model(tf.keras.Model):
         self.min_radial_center = min_radial_center
         self.species_out_act = species_out_act
         self.layer_normalize = layer_normalize
+        self.tf_pi = tf.constant(math.pi, dtype=tf.float32)
+        self.thetas_trainable = thetas_trainable
         # the number of elements in the periodic table
         self.nelement = nelement
         if not self.features:     
@@ -106,7 +109,7 @@ class mBP_model(tf.keras.Model):
         Nwidth_rad = self.RsN_rad
         Nwidth_ang = self.RsN_ang
         init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
-        self.rbf_nets = Networks(1, [128,self.RsN_rad], ['sigmoid','sigmoid'], 
+        self.rbf_nets = Networks(1, [self.RsN_rad], ['sigmoid'], 
                                  weight_initializer=init,
                                  bias_initializer='zeros',
                                  prefix='rbf')
@@ -151,12 +154,19 @@ class mBP_model(tf.keras.Model):
                                   kernel_constraint=constraint,
                                   bias_constraint=constraint, prefix='zeta')
         '''
-        init = tf.keras.initializers.GlorotNormal(seed=56789)
-        self.thetas_nets = Networks(1, [128,self.thetaN], ['sigmoid', 'sigmoid'],
-                                      weight_initializer=init,
-                                      bias_initializer='zeros',
-                                      kernel_constraint=constraint,
-                                    bias_constraint=constraint, prefix='thetas')
+    def thetas_net(self):
+        if self.thetas_trainable:
+            init = tf.keras.initializers.GlorotNormal(seed=56789)
+            thetas = Networks(1, [self.thetaN], ['sigmoid'],
+                                  weight_initializer=init,
+                                  bias_initializer='zeros',
+                                  kernel_constraint=None,
+                                bias_constraint=constraint, prefix='thetas')
+            return thetas
+        else:
+            return tf.linspace(self.tf_pi/self.thetaN, 
+                               self.tf_pi, self.thetaN)
+
     
     @tf.function(
                 input_signature=[(
@@ -401,8 +411,7 @@ class mBP_model(tf.keras.Model):
             #fcuts is nat x Nneigh and reshaped to nat x Nneigh
             #gauss_term = tf.reshape(help_fn.tf_app_gaussian(tf.reshape(gauss_args, [-1])), tf.shape(gauss_args))
             #fcut = tf.reshape(help_fn.tf_fcut(tf.reshape(all_rij_norm, [-1]), rc), tf.shape(all_rij_norm))
-            tf_pi = tf.constant(math.pi, dtype=tf.float32)
-            arg = tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Ngauss+1, dtype=tf.float32) * kn_rad, all_rij_norm)
+            arg = self.tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Ngauss+1, dtype=tf.float32) * kn_rad, all_rij_norm)
             #arg = tf.reshape(arg, [-1])
             #r = tf.einsum('l,ij->ijl',tf.ones(Ngauss), all_rij_norm)
             #r = all_rij_norm[:,:,None]
@@ -594,8 +603,10 @@ class mBP_model(tf.keras.Model):
         #self._Rs_ang = tf.reshape(self.Rs_ang_nets(Rs_ang[tf.newaxis,:]), [-1])*self.rcut_ang
         #delta = (self.rcut_ang - self.min_radial_center) / tf.cast(self.RsN_ang, tf.float32)
         #self._Rs_ang = help_fn.rescale_params(Rs_ang_pred, self.min_radial_center, self.rcut_ang-delta)
-        
-        self._thetas = tf.reshape(self.thetas_nets(theta_s[tf.newaxis,:]), [-1]) * tf_pi
+        if self.thetas_trainable:
+            self._thetas = tf.reshape(self.thetas_net()(theta_s[tf.newaxis,:]), [-1]) * self.tf_pi
+        else:
+            self._thetas = self.thetas_net() # evenly spaced centers
 
         #self._thetas = help_fn.rescale_params(ts_pred, 0.0, tf_pi)
 

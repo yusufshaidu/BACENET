@@ -75,7 +75,7 @@ def create_model(configs):
     body_order = configs['body_order']
     min_radial_center = configs['min_radial_center']
     species_out_act = configs['species_out_act']
-
+    thetas_trainable = configs['thetas_trainable']
     if include_vdw:
         rc = np.max([rc_rad,rc_ang,rmax_d])
     else:
@@ -126,7 +126,8 @@ def create_model(configs):
                       body_order=body_order,
                       min_radial_center=min_radial_center,
                       species_out_act=species_out_act,
-                       layer_normalize=configs['layer_normalize'])
+                      layer_normalize=configs['layer_normalize'],
+                      thetas_trainable=thetas_trainable)
     
     #load the last check points
     

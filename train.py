@@ -76,6 +76,7 @@ def default_config():
     configs['swa_lr2'] = 0.001
     configs['clip_value'] = None
     configs['layer_normalize'] = False
+    configs['thetas_trainable'] = True
     return configs
 
 def create_model(configs):
@@ -150,6 +151,7 @@ def create_model(configs):
     l1_norm = 0.0
     l2_norm = 0.0
 
+    thetas_trainable = configs['thetas_trainable']
     atomic_energy = configs['atomic_energy']
     if len(atomic_energy)==0:
         try:
@@ -340,7 +342,8 @@ def create_model(configs):
                       body_order=body_order,
                       min_radial_center=min_radial_center,
                       species_out_act=species_out_act,
-                      layer_normalize=configs['layer_normalize'])
+                      layer_normalize=configs['layer_normalize'],
+                      thetas_trainable=thetas_trainable)
 
     model.compile(optimizer=optimizer, 
                   loss="mse", 
