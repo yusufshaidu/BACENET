@@ -154,17 +154,15 @@ class mBP_model(tf.keras.Model):
                                   kernel_constraint=constraint,
                                   bias_constraint=constraint, prefix='zeta')
         '''
-    def thetas_net(self):
         if self.thetas_trainable:
             init = tf.keras.initializers.GlorotNormal(seed=56789)
-            thetas = Networks(1, [self.thetaN], ['sigmoid'],
+            self.thetas_net = Networks(1, [self.thetaN], ['sigmoid'],
                                   weight_initializer=init,
                                   bias_initializer='zeros',
                                   kernel_constraint=None,
-                                bias_constraint=constraint, prefix='thetas')
-            return thetas
+                                bias_constraint=None, prefix='thetas')
         else:
-            return tf.linspace(self.tf_pi/self.thetaN, 
+            self.thetas_net = tf.linspace(self.tf_pi/self.thetaN, 
                                self.tf_pi, self.thetaN)
 
     
@@ -604,9 +602,9 @@ class mBP_model(tf.keras.Model):
         #delta = (self.rcut_ang - self.min_radial_center) / tf.cast(self.RsN_ang, tf.float32)
         #self._Rs_ang = help_fn.rescale_params(Rs_ang_pred, self.min_radial_center, self.rcut_ang-delta)
         if self.thetas_trainable:
-            self._thetas = tf.reshape(self.thetas_net()(theta_s[tf.newaxis,:]), [-1]) * self.tf_pi
+            self._thetas = tf.reshape(self.thetas_net(theta_s[tf.newaxis,:]), [-1]) * self.tf_pi
         else:
-            self._thetas = self.thetas_net() # evenly spaced centers
+            self._thetas = self.thetas_net # evenly spaced centers
 
         #self._thetas = help_fn.rescale_params(ts_pred, 0.0, tf_pi)
 
