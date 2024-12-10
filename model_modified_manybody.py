@@ -106,7 +106,7 @@ class mBP_model(tf.keras.Model):
         Nwidth_rad = self.RsN_rad
         Nwidth_ang = self.RsN_ang
         init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
-        self.rbf_nets = Networks(1, [self.RsN_rad], ['sigmoid'], 
+        self.rbf_nets = Networks(1, [128,self.RsN_rad], ['sigmoid','sigmoid'], 
                                  weight_initializer=init,
                                  bias_initializer='zeros',
                                  prefix='rbf')
@@ -152,9 +152,9 @@ class mBP_model(tf.keras.Model):
                                   bias_constraint=constraint, prefix='zeta')
         '''
         init = tf.keras.initializers.GlorotNormal(seed=56789)
-        self.thetas_nets = Networks(1, [self.thetaN], ['sigmoid'],
+        self.thetas_nets = Networks(1, [128,self.thetaN], ['sigmoid', 'sigmoid'],
                                       weight_initializer=init,
-                                      bias_initializer=init,
+                                      bias_initializer='zeros',
                                       kernel_constraint=constraint,
                                     bias_constraint=constraint, prefix='thetas')
     
@@ -272,9 +272,9 @@ class mBP_model(tf.keras.Model):
         sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
 #        sin_theta_s2 = sin_theta_s * sin_theta_s
-        if self.mean_descriptors is None or self.std_descriptors is None:
-            self.mean_descriptors = tf.zeros((nat, self.feature_size), dtype=tf.float32)
-            self.std_descriptors = tf.ones((nat, self.feature_size), dtype=tf.float32)
+        #if self.mean_descriptors is None or self.std_descriptors is None:
+        #    self.mean_descriptors = tf.zeros((nat, self.feature_size), dtype=tf.float32)
+        #    self.std_descriptors = tf.ones((nat, self.feature_size), dtype=tf.float32)
         
         with tf.GradientTape() as g:
             #'''
@@ -404,12 +404,13 @@ class mBP_model(tf.keras.Model):
             tf_pi = tf.constant(math.pi, dtype=tf.float32)
             arg = tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Ngauss+1, dtype=tf.float32) * kn_rad, all_rij_norm)
             #arg = tf.reshape(arg, [-1])
-            r = tf.einsum('l,ij->ijl',tf.ones(Ngauss), all_rij_norm)
+            #r = tf.einsum('l,ij->ijl',tf.ones(Ngauss), all_rij_norm)
+            #r = all_rij_norm[:,:,None]
             #r = tf.reshape(r, [-1])
             _Nneigh = tf.shape(all_rij_norm)
             Nneigh = _Nneigh[1]
 
-            bf_radial = tf.reshape(help_fn.bessel_function(r,arg,rc), [nat, Nneigh, Ngauss])
+            bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm[:,:,None],arg,rc), [nat, Nneigh, Ngauss])
             radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Ngauss x nembedding
             #radial_ij = tf.reshape(radial_ij, [nat,Nneigh,Ngauss*self.nspec_embedding])
 
