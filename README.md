@@ -7,7 +7,7 @@ All weights are learn from data. Neighborlist are computed with ASE and stored a
 ## Equations
  # Redial basis functions
  $$
- R(r) = \sqrt{\frac{2}{r_c}} \frac{sin(\frac{n \pi k_n}{r_c} r)}{r} f_c{r,r_c}
+ R(r) = \sqrt{\frac{2}{r_c}} \frac{sin(\frac{n\pi}{r_c}k_n r)}{r} f_c(r,r_c)
  $$
 ## todolist
 - (priority 1) implement ASE interface
