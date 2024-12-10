@@ -24,7 +24,7 @@ def example(data,nmax, nneigh_max):
     ndiff = (nmax - nat)
     positions = np.pad(data[0].flatten(), pad_width=(0,ndiff*3)).tolist()
     forces = np.pad(data[10].flatten(), pad_width=(0,ndiff*3)).tolist()
-    species_encoder = np.pad(data[1].flatten(), pad_width=(0,ndiff)).tolist()
+    atomic_number = np.pad(data[1].flatten(), pad_width=(0,ndiff)).tolist()
     C6 = np.pad(data[2].flatten(), pad_width=(0,ndiff)).tolist()
     nneigh = int(data[8])
     ndiff = nneigh_max - nneigh
@@ -32,7 +32,7 @@ def example(data,nmax, nneigh_max):
     j_idx = np.pad(data[6].flatten(), pad_width=(0,ndiff)).tolist()
     S_idx = np.pad(data[7].flatten(), pad_width=(0,ndiff*3)).tolist()
     features = {'positions':_float_feature(positions),
-                'species_encoder':_float_feature(species_encoder),
+                'atomic_number':_float_feature(atomic_number),
                 'C6':_float_feature(C6),
                 'cells':_float_feature(data[3].flatten().tolist()),
                 'natoms':_int64_feature([data[4]]),
@@ -75,12 +75,13 @@ def write_tfr(prefix, data, nmax, nneigh_max, nelement=None, tfr_dir='tfrs',):
                 tf_example = example(inputs, nmax, nneigh_max)
                 writer.write(tf_example.SerializeToString())
                 #writer.write(tf_example)
+        writer.close()
 
 def _parse_function(example_proto):
     # Parse the input tf.train.Example proto using the dictionary above.
 
     feature_description = {'positions':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
-                'species_encoder':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
+                'atomic_number':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
                 'C6':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
                 'cells':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
                 'natoms':tf.io.FixedLenFeature([], tf.int64),
@@ -97,7 +98,9 @@ def load_tfrs(filenames):
     ignore_order = tf.data.Options()
     ignore_order.experimental_deterministic = False  # disable order, increase speed
     dataset = tf.data.TFRecordDataset(
-        filenames
+        filenames,
+        #buffer_size=16,
+        num_parallel_reads=16
     )  # automatically interleaves reads from multiple files
     dataset = dataset.with_options(
         ignore_order
@@ -105,6 +108,7 @@ def load_tfrs(filenames):
     dataset = dataset.map(_parse_function, 
                           num_parallel_calls=AUTOTUNE)
     # returns a dataset
+    #dataset.cache()
     return dataset
 
 def get_tfrs(filenames, batch_size):

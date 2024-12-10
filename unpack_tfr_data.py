@@ -4,7 +4,7 @@ def unpack_data(data):
     #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
     result = []
     result.append(data['positions'])
-    result.append(data['species_encoder'])
+    result.append(data['atomic_number'])
     result.append(data['C6'])
     result.append(data['cells'])
     result.append(data['natoms'])
@@ -20,7 +20,7 @@ def np_unpack_data(data):
     #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
     result = []
     result.append(data['positions'])
-    result.append(data['species_encoder'])
+    result.append(data['atomic_number'])
     result.append(data['C6'])
     result.append(data['cells'])
     result.append(data['natoms'])

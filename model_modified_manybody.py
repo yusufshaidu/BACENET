@@ -110,11 +110,11 @@ class mBP_model(tf.keras.Model):
                                  weight_initializer=init,
                                  bias_initializer='zeros',
                                  prefix='rbf')
-        init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
-        self.rbf_nets_ang = Networks(1, [self.RsN_ang], ['sigmoid'], 
-                                     weight_initializer=init,
-                                     bias_initializer='zeros',
-                                     prefix='rbf_ang')
+        #init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
+        #self.rbf_nets_ang = Networks(1, [self.RsN_ang], ['sigmoid'], 
+        #                             weight_initializer=init,
+        #                             bias_initializer='zeros',
+        #                             prefix='rbf_ang')
         
         ''' 
         init = tf.keras.initializers.RandomNormal(mean=self._width, stddev=0.05)
@@ -213,7 +213,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                #tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
        #         tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -230,7 +230,7 @@ class mBP_model(tf.keras.Model):
         ''' 
         x = (batch_species_encoder, batch_kn_rad,
                 positions, nmax_diff, batch_nats,
-                batch_zeta, batch_kn_ang, cells,
+                batch_zeta, cells,
                 batch_theta_s, C6,
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
         '''
@@ -251,23 +251,23 @@ class mBP_model(tf.keras.Model):
         #zeta cannot be a fraction
         zeta = x[5]
         #width_ang = x[6]
-        kn_ang = x[6]
+        #kn_ang = x[6]
         
-        cell = tf.reshape(x[7], [3,3])
+        cell = tf.reshape(x[6], [3,3])
         #replica_idx = x[8]
         #Rs = x[9]
         #Rs_ang = x[10]
-        theta_s = x[8]
+        theta_s = x[7]
 
         evdw = 0.0
 
 #        if self.include_vdw:
-        C6 = tf.cast(x[9][:nat], tf.float32)
+        C6 = tf.cast(x[8][:nat], tf.float32)
         #chem_symbols = tf.cast(x[11], tf.string)
-        num_neigh = tf.cast(x[13], tf.int32)
-        first_atom_idx = tf.cast(x[10][:num_neigh], tf.int32)
-        second_atom_idx = tf.cast(x[11][:num_neigh], tf.int32)
-        shift_vector = tf.cast(tf.reshape(x[12][:num_neigh*3], [num_neigh,3]), tf.float32)
+        num_neigh = tf.cast(x[12], tf.int32)
+        first_atom_idx = tf.cast(x[9][:num_neigh], tf.int32)
+        second_atom_idx = tf.cast(x[10][:num_neigh], tf.int32)
+        shift_vector = tf.cast(tf.reshape(x[11][:num_neigh*3], [num_neigh,3]), tf.float32)
 
         sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
@@ -572,7 +572,7 @@ class mBP_model(tf.keras.Model):
 
         inputs_width = tf.ones(1)
         self.kn_rad = tf.reshape(self.rbf_nets(inputs_width[tf.newaxis, :]), [-1])
-        self.kn_ang = tf.reshape(self.rbf_nets_ang(inputs_width[tf.newaxis, :]), [-1])
+        #self.kn_ang = tf.reshape(self.rbf_nets_ang(inputs_width[tf.newaxis, :]), [-1])
         #self.width_value = tf.reshape(self.width_nets(inputs_width[tf.newaxis, :]), [-1])
 
         #inputs_width_ang = tf.ones(1)
@@ -600,7 +600,7 @@ class mBP_model(tf.keras.Model):
 
 
         batch_kn_rad = tf.tile([self.kn_rad], [batch_size,1])
-        batch_kn_ang = tf.tile([self.kn_ang], [batch_size,1])
+        #batch_kn_ang = tf.tile([self.kn_ang], [batch_size,1])
 
         #batch_width = tf.tile([self.width_value], [batch_size,1])
         #batch_width = tf.tile([self.width_value], [batch_size,1])
@@ -651,7 +651,7 @@ class mBP_model(tf.keras.Model):
 
         elements = (batch_species_encoder, batch_kn_rad,
                 positions, nmax_diff, batch_nats,
-                batch_zeta, batch_kn_ang, cells,
+                batch_zeta, cells,
                 batch_theta_s, C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
 
@@ -746,7 +746,7 @@ class mBP_model(tf.keras.Model):
 
          #   tf.summary.histogram('3. Parameters/1. width',self.width_value,self._train_counter)
             tf.summary.histogram('3. Parameters/1. kn_rad',self.kn_rad,self._train_counter)
-            tf.summary.histogram('3. Parameters/2. kn_ang',self.kn_ang,self._train_counter)
+            #tf.summary.histogram('3. Parameters/2. kn_ang',self.kn_ang,self._train_counter)
           #  tf.summary.histogram('3. Parameters/2. width_ang',self.width_value_ang,self._train_counter)
             tf.summary.histogram('3. Parameters/3. zeta',self.zeta_value,self._train_counter)
           #  tf.summary.histogram('3. Parameters/4. Rs_rad',self._Rs_rad,self._train_counter)

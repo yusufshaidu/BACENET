@@ -355,7 +355,7 @@ def prepare_and_split_data_ragged(files, species, data_format,
     nmax = np.max(all_natoms[Ntest:])
     nelement = 50
     all_dict = {'positions':all_positions[Ntest:], 
-                'species_encoder':all_species_encoder[Ntest:], 
+                'atomic_number':all_species_encoder[Ntest:], 
                 'C6':all_C6[Ntest:],
                 'cells':cells[Ntest:],
                 'natoms':all_natoms[Ntest:],
@@ -374,7 +374,7 @@ def prepare_and_split_data_ragged(files, species, data_format,
         warnings.warn('there are no configurations for training!')
 
     all_dict = {'positions':all_positions[:Ntest], 
-                'species_encoder':all_species_encoder[:Ntest],
+                'atomic_number':all_species_encoder[:Ntest],
                 'C6':all_C6[:Ntest],
                 'cells':cells[:Ntest],
                 'natoms':all_natoms[:Ntest],
@@ -608,6 +608,8 @@ def data_preparation(data_dir, species, data_format,
     else:
         filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_validate/test*.tfrecords")
 
+    recomputing = 0
+
     if len(filenames) < (Nconf-ntest) / 50 and not evaluate_test:
         nmax,neigh_max = prepare_and_split_data_ragged(files, species, data_format,
                      energy_key, force_key,
@@ -617,7 +619,7 @@ def data_preparation(data_dir, species, data_format,
                      evaluate_test)
         with open(model_dir+'/max_numbers.json', 'w') as out_file:
             json.dump({"nmax":int(nmax), "neigh_max":int(neigh_max)}, out_file)
-
+        recomputing = 1
     elif evaluate_test and len(filenames_test) < ntest / 50:
         nmax,neigh_max = prepare_and_split_data_ragged(files, species, data_format,
                      energy_key, force_key,
@@ -625,15 +627,19 @@ def data_preparation(data_dir, species, data_format,
                      test_fraction,
                      atomic_energy,C6_spec,model_dir,
                      evaluate_test)
-    else:
-        nn = json.load(open(model_dir+'/max_numbers.json'))
-        nmax = int(nn['nmax'])
-        neigh_max = int(nn['neigh_max'])
+        recomputing = 1
+    #else:
+    #    nn = json.load(open(model_dir+'/max_numbers.json'))
+    #    nmax = int(nn['nmax'])
+    #    neigh_max = int(nn['neigh_max'])
+    if recomputing == 1: 
+        filenames = tf.io.gfile.glob(model_dir+"/tfrs_train/train*.tfrecords")
+        if evaluate_test:
+            filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_test/test*.tfrecords")
+        else:
+            filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_validate/test*.tfrecords")
 
-
-    #train_data = next(iter(get_tfrs(filenames, batch_size)))
     train_data = get_tfrs(filenames, batch_size)
-    #print()
     test_data = get_tfrs(filenames_test, batch_size)
 
 

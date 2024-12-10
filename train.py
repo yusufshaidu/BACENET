@@ -342,7 +342,9 @@ def create_model(configs):
                       species_out_act=species_out_act,
                       layer_normalize=configs['layer_normalize'])
 
-    model.compile(optimizer=optimizer, loss="mse", metrics=["MAE", 'loss'])
+    model.compile(optimizer=optimizer, 
+                  loss="mse", 
+                  metrics=["MAE", 'loss'])
     model.save_weights(checkpoint_path.format(epoch=0))
     try:
         model.fit(train_data,
