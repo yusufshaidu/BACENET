@@ -88,7 +88,8 @@ class wBP_Calculator(Calculator):
                           rmax_d = configs['rmax_d'],
                           body_order=configs['body_order'],
                           layer_normalize=configs['layer_normalize'],
-                          thetas_trainable=configs['thetas_trainable'])
+                          thetas_trainable=configs['thetas_trainable'],
+                          species_layer_sizes=configs['species_layer_sizes'])
 
         ckpts = [os.path.join(configs['model_outdir']+"/models", x.split('.index')[0]) 
                  for x in os.listdir(configs['model_outdir']+"/models") if x.endswith('index')]

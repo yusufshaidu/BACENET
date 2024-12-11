@@ -21,6 +21,7 @@ def create_model(configs):
 
     #
     layer_sizes = configs['layer_sizes']
+    species_layer_sizes = configs['species_layer_sizes']
     zeta = configs['zeta']
     thetaN = configs['thetaN']
     Nrad = configs['RsN_rad']
@@ -122,7 +123,8 @@ def create_model(configs):
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       body_order=body_order,
                       layer_normalize=configs['layer_normalize'],
-                      thetas_trainable=thetas_trainable)
+                      thetas_trainable=thetas_trainable,
+                      species_layer_sizes=species_layer_sizes)
     
     #load the last check points
     

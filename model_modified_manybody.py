@@ -16,6 +16,9 @@ import ase
 from ase.neighborlist import neighbor_list
 from ase import Atoms
 from unpack_tfr_data import unpack_data
+import warnings
+
+
 
 
 
@@ -41,7 +44,9 @@ class mBP_model(tf.keras.Model):
                 body_order=3,
                 features=False,
                 layer_normalize=False,
-                thetas_trainable=True):
+                thetas_trainable=True,
+                species_layer_sizes=[] #the last layer is eforced to be equal nspec_embedding
+                 ):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
@@ -82,11 +87,23 @@ class mBP_model(tf.keras.Model):
         self.thetas_trainable = thetas_trainable
         # the number of elements in the periodic table
         self.nelement = nelement
+        
+        self.species_layer_sizes = species_layer_sizes
+        if not self.species_layer_sizes:
+            self.species_layer_sizes = [self.nspec_embedding]
+        if self.species_layer_sizes[-1] != self.nspec_embedding:
+            warnings.warn(f'the last layer of species embedding is set to {nspec_embedding}')
+            self.species_layer_sizes[-1] = self.nspec_embedding
+
+        species_activations = ['tanh' for x in self.species_layer_sizes[:-1]]
+        species_activations.append('linear')
+
         if not self.features:     
             self.atomic_nets = Networks(self.feature_size, self.layer_sizes, self._activations, l1=self.l1, l2=self.l2, normalize=self.layer_normalize)
 
        # create a species embedding network with 1 hidden layer Nembedding x Nspecies
-        self.species_nets = Networks(self.nelement, [self.nelement,self.nspec_embedding], ['tanh','linear'], prefix='species_encoder')
+        self.species_nets = Networks(self.nelement, self.species_layer_sizes, species_activations, prefix='species_encoder')
+        #self.species_nets = Networks(self.nelement, [self.nspec_embedding], ['tanh'], prefix='species_encoder')
 
         constraint = None
         init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)

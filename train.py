@@ -77,6 +77,7 @@ def default_config():
     configs['clip_value'] = None
     configs['layer_normalize'] = False
     configs['thetas_trainable'] = True
+    configs['species_layer_sizes'] = []
     return configs
 
 def create_model(configs):
@@ -91,6 +92,7 @@ def create_model(configs):
         if key not in configs.keys():
             configs[key] = _configs[key]
     layer_sizes = configs['layer_sizes']
+    species_layer_sizes = configs['species_layer_sizes']
     nelement = configs['nelement']
     save_freq = configs['save_freq']
     zeta = configs['zeta']
@@ -126,7 +128,7 @@ def create_model(configs):
     decay_rate = configs['decay_rate']
     #activations are basically tanh and linear for now
     activations = configs['activations']
-    print(activations)
+    #print(activations,species_layer_sizes)
     
     assert len(activations) == len(layer_sizes),'the number of activations must be same as the number of layer'
     if activations[-1] != 'linear':
@@ -340,7 +342,8 @@ def create_model(configs):
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       body_order=body_order,
                       layer_normalize=configs['layer_normalize'],
-                      thetas_trainable=thetas_trainable)
+                      thetas_trainable=thetas_trainable,
+                      species_layer_sizes=species_layer_sizes)
 
     model.compile(optimizer=optimizer, 
                   loss="mse", 
