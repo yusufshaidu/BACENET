@@ -23,10 +23,10 @@ def create_model(configs):
     layer_sizes = configs['layer_sizes']
     zeta = configs['zeta']
     thetaN = configs['thetaN']
-    RsN_rad = configs['RsN_rad']
-    RsN_ang = configs['RsN_ang']
+    Nrad = configs['RsN_rad']
+    #RsN_ang = configs['RsN_ang']
     rc_rad = configs['rc_rad']
-    rc_ang = configs['rc_ang']
+    #rc_ang = configs['rc_ang']
     nelement = configs['nelement']
     epoch = configs['epoch']
     try:
@@ -35,8 +35,8 @@ def create_model(configs):
         interval = 1
         print('all saved checkpoints will be evaluated')
     #estimate initial parameters
-    width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
-    width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
+    #width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
+    #width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
     #trainable linear model
     fcost = configs['fcost']
     #trainable linear model
@@ -74,12 +74,12 @@ def create_model(configs):
     rmax_d = configs['rmax_d']
     body_order = configs['body_order']
     min_radial_center = configs['min_radial_center']
-    species_out_act = configs['species_out_act']
+    #species_out_act = configs['species_out_act']
     thetas_trainable = configs['thetas_trainable']
     if include_vdw:
-        rc = np.max([rc_rad,rc_ang,rmax_d])
+        rc = np.max([rc_rad,rmax_d])
     else:
-        rc = np.max([rc_rad,rc_ang])
+        rc = rc_rad
 
     model_call = mBP_model
     print('model_version' in list(configs.keys()))
@@ -87,8 +87,6 @@ def create_model(configs):
         model_v = configs['model_version']
         if model_v == 'linear':
             model_call = mBP_model_linear
-        if model_v == 'ase':
-            model_call = mBP_model_ase
 
     nspec_embedding = configs['nspec_embedding']
     try:
@@ -108,24 +106,21 @@ def create_model(configs):
                      test_fraction=test_fraction,
                      atomic_energy=atomic_energy,
                      model_version=model_v, model_dir=model_outdir,
-                     evaluate_test=True)
+                     evaluate_test=1)
 
     model = model_call(layer_sizes,
-                      rc_rad, species_identity, width, batch_size,
+                      rc_rad, species_identity, batch_size,
                       activations,
-                      rc_ang,RsN_rad,RsN_ang,
-                      thetaN,width_ang,zeta,
+                      Nrad,
+                      thetaN,zeta,
                       train_writer=model_outdir,
                       fcost=fcost,
-                      pbc=_pbc,
                       nelement=nelement,
                       nspec_embedding=nspec_embedding,
                       include_vdw=include_vdw,
                       rmin_u=rmin_u,rmax_u=rmax_u,
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       body_order=body_order,
-                      min_radial_center=min_radial_center,
-                      species_out_act=species_out_act,
                       layer_normalize=configs['layer_normalize'],
                       thetas_trainable=thetas_trainable)
     

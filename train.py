@@ -95,13 +95,13 @@ def create_model(configs):
     save_freq = configs['save_freq']
     zeta = configs['zeta']
     thetaN = configs['thetaN']
-    RsN_rad = configs['RsN_rad']
-    RsN_ang = configs['RsN_ang']
+    Nrad = configs['RsN_rad']
+    #RsN_ang = configs['RsN_ang']
     rc_rad = configs['rc_rad'] 
-    rc_ang = configs['rc_ang'] 
+    #rc_ang = configs['rc_ang'] 
     #estimate initial parameters
-    width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
-    width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
+    #width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
+    #width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
     fcost = configs['fcost']
     ecost = configs['ecost']
     #trainable linear model
@@ -177,9 +177,9 @@ def create_model(configs):
     swa_lr2 = configs['swa_lr2']
 
     if include_vdw:
-        rc = np.max([rc_rad,rc_ang,rmax_d])
+        rc = np.max([rc_rad,rmax_d])
     else:
-        rc = np.max([rc_rad,rc_ang])
+        rc = rc_rad
     train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
                      energy_key, force_key,
                      rc, pbc, batch_size,
@@ -325,13 +325,12 @@ def create_model(configs):
     '''
      # It should work on CPU platform
     model = model_call(layer_sizes,
-                      rc_rad, species_identity, width, batch_size,
+                      rc_rad, species_identity,batch_size,
                       activations,
-                      rc_ang,RsN_rad,RsN_ang,
-                      thetaN,width_ang,zeta,
+                      Nrad,
+                      thetaN,zeta,
                       fcost=fcost,
                       ecost=ecost,
-                      pbc=_pbc,
                       nelement=nelement,
                       nspec_embedding=configs['nspec_embedding'],
                       train_writer=model_outdir,
@@ -340,8 +339,6 @@ def create_model(configs):
                       rmin_u=rmin_u,rmax_u=rmax_u,
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       body_order=body_order,
-                      min_radial_center=min_radial_center,
-                      species_out_act=species_out_act,
                       layer_normalize=configs['layer_normalize'],
                       thetas_trainable=thetas_trainable)
 

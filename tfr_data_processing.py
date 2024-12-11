@@ -63,7 +63,7 @@ def write_tfr(prefix, data, nmax, nneigh_max, nelement=None, tfr_dir='tfrs',):
     nfiles = num_examples // nelement
     if nelement * nfiles < num_examples:
         nfiles += 1
-    print(f'number of tfrs: {nfiles}, number of examples: {num_examples}')
+    #print(f'number of tfrs: {nfiles}, number of examples: {num_examples}')
     for n in range(nfiles):
         #if n % nfiles == 0:
         filename = tfr_dir+f'/{prefix}_{n}.tfrecords'

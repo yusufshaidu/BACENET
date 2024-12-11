@@ -319,16 +319,24 @@ def prepare_and_split_data_ragged(files, species, data_format,
             for i,sp in enumerate(species):
                 Nsp = len(np.where(np.asarray(symbols).astype(str)==sp)[0])
                 E0 += Nsp * atomic_energy[i]
- #           print(atoms.get_potential_energy())
-            all_energies.append(atoms.get_potential_energy()-E0)
-            all_forces.append(atoms.get_forces())
+            #print(atoms.get_potential_energy())
+            if evaluate_test >= 0:
+                all_energies.append(atoms.get_potential_energy()-E0)
+                all_forces.append(atoms.get_forces())
+            elif evaluate_test==-1:
+                all_energies.append(0)
+                all_forces.append(np.zeros((len(atoms.positions),3)))
 
-            _encoder = np.asarray([atomic_number(ss) for ss in symbols])
-            atoms.new_array('encoder', _encoder)
+            #_encoder = np.asarray([atomic_number(ss) for ss in symbols])
+            _encoder = atoms.get_atomic_numbers()
+            #atoms.new_array('encoder', _encoder)
+            atoms.set_array('encoder', _encoder)
             # C6 are in Ha * au^6
             to_eV = 27.211324570273 * 0.529177**6
             C6 = np.asarray([C6_spec[ss] for ss in symbols])
-            atoms.new_array('C6', C6)
+            #atoms.new_array('C6', C6)
+            atoms.set_array('C6', C6)
+            #print(atoms)
 
 
             
@@ -348,10 +356,12 @@ def prepare_and_split_data_ragged(files, species, data_format,
         all_second_atom.append(second_atom_idx)
         all_shift_vectors.append(shift_vector)
         all_neigh.append(len(first_atom_idx))
-        if j % 1000 == 0:
-            print(j, len(first_atom_idx), rc)
+        #if j % 1000 == 0:
+        #    print(j, len(first_atom_idx), rc)
     Ntest = int(test_fraction*len(all_natoms))
+    
     nelement = 50
+
     Ntrain = len(all_natoms) - Ntest
     if Ntrain > 0:
         neigh_max = np.max(all_neigh[Ntest:])
@@ -387,7 +397,7 @@ def prepare_and_split_data_ragged(files, species, data_format,
 
         # this is just to distingush test and validation
         test_dir = model_dir+'/tfrs_validate'
-        if evaluate_test:
+        if evaluate_test == 1:
             test_dir = model_dir+'/tfrs_test'
         neigh_max = np.max(all_neigh[:Ntest])
         nmax = np.max(all_natoms[:Ntest])
@@ -511,7 +521,7 @@ def data_preparation(data_dir, species, data_format,
                      atomic_energy_file=None,
                      model_version='v0',
                      model_dir='tmp',
-                     evaluate_test=False):
+                     evaluate_test=0):
     
 #    rc = np.max([rc_rad, rc_ang])
 
@@ -525,7 +535,7 @@ def data_preparation(data_dir, species, data_format,
         #collect configurations
     #all_configs_ase = []
 
-    print(f'we have a total of {len(files)} configurations')
+    #print(f'we have a total of {len(files)} configurations')
     #shuffle dataset before splitting
     # this method shuffle files in-place
 
@@ -572,7 +582,8 @@ def data_preparation(data_dir, species, data_format,
           np.mean(np.abs(energy-np.matmul(mat_A,atomic_energy.T))))
     
     else:
-        print('atomic energy used are :', atomic_energy)
+        #print('atomic energy used are :', atomic_energy)
+        pass
 
     #dump atomic energy to a json file
     E0 = {x:y for x,y in zip(species, atomic_energy)}
@@ -602,14 +613,15 @@ def data_preparation(data_dir, species, data_format,
     ntest = int(test_fraction*Nconf)
     
     filenames = tf.io.gfile.glob(model_dir+"/tfrs_train/train*.tfrecords")
-    if evaluate_test:
+    if evaluate_test == 1:
         filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_test/test*.tfrecords")
     else:
         filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_validate/test*.tfrecords")
 
     recomputing = 0
 
-    if len(filenames) < (Nconf-ntest) / 50 and not evaluate_test:
+    if len(filenames) < (Nconf-ntest) / 50 and evaluate_test not in [-1,1]:
+
         nmax,neigh_max = prepare_and_split_data_ragged(files, species, data_format,
                      energy_key, force_key,
                      rc, pbc, batch_size,
@@ -619,7 +631,7 @@ def data_preparation(data_dir, species, data_format,
         with open(model_dir+'/max_numbers.json', 'w') as out_file:
             json.dump({"nmax":int(nmax), "neigh_max":int(neigh_max)}, out_file)
         recomputing = 1
-    elif evaluate_test and len(filenames_test) < ntest / 50:
+    elif evaluate_test == 1 and len(filenames_test) < ntest / 50:
         nmax,neigh_max = prepare_and_split_data_ragged(files, species, data_format,
                      energy_key, force_key,
                      rc, pbc, batch_size,
@@ -627,15 +639,26 @@ def data_preparation(data_dir, species, data_format,
                      atomic_energy,C6_spec,model_dir,
                      evaluate_test)
         recomputing = 1
+    elif evaluate_test == -1:
+    #    print('computing')
+        nmax,neigh_max = prepare_and_split_data_ragged(files, species, data_format,
+                     energy_key, force_key,
+                     rc, pbc, batch_size,
+                     test_fraction,
+                     atomic_energy,C6_spec,model_dir,
+                     evaluate_test)
+        recomputing = 1
+
     #else:
     #    nn = json.load(open(model_dir+'/max_numbers.json'))
     #    nmax = int(nn['nmax'])
     #    neigh_max = int(nn['neigh_max'])
-    if recomputing == 1: 
+    if recomputing == 1:
+     #   print('reading')
         filenames = tf.io.gfile.glob(model_dir+"/tfrs_train/train*.tfrecords")
-        if evaluate_test:
+        if evaluate_test == 1:
             filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_test/test*.tfrecords")
-        else:
+        if evaluate_test == 0:
             filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_validate/test*.tfrecords")
 
     train_data = get_tfrs(filenames, batch_size)

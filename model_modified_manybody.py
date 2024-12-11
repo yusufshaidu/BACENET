@@ -21,14 +21,14 @@ from unpack_tfr_data import unpack_data
 
 class mBP_model(tf.keras.Model):
    
-    def __init__(self, layer_sizes, rcut, species_identity, 
-                 width, batch_size,
+    def __init__(self, layer_sizes, 
+                rcut, species_identity, 
+                batch_size,
                 activations,
-                rc_ang,RsN_rad, RsN_ang,
-                thetaN,width_ang,zeta,
+                Nrad,
+                thetaN,zeta,
                 fcost=0.0,
                 ecost=1.0,
-                pbc=True,
                 nelement=128,
                 train_writer=None,
                 l1=0.0,l2=0.0,
@@ -39,10 +39,6 @@ class mBP_model(tf.keras.Model):
                 rmin_d=11.0,
                 rmax_d=12.0,
                 body_order=3,
-                min_radial_center=0.5,
-                species_out_act='linear',
-                mean_descriptors=None,
-                std_descriptors=None,
                 features=False,
                 layer_normalize=False,
                 thetas_trainable=True):
@@ -55,29 +51,21 @@ class mBP_model(tf.keras.Model):
         self.layer_sizes = layer_sizes
         self.rcut = rcut
         self.species_identity = species_identity # atomic number
-        self._width = width
         self.batch_size = batch_size
         self._activations = activations
-        self.rcut_ang = rc_ang
-        self.RsN_rad = RsN_rad
-        self.RsN_ang = RsN_ang
+        self.Nrad = Nrad
         self.thetaN = thetaN
         self.zeta = float(zeta)
-        self.width_ang = float(width_ang)
         self.body_order = body_order
-        # self.RsN_rad must be equal to self.RsN_ang
-        base_size = self.RsN_rad * self.thetaN
-        self.feature_size = self.RsN_rad + base_size
+        base_size = self.Nrad * self.thetaN
+        self.feature_size = self.Nrad + base_size
         if self.body_order >= 4:
             for k in range(3,self.body_order):
                 self.feature_size += base_size
         self.nspec_embedding = nspec_embedding
         self.feature_size *= self.nspec_embedding
-        self.mean_descriptors = mean_descriptors
-        self.std_descriptors = std_descriptors
         self.features = features
 
-        self.pbc = pbc
         self.fcost = float(fcost)
         self.ecost = float(ecost)
         self.nspecies = len(self.species_identity)
@@ -89,8 +77,6 @@ class mBP_model(tf.keras.Model):
         self.rmax_u = rmax_u
         self.rmin_d = rmin_d
         self.rmax_d = rmax_d
-        self.min_radial_center = min_radial_center
-        self.species_out_act = species_out_act
         self.layer_normalize = layer_normalize
         self.tf_pi = tf.constant(math.pi, dtype=tf.float32)
         self.thetas_trainable = thetas_trainable
@@ -100,60 +86,14 @@ class mBP_model(tf.keras.Model):
             self.atomic_nets = Networks(self.feature_size, self.layer_sizes, self._activations, l1=self.l1, l2=self.l2, normalize=self.layer_normalize)
 
        # create a species embedding network with 1 hidden layer Nembedding x Nspecies
-       #self.species_nets = Networks(self.nelement, [self.nspec_embedding], ['tanh',self.species_out_act], prefix='species_encoder')
-       #self.species_nets = Networks(self.nelement, [self.nspec_embedding], ['tanh'], prefix='species_encoder')
-       #self.species_nets = Networks(self.nelement, [self.nspec_embedding], [self.species_out_act], prefix='species_encoder')
-        self.species_nets = Networks(self.nelement, [self.nelement,self.nspec_embedding], ['tanh',self.species_out_act], prefix='species_encoder')
+        self.species_nets = Networks(self.nelement, [self.nelement,self.nspec_embedding], ['tanh','linear'], prefix='species_encoder')
 
         constraint = None
-        Nwidth_rad = self.RsN_rad
-        Nwidth_ang = self.RsN_ang
         init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
-        self.rbf_nets = Networks(1, [self.RsN_rad], ['sigmoid'], 
+        self.rbf_nets = Networks(1, [self.Nrad], ['sigmoid'], 
                                  weight_initializer=init,
                                  bias_initializer='zeros',
                                  prefix='rbf')
-        #init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
-        #self.rbf_nets_ang = Networks(1, [self.RsN_ang], ['sigmoid'], 
-        #                             weight_initializer=init,
-        #                             bias_initializer='zeros',
-        #                             prefix='rbf_ang')
-        
-        ''' 
-        init = tf.keras.initializers.RandomNormal(mean=self._width, stddev=0.05)
-        self.width_nets = Networks(1, [Nwidth_rad], ['softplus'],
-                                  weight_initializer=init,
-                                  bias_initializer='zeros',
-                                  kernel_constraint=constraint,
-                                  bias_constraint=constraint, prefix='radial_width')
-        init = tf.keras.initializers.RandomNormal(mean=self.width_ang, stddev=0.05)
-        self.width_nets_ang = Networks(1, [Nwidth_ang], ['softplus'],
-                                  weight_initializer=init,
-                                  bias_initializer='zeros',
-                                  kernel_constraint=constraint,
-                                  bias_constraint=constraint,prefix='ang_width')
-
-        constraint = None
-        init = tf.keras.initializers.GlorotNormal(seed=12345)
-        self.Rs_rad_nets = Networks(1, [self.RsN_rad], ['sigmoid'],
-                                      weight_initializer=init,
-                                      bias_initializer=init,
-                                      kernel_constraint=constraint,
-                                      bias_constraint=constraint, prefix='Rs_rad')
-        init = tf.keras.initializers.GlorotNormal(seed=34567)
-        self.Rs_ang_nets = Networks(1, [self.RsN_ang], ['sigmoid'],
-                                      weight_initializer=init,
-                                      bias_initializer=init,
-                                      kernel_constraint=constraint,
-                                      bias_constraint=constraint, prefix='Rs_ang')
-        
-        init = tf.keras.initializers.RandomNormal(mean=self.zeta, stddev=0.05)
-        self.zeta_nets = Networks(1, [1], ['softplus'],
-                                  weight_initializer=init,
-                                  bias_initializer='zeros',
-                                  kernel_constraint=constraint,
-                                  bias_constraint=constraint, prefix='zeta')
-        '''
         if self.thetas_trainable:
             init = tf.keras.initializers.GlorotNormal(seed=56789)
             self.thetas_net = Networks(1, [self.thetaN], ['sigmoid'],
@@ -243,11 +183,7 @@ class mBP_model(tf.keras.Model):
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
         '''
         rc = tf.constant(self.rcut,dtype=tf.float32)
-        Ngauss = tf.constant(self.RsN_rad, dtype=tf.int32)
-        #rc_ang = tf.constant(self.rcut_ang, dtype=tf.float32)
-        rc_ang = tf.constant(self.rcut, dtype=tf.float32)
-        #Ngauss_ang = tf.constant(self.RsN_ang, dtype=tf.int32)
-        Ngauss_ang = tf.constant(self.RsN_rad, dtype=tf.int32)
+        Nrad = tf.constant(self.Nrad, dtype=tf.int32)
         thetasN = tf.constant(self.thetaN, dtype=tf.int32)
         nat = tf.cast(x[4], dtype=tf.int32)
         nmax_diff = tf.cast(x[3], dtype=tf.int32)
@@ -258,20 +194,10 @@ class mBP_model(tf.keras.Model):
         positions = tf.cast(positions, tf.float32)
         #zeta cannot be a fraction
         zeta = x[5]
-        #width_ang = x[6]
-        #kn_ang = x[6]
-        
         cell = tf.reshape(x[6], [3,3])
-        #replica_idx = x[8]
-        #Rs = x[9]
-        #Rs_ang = x[10]
         theta_s = x[7]
-
         evdw = 0.0
-
-#        if self.include_vdw:
         C6 = tf.cast(x[8][:nat], tf.float32)
-        #chem_symbols = tf.cast(x[11], tf.string)
         num_neigh = tf.cast(x[12], tf.int32)
         first_atom_idx = tf.cast(x[9][:num_neigh], tf.int32)
         second_atom_idx = tf.cast(x[10][:num_neigh], tf.int32)
@@ -280,9 +206,6 @@ class mBP_model(tf.keras.Model):
         sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
 #        sin_theta_s2 = sin_theta_s * sin_theta_s
-        #if self.mean_descriptors is None or self.std_descriptors is None:
-        #    self.mean_descriptors = tf.zeros((nat, self.feature_size), dtype=tf.float32)
-        #    self.std_descriptors = tf.ones((nat, self.feature_size), dtype=tf.float32)
         
         with tf.GradientTape() as g:
             #'''
@@ -302,98 +225,11 @@ class mBP_model(tf.keras.Model):
                     second_atom_idx,
                     shift_vector,
                     species_encoder, C6))
-            '''
-            g.watch(positions)
-            positions = tf.cast(atoms.positions, tf.float32)
-            g.watch(positions)
-            #based on ase
-            first_atom_idx, second_atom_idx, shift_vector = neighbor_list('ijS', atoms, rcut)
-            #nneigh x 3
-            all_rij = tf.gather(positions,second_atom_idx) - tf.gather(positions,first_atom_idx) + shift_vector.dot(atoms.cell)
-            all_rij_norm = tf.linalg.norm(rij, axis=-1) + 1e-8
-            all_rij = tf.RaggedTensor.from_value_rowids(all_rij, first_atom_idx).to_tensor(default_value=1e-8)
-            all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, first_atom_idx).to_tensor(default_value=1e-8)
-
-            #rj-ri
-            #all_rij = positions_extended - positions[:, tf.newaxis, :] #shape=(nat, nneigh, 3)
-            species_encoder_extended = tf.gather(species_encoder, second_atom_idx) #nneigh, nembedding
-            C6_extended = tf.gather(C6, second_atom_idx) #nneigh, nembedding
-
-            species_encoder_extended = tf.RaggedTensor.from_value_rowids(species_encoder_extended,
-                                                                         first_atom_idx).to_tensor() # nat, nmax_neigh, nembedding
-            C6_extended = tf.RaggedTensor.from_value_rowids(C6_extended, first_atom_idx).to_tensor() # nat, nmax_neigh
-
-            species_encoder_ij = tf.einsum('ijk->ik->ijk',species_encoder_extended, species_encoder) #nat, nneigh, nembedding
-
-
-            if self.pbc:
-                if self.include_vdw:
-                    positions_extended, species_encoder_extended, C6_extended = self.generate_periodic_images_vdw(species_encoder, 
-                                                                                                positions, cell, 
-                                                                                                 replica_idx, C6)
-                    C6_extended = tf.reshape(C6_extended, [-1])
-                else:
-                    positions_extended, species_encoder_extended = help_fn.generate_periodic_images(species_encoder, 
-                                                                                                    positions, cell, 
-                                                                                                    replica_idx, C6)
-
-                species_encoder_extended = tf.reshape(species_encoder_extended, [-1, self.nspec_embedding])
-                positions_extended = tf.reshape(positions_extended, [-1, 3])
-
-            else:
-                positions_extended = tf.identity(positions)
-                species_encoder_extended = tf.identity(species_encoder)
-                if self.include_vdw:
-                    C6_extended = tf.identity(C6)
-            #positions_extended has nat x nreplica x 3 for periodic systems and nat x 1 x 3 for molecules
-            
-            #rj-ri
-            all_rij = positions_extended - positions[:, tf.newaxis, :] #shape=(nat, nneigh, 3)
-            species_encoder_ij = species_encoder[:,tf.newaxis,:] * species_encoder_extended #nat, nneigh, nembedding
-
-            #nat, Nneigh: Nneigh = nat * n_replicas
-            #regularize the norm to avoid divition by zero in the derivatives
-            all_rij_norm = tf.linalg.norm(all_rij + 1e-16, axis=-1)
-            '''
-            #all_rij_norm = tf.sqrt(tf.reduce_sum(all_rij * all_rij, axis=-1) + 1e-16)
-
-            '''
             if self.include_vdw:
                 #nat x Nneigh from C6_extended in 1xNeigh and C6 in nat
-                inball_vdw = tf.where(tf.logical_and(all_rij_norm <=self.rmax_d, all_rij_norm>1e-8))
-                all_rij_norm = tf.gather_nd(all_rij_norm, inball_vdw)
-                all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, inball_vdw[:,0]).to_tensor(default_value=1e-8)
                 C6ij = tf.sqrt(C6_extended * C6[:, tf.newaxis])
-                C6ij = tf.gather_nd(C6ij, inball_vdw)
-                C6ij = tf.RaggedTensor.from_value_rowids(C6ij, inball_vdw[:,0]).to_tensor()
-                #the dimensions needs to be checked!!!!!!!!!
-                #C6ij = tf.sqrt((C6[:, tf.newaxis] * C6[tf.newaxis, :]))
                 evdw = self.vdw_contribution((all_rij_norm, C6ij))[0]
     #            tf.debugging.check_numerics(evdw, message='Total_energy_vdw contains NaN')
-            '''
-            '''
-            inball_rad = tf.where(tf.logical_and(all_rij_norm <=rc, all_rij_norm>1e-8))
-            #inball_rad = tf.where(tf.logical_and(all_rij_norm <=rc, all_rij_norm>1e-8), 
-            #                      tf.ones_like(all_rij_norm), 
-            #                      tf.zeros_like(all_rij_norm)+1e-8)
-            all_rij_norm = tf.gather_nd(all_rij_norm, inball_rad)
-            #all_rij_norm = all_rij_norm * inball_rad + 1e-8 # set all terms outsize rc 0
-            #produces as list of tensors with different shapes because atoms have different number of neighbors
-            all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, inball_rad[:,0]).to_tensor(default_value=1e-8)
-            
-            all_rij = tf.gather_nd(all_rij, inball_rad)
-            #all_rij = tf.einsum('ijk,ij->ijk',all_rij, inball_rad)
-            #produces as list of tensors with different shapes because atoms have different number of neighbors
-            all_rij = tf.RaggedTensor.from_value_rowids(all_rij, inball_rad[:,0]).to_tensor(default_value=1e-8)
-            
-
-            species_encoder_ij = tf.gather_nd(species_encoder_ij, inball_rad)
-            #species_encoder_ij = tf.einsum('ijk,ij->ijk',species_encoder_ij, inball_rad) # set all terms outsize rc 0
-            species_encoder_ij = tf.RaggedTensor.from_value_rowids(species_encoder_ij, inball_rad[:,0]).to_tensor()
-            '''
-            #nat x Ngauss x Nneigh
-            #gauss_args = tf.einsum('k,ijk->ijk',width, (all_rij_norm[:,:,tf.newaxis] - Rs[tf.newaxis,tf.newaxis,:])**2)
-
 
             #this is no needed because have no contribution from atoms outside cutoff because of fc
             #mask the non-zero values after ragged tensor is converted to fixed shape
@@ -409,40 +245,19 @@ class mBP_model(tf.keras.Model):
             #fcuts is nat x Nneigh and reshaped to nat x Nneigh
             #gauss_term = tf.reshape(help_fn.tf_app_gaussian(tf.reshape(gauss_args, [-1])), tf.shape(gauss_args))
             #fcut = tf.reshape(help_fn.tf_fcut(tf.reshape(all_rij_norm, [-1]), rc), tf.shape(all_rij_norm))
-            arg = self.tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Ngauss+1, dtype=tf.float32) * kn_rad, all_rij_norm)
-            #arg = tf.reshape(arg, [-1])
-            #r = tf.einsum('l,ij->ijl',tf.ones(Ngauss), all_rij_norm)
+            arg = self.tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Nrad+1, dtype=tf.float32) * kn_rad, all_rij_norm)
+            #r = tf.einsum('l,ij->ijl',tf.ones(Nrad), all_rij_norm)
             #r = all_rij_norm[:,:,None]
-            #r = tf.reshape(r, [-1])
             _Nneigh = tf.shape(all_rij_norm)
             Nneigh = _Nneigh[1]
 
-            bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm[:,:,None],arg,rc), [nat, Nneigh, Ngauss])
-            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Ngauss x nembedding
-            #radial_ij = tf.reshape(radial_ij, [nat,Nneigh,Ngauss*self.nspec_embedding])
-
+            bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm[:,:,None],arg,rc), [nat, Nneigh, Nrad])
+            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembedding
             atomic_descriptors = tf.reduce_sum(radial_ij, axis=1) # sum over neigh
-            atomic_descriptors = tf.reshape(atomic_descriptors, [nat, Ngauss*self.nspec_embedding])
+            atomic_descriptors = tf.reshape(atomic_descriptors, [nat, Nrad*self.nspec_embedding])
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik
-                   
-            #inball_ang = tf.where(all_rij_norm <=rc_ang)
-            #all_rij_norm = tf.gather_nd(all_rij_norm, inball_ang)
-            #produces a list of tensors with different shapes because atoms have different number of neighbors
-            #all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm, inball_ang[:,0]).to_tensor(default_value=1e-8)
-            
-            #all_rij = tf.gather_nd(all_rij, inball_ang)
-            #produces as list of tensors with different shapes because atoms have different number of neighbors
-            #all_rij = tf.RaggedTensor.from_value_rowids(all_rij, inball_ang[:,0]).to_tensor(default_value=1e-8)
-            
-            #species_encoder_ij = tf.gather_nd(species_encoder_ij, inball_ang)
-            #species_encoder_ij = tf.RaggedTensor.from_value_rowids(species_encoder_ij, inball_ang[:,0]).to_tensor()
-            #species_encoder_ij = tf.reshape(species_encoder_ij, [-1,self.nspec_embedding])
-
             reg = 1e-20
-            #all_rij_norm_inv = 1.0 / (all_rij_norm + reg)
-                        
-            #rij_unit = tf.einsum('ijk,ij->ijk',all_rij, all_rij_norm_inv)
             rij_unit = all_rij / (all_rij_norm[:,:,None] + reg)
 
             #nat x Nneigh X Nneigh
@@ -485,46 +300,15 @@ class mBP_model(tf.keras.Model):
             #note that the factor of 2 in BP functions cancels the 1/2 due to double counting
             cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta #nat x Nneigh X Nneigh x thetasN
 
-            #cos_theta_ijk_theta_s_zeta = tf.reshape((cos_theta_ijk_theta_s / norm_ang)**zeta, 
-            #                                        (nat,Nneigh,Nneigh*thetasN))
-
-
-            #tf.debugging.check_numerics(cos_theta_ijk_theta_s_zeta, message='cos_theta_ijk_theta_s_zeta contains NaN')
-
-            #rik_norm_rs = width_ang[tf.newaxis,tf.newaxis,:] * (all_rij_norm[:,:,tf.newaxis]  - Rs_ang[tf.newaxis,tf.newaxis,:])**2
-            #rik_norm_rs = tf.einsum('ijk,k->ijk',(all_rij_norm[:,:,tf.newaxis]  - Rs_ang[tf.newaxis,tf.newaxis,:])**2, width_ang)
-
-            #compute the exponetial term: Nat, Nneigh, RNs_ang
-            #gauss_term = tf.reshape(help_fn.tf_app_gaussian(tf.reshape(rik_norm_rs, [-1])), tf.shape(rik_norm_rs))
-            #fcut = tf.reshape(help_fn.tf_fcut(tf.reshape(all_rij_norm, [-1]), rc_ang), tf.shape(all_rij_norm))
-            #'''
-            #arg = tf_pi / rc_ang * tf.einsum('l,ij->ijl',tf.range(1, Ngauss_ang+1, dtype=tf.float32) * kn_ang, all_rij_norm)
-            #arg = tf.reshape(arg, [-1])
-            #r = tf.einsum('l,ij->ijl',tf.ones(Ngauss_ang), all_rij_norm)
-            #r = tf.reshape(r, [-1])
-            #bf_radial_ang = tf.reshape(help_fn.bessel_function(r,arg,rc_ang), [nat,-1, Ngauss_ang])
-            #'''
-            #radial_ij = tf.einsum('ijk,ij->ijk',gauss_term, fcut)
-              
-            #radial_ij = tf.einsum('ijk,ijl->ijkl',radial_ij,species_encoder_ij)
-            #########################################
             # I am now using the same radial functions for angular and radial functions
             ##############################################
             #radial_ij = tf.einsum('ijk,ijl->ijkl', bf_radial, species_encoder_ij)
 
-            # dimension = [Nat, Nneigh, Nneigh, Ngauss, thetaN]
+            # dimension = [Nat, Nneigh, Nneigh, Nrad, thetaN]
             #exp_ang_theta_ijk = cos_theta_ijk_theta_s_zeta[:,:,:,tf.newaxis,:] * radial_ij[:,:,tf.newaxis,:,tf.newaxis]
-            Base_vector_ij_s = tf.einsum('ijkl,ijmn->ikmln',cos_theta_ijk_theta_s_zeta, radial_ij) # Nat, Nneigh, Ngauss,thetaN, nembedding
-            ang_size = Ngauss * thetasN * self.nspec_embedding
-            #Base_vector_ij_s = tf.reshape(exp_ang_theta_ijk, [nat,Nneigh,thetasN,-1])
-            
-            #Base_vector_ij_s = tf.reduce_sum(exp_ang_theta_ijk, axis=2)
-            #dimension = [Nat, Nneigh, Ngauss_ang, thetaN]
-            #Base_vector_ij_s = tf.reshape(exp_ang_theta_ijk, [nat*Nneigh, Ngauss_ang*self.nspec_embedding, -1])
-            
-            #radial_ij = tf.reshape(tf.tile(radial_ij[:,:,:,tf.newaxis],[1,1,1,thetasN]), [nat,Nneigh,-1])
-            #body_descriptor_3 = tf.reduce_sum(Base_vector_ij_s * radial_ij, axis=1) #sum over neigh and Rs_ang
-            body_descriptor_3 = tf.einsum('ijklm,ijkm->iklm',Base_vector_ij_s, radial_ij) #shape=(nat,Ngauss,thetaN,self.nspec_embedding)
+            Base_vector_ij_s = tf.einsum('ijkl,ijmn->ikmln',cos_theta_ijk_theta_s_zeta, radial_ij) # Nat, Nneigh, Nrad,thetaN, nembedding
+            ang_size = Nrad * thetasN * self.nspec_embedding
+            body_descriptor_3 = tf.einsum('ijklm,ijkm->iklm',Base_vector_ij_s, radial_ij) #shape=(nat,Nrad,thetaN,self.nspec_embedding)
             body_descriptor_3 = tf.reshape(body_descriptor_3, [nat,ang_size])
             atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_3], axis=1)
 
@@ -541,7 +325,7 @@ class mBP_model(tf.keras.Model):
             
 
 
-            #feature_size = Ngauss,nembedding + Ngauss, thetasN, nembedding
+            #feature_size = Nrad,nembedding + Nrad, thetasN, nembedding
             #the descriptors can be scaled
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
             
@@ -580,44 +364,17 @@ class mBP_model(tf.keras.Model):
 
         inputs_width = tf.ones(1)
         self.kn_rad = tf.reshape(self.rbf_nets(inputs_width[tf.newaxis, :]), [-1])
-        #self.kn_ang = tf.reshape(self.rbf_nets_ang(inputs_width[tf.newaxis, :]), [-1])
-        #self.width_value = tf.reshape(self.width_nets(inputs_width[tf.newaxis, :]), [-1])
-
-        #inputs_width_ang = tf.ones(1)
-        #self.width_value_ang = tf.reshape(self.width_nets_ang(inputs_width_ang[tf.newaxis, :]), [-1])
-        #inputs_zeta = tf.ones(1)
-        #self.zeta_value = tf.reshape(self.zeta_nets(inputs_zeta[tf.newaxis, :]), [-1])
         self.zeta_value = self.zeta * tf.ones(1)
         #inputs for center networks
         tf_pi = tf.constant(math.pi, dtype=tf.float32)
-        #Rs = tf.ones(1)
-        #Rs_ang = tf.ones(1)
         theta_s = tf.ones(1)
-        #self._Rs_rad = tf.reshape(self.Rs_rad_nets(Rs[tf.newaxis,:]), [-1]) * self.rcut
-        #delta = (self.rcut - self.min_radial_center) / tf.cast(self.RsN_rad, tf.float32)
-        #self._Rs_rad = help_fn.rescale_params(Rs_rad_pred, self.min_radial_center, self.rcut-delta)
-
-
-        #self._Rs_ang = tf.reshape(self.Rs_ang_nets(Rs_ang[tf.newaxis,:]), [-1])*self.rcut_ang
-        #delta = (self.rcut_ang - self.min_radial_center) / tf.cast(self.RsN_ang, tf.float32)
-        #self._Rs_ang = help_fn.rescale_params(Rs_ang_pred, self.min_radial_center, self.rcut_ang-delta)
         if self.thetas_trainable:
             self._thetas = tf.reshape(self.thetas_net(theta_s[tf.newaxis,:]), [-1]) * self.tf_pi
         else:
             self._thetas = self.thetas_net # evenly spaced centers
 
-        #self._thetas = help_fn.rescale_params(ts_pred, 0.0, tf_pi)
-
-
         batch_kn_rad = tf.tile([self.kn_rad], [batch_size,1])
-        #batch_kn_ang = tf.tile([self.kn_ang], [batch_size,1])
-
-        #batch_width = tf.tile([self.width_value], [batch_size,1])
-        #batch_width = tf.tile([self.width_value], [batch_size,1])
-        #batch_width_ang = tf.tile([self.width_value_ang], [batch_size,1])
         batch_zeta = tf.tile([self.zeta_value], [batch_size,1])
-        #batch_Rs_rad = tf.tile([self._Rs_rad], [batch_size,1])
-        #batch_Rs_ang = tf.tile([self._Rs_ang], [batch_size,1])
         batch_theta_s = tf.tile([self._thetas], [batch_size,1])
 
         # todo: we need to pass nmax if we use padded tensors
@@ -627,7 +384,6 @@ class mBP_model(tf.keras.Model):
         nmax_diff = tf.reshape(batch_nmax - batch_nats, [-1])
 
         #positions and species_encoder are ragged tensors are converted to tensors before using them
-        #positions = tf.reshape(inputs[0].to_tensor(shape=(-1,nmax,3)), (-1, 3*nmax))
         positions = tf.reshape(inputs[0][:,:nmax*3], (-1, nmax*3))
         #positions = tf.reshape(inputs[0], (-1, 3*nmax))
         positions = tf.cast(positions, dtype=tf.float32)
@@ -665,14 +421,6 @@ class mBP_model(tf.keras.Model):
                 batch_theta_s, C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
 
-        #elements = (batch_species_encoder, batch_width,
-        #        positions, nmax_diff, batch_nats,
-        #        batch_zeta, batch_width_ang, cells, replica_idx,
-        #        batch_Rs_rad, batch_Rs_ang, batch_theta_s, C6)
-
-
-        #energies, forces = tf.map_fn(self.tf_predict_energy_forces, elements,
-        #energies, forces = self.compute_energy_forces(elements)    
         if self.features:
             features = tf.map_fn(self.tf_predict_energy_forces, elements, 
                                      fn_output_signature=tf.float32,
