@@ -229,12 +229,35 @@ class mBP_model(tf.keras.Model):
             g.watch(positions)
             #based on ase 
             #nneigh x 3
-            #all_rij = tf.gather(positions,second_atom_idx) - \
-            #         tf.gather(positions,first_atom_idx) + \
-            #        tf.tensordot(shift_vector,cell,axes=1)
+            all_rij = tf.gather(positions,second_atom_idx) - \
+                     tf.gather(positions,first_atom_idx) + \
+                    tf.tensordot(shift_vector,cell,axes=1)
+            all_rij = tf.RaggedTensor.from_value_rowids(all_rij,
+                                                        first_atom_idx
+                                                        ).to_tensor(
+                                                                default_value=1e-8
+                                                                ) #nat,nneigh,3
+            
+            all_rij_norm = tf.linalg.norm(all_rij, axis=-1) #nat, nneigh
+            # species_encoder_j * species_encoder_i
+            species_encoder_extended = tf.gather(species_encoder,first_atom_idx) * \
+                    tf.gather(species_encoder,second_atom_idx)
+            species_encoder_ij = \
+                    tf.RaggedTensor.from_value_rowids(species_encoder_extended,
+                                                      first_atom_idx).to_tensor()
+             
+            #C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx)
+            #C6_ij = \
+            #        tf.RaggedTensor.from_value_rowids(C6_ij,
+            #                                          first_atom_idx).to_tensor()
+
+            #all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm,
+            #                                                 first_atom_idx).to_tensor(default_value=1e-8)
+
             #create an n_neigh x nats and fill all valid j index with 1.
             #when multiplied by the positions, correctly pick up the atoms positions of the atom
 
+            '''
             all_rij, all_rij_norm, \
                     species_encoder_ij, C6_extended = \
                     self.compute_rij((positions,cell,
@@ -244,10 +267,11 @@ class mBP_model(tf.keras.Model):
                     species_encoder, C6))
             if self.include_vdw:
                 #nat x Nneigh from C6_extended in 1xNeigh and C6 in nat
-                C6ij = tf.sqrt(C6_extended * C6[:, tf.newaxis])
-                evdw = self.vdw_contribution((all_rij_norm, C6ij))[0]
+                C6_ij = tf.sqrt(C6_ij)
+                evdw = self.vdw_contribution((all_rij_norm, C6_ij))[0]
     #            tf.debugging.check_numerics(evdw, message='Total_energy_vdw contains NaN')
 
+            '''
             #this is no needed because have no contribution from atoms outside cutoff because of fc
             #mask the non-zero values after ragged tensor is converted to fixed shape
             # This is very important to avoid adding contributions from atoms outside the sphere
@@ -360,7 +384,8 @@ class mBP_model(tf.keras.Model):
             #if self.include_vdw:
             #    total_energy += evdw
 
-        forces = g.jacobian(total_energy, positions)
+        #forces = g.jacobian(total_energy, positions)
+        forces = g.gradient(total_energy, positions)
         
         padding = tf.zeros((nmax_diff,3))
         forces = tf.concat([forces, padding], 0)
