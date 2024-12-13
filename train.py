@@ -78,6 +78,7 @@ def default_config():
     configs['layer_normalize'] = False
     configs['thetas_trainable'] = True
     configs['species_layer_sizes'] = []
+    configs['species_correlation'] = 'tensor'
     return configs
 
 def create_model(configs):
@@ -128,11 +129,11 @@ def create_model(configs):
     decay_rate = configs['decay_rate']
     #activations are basically tanh and linear for now
     activations = configs['activations']
-    #print(activations,species_layer_sizes)
+    print(activations,species_layer_sizes)
     
     assert len(activations) == len(layer_sizes),'the number of activations must be same as the number of layer'
     if activations[-1] != 'linear':
-        print(f'You have set the last layer to {activations[-1]} but must be st to linear')
+        print(f'You have set the last layer to {activations[-1]} but must be set to linear')
         print(f'we set it to linear')
         activations[-1] = 'linear'
     
@@ -240,7 +241,7 @@ def create_model(configs):
         optimizer = tf.keras.optimizers.Adam(
                                              learning_rate=lr_schedule,
                                              use_ema=False,
-                                             weight_decay=None, 
+                                             weight_decay=0.0001, 
                                              clipnorm=None,
                                              clipvalue=configs['clip_value'],
                                              amsgrad=False,
@@ -343,7 +344,8 @@ def create_model(configs):
                       body_order=body_order,
                       layer_normalize=configs['layer_normalize'],
                       thetas_trainable=thetas_trainable,
-                      species_layer_sizes=species_layer_sizes)
+                      species_layer_sizes=species_layer_sizes,
+                      species_correlation=configs['species_correlation'])
 
     model.compile(optimizer=optimizer, 
                   loss="mse", 

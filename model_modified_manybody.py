@@ -45,7 +45,8 @@ class mBP_model(tf.keras.Model):
                 features=False,
                 layer_normalize=False,
                 thetas_trainable=True,
-                species_layer_sizes=[] #the last layer is eforced to be equal nspec_embedding
+                species_layer_sizes=[], #the last layer is eforced to be equal nspec_embedding
+                species_correlation='tensor'
                  ):
         
         #allows to use all the base class of tf.keras Model
@@ -62,13 +63,19 @@ class mBP_model(tf.keras.Model):
         self.thetaN = thetaN
         self.zeta = float(zeta)
         self.body_order = body_order
+        self.species_correlation = species_correlation
         base_size = self.Nrad * self.thetaN
         self.feature_size = self.Nrad + base_size
+        self.nspec_embedding = nspec_embedding
+        if self.species_correlation == 'tensor':
+            self.spec_size = self.nspec_embedding*self.nspec_embedding
+        else:
+            self.spec_size = self.nspec_embedding
+
         if self.body_order >= 4:
             for k in range(3,self.body_order):
                 self.feature_size += base_size
-        self.nspec_embedding = nspec_embedding
-        self.feature_size *= self.nspec_embedding
+        self.feature_size *= self.spec_size
         self.features = features
 
         self.fcost = float(fcost)
@@ -157,7 +164,7 @@ class mBP_model(tf.keras.Model):
         all_rij_norm = tf.RaggedTensor.from_value_rowids(all_rij_norm,
                                                          first_atom_idx).to_tensor(default_value=1e-8)
 
-        species_encoder_extended = tf.matmul(_one_hot_j, species_encoder)
+        species_encoder_extended = tf.matmul(_one_hot_j, species_encoder) * tf.matmul(_one_hot_j, species_encoder)
         #C6_extended = tf.matmul(_one_hot_j, C6[:,None]) #nneigh, nembedding
 
         species_encoder_extended = \
@@ -178,9 +185,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                #tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-       #         tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
@@ -202,23 +207,32 @@ class mBP_model(tf.keras.Model):
         rc = tf.constant(self.rcut,dtype=tf.float32)
         Nrad = tf.constant(self.Nrad, dtype=tf.int32)
         thetasN = tf.constant(self.thetaN, dtype=tf.int32)
-        nat = tf.cast(x[4], dtype=tf.int32)
-        nmax_diff = tf.cast(x[3], dtype=tf.int32)
-        species_encoder = tf.reshape(x[0][:nat*self.nspec_embedding], [nat,self.nspec_embedding])
+        nat = x[4]
+        nmax_diff = x[3]
+        
+        #predict species encoder for this configurations
+        #species_encoder = tf.cast(x[0][:nat], tf.int32) - 1
+        #species_one_hot_encoder = tf.one_hot(species_encoder, depth=self.nelement)
+        #species_encoder = self.species_nets(species_one_hot_encoder) # nspecies x nembedding
+        #species_encoder = tf.reshape(species_encoder, [nat,self.nspec_embedding])
+        species_encoder = tf.reshape(x[0][:nat*self.nspec_embedding], 
+                                     [nat,self.nspec_embedding])
+
         #width = tf.cast(x[1], dtype=tf.float32)
         kn_rad = x[1]
         positions = tf.reshape(x[2][:nat*3], [nat,3])
-        positions = tf.cast(positions, tf.float32)
+        positions = positions
         #zeta cannot be a fraction
         zeta = x[5]
         cell = tf.reshape(x[6], [3,3])
         theta_s = x[7]
         evdw = 0.0
-        C6 = tf.cast(x[8][:nat], tf.float32)
-        num_neigh = tf.cast(x[12], tf.int32)
-        first_atom_idx = tf.cast(x[9][:num_neigh], tf.int32)
-        second_atom_idx = tf.cast(x[10][:num_neigh], tf.int32)
-        shift_vector = tf.cast(tf.reshape(x[11][:num_neigh*3], [num_neigh,3]), tf.float32)
+        C6 = x[8][:nat]
+        num_neigh = x[12]
+        first_atom_idx = x[9][:num_neigh]
+        second_atom_idx = x[10][:num_neigh]
+        shift_vector = tf.cast(tf.reshape(x[11][:num_neigh*3], 
+                                          [num_neigh,3]), tf.float32)
 
         sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
@@ -240,8 +254,21 @@ class mBP_model(tf.keras.Model):
             
             all_rij_norm = tf.linalg.norm(all_rij, axis=-1) #nat, nneigh
             # species_encoder_j * species_encoder_i
-            species_encoder_extended = tf.gather(species_encoder,first_atom_idx) * \
-                    tf.gather(species_encoder,second_atom_idx)
+            if self.species_correlation=='tensor':
+                species_encoder_extended = tf.einsum('ik,il->ikl',
+                                                 tf.gather(species_encoder,first_atom_idx),
+                                                 tf.gather(species_encoder,second_atom_idx)
+                                                 )
+            else:
+                species_encoder_extended = tf.einsum('ik,ik->ik',
+                                                 tf.gather(species_encoder,first_atom_idx),
+                                                 tf.gather(species_encoder,second_atom_idx)
+                                                 )
+
+
+            species_encoder_extended = tf.reshape(species_encoder_extended, 
+                                                  [-1, self.spec_size]
+                                                   )
             species_encoder_ij = \
                     tf.RaggedTensor.from_value_rowids(species_encoder_extended,
                                                       first_atom_idx).to_tensor()
@@ -286,20 +313,26 @@ class mBP_model(tf.keras.Model):
             #fcuts is nat x Nneigh and reshaped to nat x Nneigh
             #gauss_term = tf.reshape(help_fn.tf_app_gaussian(tf.reshape(gauss_args, [-1])), tf.shape(gauss_args))
             #fcut = tf.reshape(help_fn.tf_fcut(tf.reshape(all_rij_norm, [-1]), rc), tf.shape(all_rij_norm))
-            arg = self.tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Nrad+1, dtype=tf.float32) * kn_rad, all_rij_norm)
+            #arg = self.tf_pi / rc * tf.einsum('l,ij->ijl',tf.range(1, Nrad+1, dtype=tf.float32) * kn_rad, all_rij_norm)
+            #nkn_rad = tf.range(1, Nrad+1, dtype=tf.float32) * kn_rad
+            #arg = self.tf_pi / rc * nkn_rad[None,None,:] * all_rij_norm[:,:,None]
             #r = tf.einsum('l,ij->ijl',tf.ones(Nrad), all_rij_norm)
             #r = all_rij_norm[:,:,None]
             _Nneigh = tf.shape(all_rij_norm)
             Nneigh = _Nneigh[1]
 
-            bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm[:,:,None],arg,rc), [nat, Nneigh, Nrad])
-            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembedding
+            bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm,
+                                                           rc,kn_rad,
+                                                           Nrad), [nat, Nneigh, Nrad])
+            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembedding**2
             atomic_descriptors = tf.reduce_sum(radial_ij, axis=1) # sum over neigh
-            atomic_descriptors = tf.reshape(atomic_descriptors, [nat, Nrad*self.nspec_embedding])
+            atomic_descriptors = tf.reshape(atomic_descriptors, 
+                                            [nat, Nrad*self.spec_size]
+                                            )
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik
             reg = 1e-20
-            rij_unit = all_rij / (all_rij_norm[:,:,None] + reg)
+            rij_unit = tf.einsum('ijk,ij->ijk',all_rij, 1.0 / (all_rij_norm + reg))
 
             #nat x Nneigh X Nneigh
             #rij.rik
@@ -329,17 +362,20 @@ class mBP_model(tf.keras.Model):
 
             cos_theta_ijk = tf.clip_by_value(cos_theta_ijk, clip_value_min=-1.0+reg2, clip_value_max=1.0-reg2)
             cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
+
+            
             #nat x thetasN x N_unique
             sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
-            _cos_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',cos_theta_ijk, cos_theta_s) #nat x Nneigh X Nneigh x thetasN
-            _sin_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',sin_theta_ijk, sin_theta_s) #nat x Nneigh X Nneigh x thetasN
+            _cos_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',cos_theta_ijk,cos_theta_s) #nat x Nneigh X Nneigh x thetasN
+            _sin_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',sin_theta_ijk,sin_theta_s) #nat x Nneigh X Nneigh x thetasN
             cos_theta_ijk_theta_s = 1.0 + _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s #nat x Nneigh X Nneigh x thetasN
             #tf.debugging.check_numerics(cos_theta_ijk_theta_s, message='cos_theta_ijk_theta_s contains NaN')
             
             norm_ang = 2.0 
+
             #Nat,Nneigh, Nneigh,ThetasN
             #note that the factor of 2 in BP functions cancels the 1/2 due to double counting
-            cos_theta_ijk_theta_s_zeta = (cos_theta_ijk_theta_s / norm_ang)**zeta #nat x Nneigh X Nneigh x thetasN
+            cos_theta_ijk_theta_s_zeta = tf.pow(cos_theta_ijk_theta_s / norm_ang, zeta) #nat x Nneigh X Nneigh x thetasN
 
             # I am now using the same radial functions for angular and radial functions
             ##############################################
@@ -347,8 +383,9 @@ class mBP_model(tf.keras.Model):
 
             # dimension = [Nat, Nneigh, Nneigh, Nrad, thetaN]
             #exp_ang_theta_ijk = cos_theta_ijk_theta_s_zeta[:,:,:,tf.newaxis,:] * radial_ij[:,:,tf.newaxis,:,tf.newaxis]
-            Base_vector_ij_s = tf.einsum('ijkl,ijmn->ikmln',cos_theta_ijk_theta_s_zeta, radial_ij) # Nat, Nneigh, Nrad,thetaN, nembedding
-            ang_size = Nrad * thetasN * self.nspec_embedding
+            Base_vector_ij_s = tf.einsum('ijkl,ijmn->ikmln',cos_theta_ijk_theta_s_zeta, radial_ij) # Nat, Nneigh, Nrad,thetaN, nembedding**2
+            ang_size = Nrad * thetasN * self.spec_size
+
             body_descriptor_3 = tf.einsum('ijklm,ijkm->iklm',Base_vector_ij_s, radial_ij) #shape=(nat,Nrad,thetaN,self.nspec_embedding)
             body_descriptor_3 = tf.reshape(body_descriptor_3, [nat,ang_size])
             atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_3], axis=1)
@@ -384,14 +421,15 @@ class mBP_model(tf.keras.Model):
             #if self.include_vdw:
             #    total_energy += evdw
 
-        #forces = g.jacobian(total_energy, positions)
-        forces = g.gradient(total_energy, positions)
-        
-        padding = tf.zeros((nmax_diff,3))
-        forces = tf.concat([forces, padding], 0)
+            forces = g.jacobian(total_energy, positions)
+            #forces = g.gradient(total_energy, positions)
+        forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
+        #padding = tf.zeros((nmax_diff,3))
+        #forces = tf.concat([forces, padding], 0)
         #forces = tf.zeros((nmax_diff+nat,3))   
         
-        return [tf.cast(total_energy, tf.float32), -tf.cast(forces, tf.float32), tf.cast(atomic_features, tf.float32)]
+        #return [tf.cast(total_energy, tf.float32), tf.cast(forces, tf.float32), tf.cast(atomic_features, tf.float32)]
+        return [total_energy, forces, atomic_features]
 
 
     def call(self, inputs, training=False):
@@ -428,26 +466,37 @@ class mBP_model(tf.keras.Model):
         #positions and species_encoder are ragged tensors are converted to tensors before using them
         positions = tf.reshape(inputs[0][:,:nmax*3], (-1, nmax*3))
         #positions = tf.reshape(inputs[0], (-1, 3*nmax))
-        positions = tf.cast(positions, dtype=tf.float32)
+        #positions = tf.cast(positions, dtype=tf.float32)
         #obtain species encoder
 
-        spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1
+        spec_identity = tf.constant(self.species_identity, dtype=tf.int32) - 1 # atomic number-1
         species_one_hot_encoder = tf.one_hot(spec_identity, depth=self.nelement)
-        self.trainable_species_encoder = self.species_nets(species_one_hot_encoder)
+        self.trainable_species_encoder = self.species_nets(species_one_hot_encoder) # nspecies x nembedding
         #species_encoder = inputs[1].to_tensor(shape=(-1, nmax)) #contains atomic number per atoms for all element in a batch
         species_encoder = tf.reshape(inputs[1][:,:nmax], (-1,nmax)) #contains atomic number per atoms for all element in a batch
         
+        #batch_species_encoder = tf.reshape(inputs[1][:,:nmax], (-1,nmax)) #contains atomic number per atoms for all element in a batch
+        #species_one_hot_encoder = tf.one_hot(species_encoder-1, depth=self.nelement)
+        #batch_species_encoder = self.species_nets(species_one_hot_encoder)
+
         #species_encoder = inputs[1] #contains atomic number per atoms for all element in a batch
         batch_species_encoder = tf.zeros([batch_size, nmax, self.nspec_embedding], dtype=tf.float32)
         # This may be implemented better but not sure how yet
         for idx, spec in enumerate(self.species_identity):
-            values = tf.ones([batch_size, nmax, self.nspec_embedding], dtype=tf.float32) * self.trainable_species_encoder[idx]
-            batch_species_encoder += tf.where(tf.equal(tf.tile(species_encoder[:,:,tf.newaxis], [1,1,self.nspec_embedding]),
-                                                       tf.cast(spec,tf.float32)),
-                    values, tf.zeros([batch_size, nmax, self.nspec_embedding]))
+            values = tf.ones([batch_size, nmax, self.nspec_embedding],
+                             dtype=tf.float32) * self.trainable_species_encoder[idx]
+            batch_species_encoder += tf.where(
+                    tf.equal(tf.tile(species_encoder[:,:,tf.newaxis], 
+                                     [1,1,self.nspec_embedding]
+                                     ),
+                                    tf.cast(spec,tf.float32)
+                             ),
+                    values, tf.zeros([batch_size, nmax, self.nspec_embedding],
+                                     dtype=tf.float32)
+                    )
         batch_species_encoder = tf.reshape(batch_species_encoder, [-1,self.nspec_embedding*nmax])
-        C6 = tf.cast(inputs[2], dtype=tf.float32)
-        cells = tf.reshape(inputs[3], [batch_size, -1])
+        C6 = inputs[2]
+        cells = tf.reshape(inputs[3], [-1, 9])
         #cells = inputs[3]
 
         #first_atom_idx = tf.cast(inputs[6].to_tensor(shape=(self.batch_size, -1)), tf.int32)
@@ -482,13 +531,14 @@ class mBP_model(tf.keras.Model):
         #inputs = inputs_target[:9]
 
         #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
-        target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
+        #target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
+        target = tf.reshape(inputs_target[9], [-1])
         batch_nats = tf.cast(tf.reshape(inputs_target[4], [-1]), tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
         
         target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
         #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
-        target_f = tf.cast(target_f, tf.float32)
+        #target_f = tf.cast(target_f, tf.float32)
 
         with tf.GradientTape() as tape:
             e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
@@ -500,7 +550,9 @@ class mBP_model(tf.keras.Model):
             #emse_loss = tf.reduce_mean((ediff/batch_nats)**2)
             emse_loss = tf.reduce_mean((ediff)**2)
 
-            fmse_loss = tf.map_fn(help_fn.force_loss, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+            fmse_loss = tf.map_fn(help_fn.force_loss, 
+                                  (batch_nats,target_f,forces), 
+                                  fn_output_signature=tf.float32)
             fmse_loss = tf.reduce_mean(fmse_loss)
 
             loss = self.ecost * emse_loss
@@ -517,7 +569,9 @@ class mBP_model(tf.keras.Model):
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
 
-        mae_f = tf.map_fn(help_fn.force_mae, (batch_nats,target_f,forces), fn_output_signature=tf.float32)
+        mae_f = tf.map_fn(help_fn.force_mae, 
+                          (batch_nats,target_f,forces), 
+                          fn_output_signature=tf.float32)
         mae_f = tf.reduce_mean(mae_f)
 
         rmse_f = tf.sqrt(fmse_loss)

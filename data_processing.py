@@ -339,17 +339,17 @@ def prepare_and_split_data_ragged(files, species, data_format,
             #print(atoms)
 
 
-            
         all_positions.append(atoms.positions)
         all_species_encoder.append(atoms.get_array('encoder'))
         all_C6.append(atoms.get_array('C6'))
         all_natoms.append(atoms.get_global_number_of_atoms())
         cells.append(atoms.cell)
         #replica_idx.append(replicas_max_idx(atoms.cell, rc, pbc=pbc))
-        replica_idx.append([0,0,0])
+        #replica_idx.append([0,0,0])
  #       all_species_symbols.append(atoms.get_chemical_symbols())
         
         first_atom_idx,second_atom_idx,shift_vector = neighbor_list('ijS', atoms, rc)
+        #print(np.linalg.norm(shift_vector), first_atom_idx.shape)   
         
 
         all_first_atom.append(first_atom_idx)

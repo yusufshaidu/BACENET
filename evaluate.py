@@ -124,7 +124,8 @@ def create_model(configs):
                       body_order=body_order,
                       layer_normalize=configs['layer_normalize'],
                       thetas_trainable=thetas_trainable,
-                      species_layer_sizes=species_layer_sizes)
+                      species_layer_sizes=species_layer_sizes,
+                      species_correlation=configs['species_correlation'])
     
     #load the last check points
     

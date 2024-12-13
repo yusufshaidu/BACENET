@@ -200,7 +200,7 @@ def _tf_fcut(r,rc):
     x = tf.tanh(1 - r / rc)
     return tf.where(r<=rc, x*x*x, tf.zeros(dim, dtype=tf.float32))
 
-@tf.function(input_signature=[tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                              tf.TensorSpec(shape=(), dtype=tf.float32)])
 def tf_fcut_rbf(r,rc):
     p = tf.constant(6, dtype=tf.float32)
@@ -209,7 +209,11 @@ def tf_fcut_rbf(r,rc):
     xp = x2 * x2 * x2
     xp1 = x2 * x2 * x2 * x
     xp2 = x2 * x2 * x2 * x2
-    fc = tf.where(x <= 1.0, 1.0 - (p+1.)*(p+2.) / 2. * xp + p*(p+2.)*xp1 - p*(p+1)/2*xp2, tf.zeros(tf.shape(x)))
+    
+    fc = tf.where(x <= 1.0, 1.0 - 
+                  (p+1.)*(p+2.) / 2. * xp + 
+                  p*(p+2.)*xp1 - 
+                  p*(p+1)/2*xp2, tf.zeros_like(x))
     return fc
 
 @tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32)])
@@ -226,14 +230,22 @@ def tf_app_gaussian(x):
     args16 = args8 * args8
     args32 = args16 * args16
     return args32 * args32
-@tf.function(input_signature=[tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-                             tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-                              tf.TensorSpec(shape=(), dtype=tf.float32)])
-def bessel_function(r,rn,rc):
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                              tf.TensorSpec(shape=(), dtype=tf.float32),
+                              tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              tf.TensorSpec(shape=(), dtype=tf.int32),
+                              ])
+def bessel_function(r,rc,kn,n):
+    
+    pi = tf.constant(math.pi, dtype=tf.float32)
+    nkn_rad = tf.range(1, n+1, dtype=tf.float32) * kn
+    rn = pi / rc * tf.einsum('k,ij->ijk',nkn_rad, r)
+
     dim = tf.shape(r)
     p = 6
-    #pi = tf.constant(math.pi, dtype=tf.float32)
-    return tf.sqrt(2.0/rc)*tf.sin(rn) / (r + 1e-8) * tf_fcut_rbf(r,rc)
+    fc_over_r = tf_fcut_rbf(r,rc) / (r + 1e-20)
+
+    return tf.sqrt(2.0/rc)*tf.einsum('ijk,ij->ijk',tf.sin(rn),fc_over_r) # nat, nneigh,nrad
 
 def help_func(n):
     return tf.ones(n+1, tf.int32) * n
