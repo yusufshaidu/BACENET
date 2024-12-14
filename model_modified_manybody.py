@@ -118,6 +118,13 @@ class mBP_model(tf.keras.Model):
                                  weight_initializer=init,
                                  bias_initializer='zeros',
                                  prefix='rbf')
+
+        init = tf.keras.initializers.RandomNormal(mean=3, stddev=0.05)
+        self.rbf_nets_ang = Networks(1, [self.Nrad], ['sigmoid'], 
+                                 weight_initializer=init,
+                                 bias_initializer='zeros',
+                                 prefix='rbf_ang')
+
         if self.thetas_trainable:
             init = tf.keras.initializers.GlorotNormal(seed=56789)
             self.thetas_net = Networks(1, [self.thetaN], ['sigmoid'],
@@ -182,6 +189,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -198,7 +206,7 @@ class mBP_model(tf.keras.Model):
 
     def tf_predict_energy_forces(self,x):
         ''' 
-        x = (batch_species_encoder, batch_kn_rad,
+        x = (batch_species_encoder, batch_kn_rad,batch_kn_ang,
                 positions, nmax_diff, batch_nats,
                 batch_zeta, cells,
                 batch_theta_s, C6,
@@ -207,8 +215,8 @@ class mBP_model(tf.keras.Model):
         rc = tf.constant(self.rcut,dtype=tf.float32)
         Nrad = tf.constant(self.Nrad, dtype=tf.int32)
         thetasN = tf.constant(self.thetaN, dtype=tf.int32)
-        nat = x[4]
-        nmax_diff = x[3]
+        nat = x[5]
+        nmax_diff = x[4]
         
         #predict species encoder for this configurations
         #species_encoder = tf.cast(x[0][:nat], tf.int32) - 1
@@ -220,18 +228,19 @@ class mBP_model(tf.keras.Model):
 
         #width = tf.cast(x[1], dtype=tf.float32)
         kn_rad = x[1]
-        positions = tf.reshape(x[2][:nat*3], [nat,3])
+        kn_ang = x[2]
+        positions = tf.reshape(x[3][:nat*3], [nat,3])
         positions = positions
         #zeta cannot be a fraction
-        zeta = x[5]
-        cell = tf.reshape(x[6], [3,3])
-        theta_s = x[7]
+        zeta = x[6]
+        cell = tf.reshape(x[7], [3,3])
+        theta_s = x[8]
         evdw = 0.0
-        C6 = x[8][:nat]
-        num_neigh = x[12]
-        first_atom_idx = x[9][:num_neigh]
-        second_atom_idx = x[10][:num_neigh]
-        shift_vector = tf.cast(tf.reshape(x[11][:num_neigh*3], 
+        C6 = x[9][:nat]
+        num_neigh = x[13]
+        first_atom_idx = x[10][:num_neigh]
+        second_atom_idx = x[11][:num_neigh]
+        shift_vector = tf.cast(tf.reshape(x[12][:num_neigh*3], 
                                           [num_neigh,3]), tf.float32)
 
         sin_theta_s = tf.sin(theta_s)
@@ -324,9 +333,9 @@ class mBP_model(tf.keras.Model):
             bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm,
                                                            rc,kn_rad,
                                                            Nrad), [nat, Nneigh, Nrad])
-            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembedding**2
-            atomic_descriptors = tf.reduce_sum(radial_ij, axis=1) # sum over neigh
-            atomic_descriptors = tf.reshape(atomic_descriptors, 
+            radial_ij = tf.einsum('ijk,ijl->ikl',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembedding**2
+            #atomic_descriptors = tf.reduce_sum(radial_ij, axis=1) # sum over neigh
+            atomic_descriptors = tf.reshape(radial_ij, 
                                             [nat, Nrad*self.spec_size]
                                             )
 
@@ -378,6 +387,10 @@ class mBP_model(tf.keras.Model):
             cos_theta_ijk_theta_s_zeta = tf.pow(cos_theta_ijk_theta_s / norm_ang, zeta) #nat x Nneigh X Nneigh x thetasN
 
             # I am now using the same radial functions for angular and radial functions
+            bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm,
+                                                           rc,kn_ang,
+                                                           Nrad), [nat, Nneigh, Nrad])
+            radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembedding**2
             ##############################################
             #radial_ij = tf.einsum('ijk,ijl->ijkl', bf_radial, species_encoder_ij)
 
@@ -444,6 +457,8 @@ class mBP_model(tf.keras.Model):
 
         inputs_width = tf.ones(1)
         self.kn_rad = tf.reshape(self.rbf_nets(inputs_width[tf.newaxis, :]), [-1])
+        self.kn_ang = tf.reshape(self.rbf_nets_ang(inputs_width[tf.newaxis, :]), [-1])
+
         self.zeta_value = self.zeta * tf.ones(1)
         #inputs for center networks
         tf_pi = tf.constant(math.pi, dtype=tf.float32)
@@ -454,6 +469,7 @@ class mBP_model(tf.keras.Model):
             self._thetas = self.thetas_net # evenly spaced centers
 
         batch_kn_rad = tf.tile([self.kn_rad], [batch_size,1])
+        batch_kn_ang = tf.tile([self.kn_ang], [batch_size,1])
         batch_zeta = tf.tile([self.zeta_value], [batch_size,1])
         batch_theta_s = tf.tile([self._thetas], [batch_size,1])
 
@@ -506,7 +522,7 @@ class mBP_model(tf.keras.Model):
         second_atom_idx = tf.cast(inputs[6], tf.int32)
         shift_vectors = tf.reshape(tf.cast(inputs[7][:,:neigh_max*3],tf.int32), (-1, neigh_max*3))
 
-        elements = (batch_species_encoder, batch_kn_rad,
+        elements = (batch_species_encoder, batch_kn_rad, batch_kn_ang,
                 positions, nmax_diff, batch_nats,
                 batch_zeta, cells,
                 batch_theta_s, C6, 
@@ -600,7 +616,7 @@ class mBP_model(tf.keras.Model):
 
          #   tf.summary.histogram('3. Parameters/1. width',self.width_value,self._train_counter)
             tf.summary.histogram('3. Parameters/1. kn_rad',self.kn_rad,self._train_counter)
-            #tf.summary.histogram('3. Parameters/2. kn_ang',self.kn_ang,self._train_counter)
+            tf.summary.histogram('3. Parameters/2. kn_ang',self.kn_ang,self._train_counter)
           #  tf.summary.histogram('3. Parameters/2. width_ang',self.width_value_ang,self._train_counter)
             tf.summary.histogram('3. Parameters/3. zeta',self.zeta_value,self._train_counter)
           #  tf.summary.histogram('3. Parameters/4. Rs_rad',self._Rs_rad,self._train_counter)
