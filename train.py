@@ -17,8 +17,8 @@ from data_processing import data_preparation
 #from model import mBP_model
 #from model_legendre_polynomial import mBP_model
 from model_modified_manybody import mBP_model
-from model_modified_manybody_ase_atoms import mBP_model as mBP_model_ase
 from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
+from model_modified_manybody_learn_3body import mBP_model as mBP_model_learn_3body
 
 
 #from tensorflow.keras import mixed_precision
@@ -79,6 +79,7 @@ def default_config():
     configs['thetas_trainable'] = True
     configs['species_layer_sizes'] = []
     configs['species_correlation'] = 'tensor'
+    configs['learn_angular_terms'] = False
     return configs
 
 def create_model(configs):
@@ -120,8 +121,8 @@ def create_model(configs):
         model_v = configs['model_version']
         if model_v == 'linear':
             model_call = mBP_model_linear
-        elif model_v == 'ase':
-            model_call = mBP_model_ase
+        elif model_v == 'learnable_des':
+            model_call = mBP_model_learn_3body
 
         print('I am using variable width')
     #this is the global step
@@ -201,10 +202,22 @@ def create_model(configs):
     #        staircase=True)
     lr_schedule = initial_learning_rate
 
-    cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
+    if not fixed_lr:
+        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='RMSE_F',
         factor=decay_rate,
         patience=decay_step,
+        verbose=1,
+        mode='auto',
+        min_delta=0.0001,
+        cooldown=0,
+        min_lr=min_lr,
+        )
+    else:
+        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='RMSE_F',
+        factor=0.99,
+        patience=100000000,
         verbose=1,
         mode='auto',
         min_delta=0.0001,
@@ -345,7 +358,8 @@ def create_model(configs):
                       layer_normalize=configs['layer_normalize'],
                       thetas_trainable=thetas_trainable,
                       species_layer_sizes=species_layer_sizes,
-                      species_correlation=configs['species_correlation'])
+                      species_correlation=configs['species_correlation'],
+                      learn_angular_terms=configs['learn_angular_terms'])
 
     model.compile(optimizer=optimizer, 
                   loss="mse", 

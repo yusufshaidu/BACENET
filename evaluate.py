@@ -2,7 +2,7 @@ import tensorflow as tf
 from data_processing import data_preparation
 from model_modified_manybody import mBP_model
 from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
-from model_modified_manybody_ase_atoms import mBP_model as mBP_model_ase
+from model_modified_manybody_learn_3body import mBP_model as mBP_model_learn_3body
 
 import os, sys, yaml,argparse, json
 import numpy as np
@@ -88,6 +88,8 @@ def create_model(configs):
         model_v = configs['model_version']
         if model_v == 'linear':
             model_call = mBP_model_linear
+        elif model_v == 'ase':
+            model_call = mBP_model_learn_3body
 
     nspec_embedding = configs['nspec_embedding']
     try:
@@ -125,7 +127,8 @@ def create_model(configs):
                       layer_normalize=configs['layer_normalize'],
                       thetas_trainable=thetas_trainable,
                       species_layer_sizes=species_layer_sizes,
-                      species_correlation=configs['species_correlation'])
+                      species_correlation=configs['species_correlation'],
+                      learn_angular_terms=configs['learn_angular_terms'])
     
     #load the last check points
     

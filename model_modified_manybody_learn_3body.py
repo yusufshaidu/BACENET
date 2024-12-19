@@ -48,6 +48,7 @@ class mBP_model(tf.keras.Model):
                 species_layer_sizes=[], #the last layer is eforced to be equal nspec_embedding
                 species_correlation='tensor',
                 learn_angular_terms=False
+
                  ):
         
         #allows to use all the base class of tf.keras Model
@@ -62,7 +63,7 @@ class mBP_model(tf.keras.Model):
         self._activations = activations
         self.Nrad = Nrad
         self.thetaN = thetaN
-        self.zeta = zeta
+        self.zeta = float(zeta)
         self.body_order = body_order
         self.species_correlation = species_correlation
         base_size = self.Nrad * self.thetaN
@@ -93,6 +94,7 @@ class mBP_model(tf.keras.Model):
         self.layer_normalize = layer_normalize
         self.tf_pi = tf.constant(math.pi, dtype=tf.float32)
         self.thetas_trainable = thetas_trainable
+        self.learn_angular_terms = learn_angular_terms
         # the number of elements in the periodic table
         self.nelement = nelement
         
@@ -113,6 +115,13 @@ class mBP_model(tf.keras.Model):
         self.species_nets = Networks(self.nelement, self.species_layer_sizes, species_activations, prefix='species_encoder')
         #self.species_nets = Networks(self.nelement, [self.nspec_embedding], ['tanh'], prefix='species_encoder')
 
+        if self.learn_angular_terms:
+            self.ang_funct_nets = Networks(3, [128,128,128,self.thetaN], ['sigmoid', 'sigmoid','sigmoid','sigmoid'], 
+                                 bias_initializer='zeros',
+                                 prefix='angular-functions')
+        self.radial_funct_net = Networks(self.Nrad, [128,128,128,self.Nrad], ['silu', 'silu','silu','linear'], 
+                                 bias_initializer='zeros',
+                                 prefix='radial-functions')
     @tf.function(
                 input_signature=[(
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
@@ -178,32 +187,23 @@ class mBP_model(tf.keras.Model):
 
     def tf_predict_energy_forces(self,x):
         ''' 
-        x = (batch_species_encoder,
-                positions, nmax_diff, batch_nats,
-                cells,C6,
+        x = (batch_species_encoder,positions,
+                    nmax_diff, batch_nats,cells,C6,
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
         '''
         rc = tf.constant(self.rcut,dtype=tf.float32)
         Nrad = tf.constant(self.Nrad, dtype=tf.int32)
-        zeta = tf.constant(self.zeta, dtype=tf.float32)
-
         thetasN = tf.constant(self.thetaN, dtype=tf.int32)
 
         nat = x[3]
         nmax_diff = x[2]
         
-        #predict species encoder for this configurations
-        #species_encoder = tf.cast(x[0][:nat], tf.int32) - 1
-        #species_one_hot_encoder = tf.one_hot(species_encoder, depth=self.nelement)
-        #species_encoder = self.species_nets(species_one_hot_encoder) # nspecies x nembedding
-        #species_encoder = tf.reshape(species_encoder, [nat,self.nspec_embedding])
         species_encoder = tf.reshape(x[0][:nat*self.nspec_embedding], 
                                      [nat,self.nspec_embedding])
 
         #width = tf.cast(x[1], dtype=tf.float32)
         positions = tf.reshape(x[1][:nat*3], [nat,3])
         positions = positions
-        #zeta cannot be a fraction
         cell = tf.reshape(x[4], [3,3])
         evdw = 0.0
         C6 = x[5][:nat]
@@ -212,14 +212,13 @@ class mBP_model(tf.keras.Model):
         second_atom_idx = x[7][:num_neigh]
         shift_vector = tf.cast(tf.reshape(x[8][:num_neigh*3], 
                                           [num_neigh,3]), tf.float32)
-
+        
         tstep = self.tf_pi / tf.cast(thetasN, tf.float32)
         theta_s = tf.range(1,thetasN+1, dtype=tf.float32) * tstep
-
-        sin_theta_s = tf.sin(theta_s)
         cos_theta_s = tf.cos(theta_s)
-#        sin_theta_s2 = sin_theta_s * sin_theta_s
-        
+        sin_theta_s = tf.sin(theta_s)
+
+
         with tf.GradientTape() as g:
             #'''
             g.watch(positions)
@@ -309,11 +308,12 @@ class mBP_model(tf.keras.Model):
             #r = all_rij_norm[:,:,None]
             _Nneigh = tf.shape(all_rij_norm)
             Nneigh = _Nneigh[1]
-
-            kn_rad = tf.ones(Nrad, dtype=tf.float32)
+            kn_rad = tf.ones(Nrad,dtype=tf.float32)
             bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm,
                                                            rc,kn_rad,
-                                                           Nrad), [nat, Nneigh, Nrad])
+                                                           Nrad), [nat*Nneigh, Nrad])
+            bf_radial = self.radial_funct_net(bf_radial)
+            bf_radial = tf.reshape(bf_radial, [nat, Nneigh, Nrad])
             radial_ij = tf.einsum('ijk,ijl->ijkl',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembedding**2
             atomic_descriptors = tf.reduce_sum(radial_ij, axis=1) # sum over neigh
             atomic_descriptors = tf.reshape(atomic_descriptors, 
@@ -358,21 +358,37 @@ class mBP_model(tf.keras.Model):
             reg2 = 1e-6
 
             cos_theta_ijk = tf.clip_by_value(cos_theta_ijk, clip_value_min=-1.0+reg2, clip_value_max=1.0-reg2)
-            cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
 
             
             #nat x thetasN x N_unique
-            sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
-            _cos_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',cos_theta_ijk,cos_theta_s) #nat x Nneigh X Nneigh x thetasN
-            _sin_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',sin_theta_ijk,sin_theta_s) #nat x Nneigh X Nneigh x thetasN
-            cos_theta_ijk_theta_s = 1.0 + _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s #nat x Nneigh X Nneigh x thetasN
-            #tf.debugging.check_numerics(cos_theta_ijk_theta_s, message='cos_theta_ijk_theta_s contains NaN')
-            
-            norm_ang = 2.0 
+            if not self.learn_angular_terms:
 
-            #Nat,Nneigh, Nneigh,ThetasN
-            #note that the factor of 2 in BP functions cancels the 1/2 due to double counting
-            cos_theta_ijk_theta_s_zeta = tf.pow(cos_theta_ijk_theta_s / norm_ang, zeta) #nat x Nneigh X Nneigh x thetasN
+                cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
+                sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
+                _cos_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',cos_theta_ijk,cos_theta_s) #nat x Nneigh X Nneigh x thetasN
+                _sin_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',sin_theta_ijk,sin_theta_s) #nat x Nneigh X Nneigh x thetasN
+                cos_theta_ijk_theta_s = 1.0 + _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s #nat x Nneigh X Nneigh x thetasN
+                #tf.debugging.check_numerics(cos_theta_ijk_theta_s, message='cos_theta_ijk_theta_s contains NaN')
+
+                norm_ang = 2.0
+
+                #Nat,Nneigh, Nneigh,ThetasN
+                #note that the factor of 2 in BP functions cancels the 1/2 due to double counting
+                cos_theta_ijk_theta_s_zeta = tf.pow(cos_theta_ijk_theta_s / norm_ang, self.zeta) #nat x Nneigh X Nneigh x thetasN
+            else:
+                cos_theta_ijk = tf.reshape(cos_theta_ijk, [-1])
+                cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
+                sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
+                angular_inputs = tf.stack([tf.ones_like(cos_theta_ijk, 
+                                                   dtype=tf.float32), 
+                                           cos_theta_ijk, 
+                                           sin_theta_ijk], axis=1) #[nat * Nneigh * Nneigh, 3]
+
+                #angular_inputs = tf.reshape(angular_inputs, [-1,3])
+                
+                cos_theta_ijk_theta_s_zeta = self.ang_funct_nets(angular_inputs) # expected to be nat*Nneigh*Nneighxthetas
+                cos_theta_ijk_theta_s_zeta = tf.reshape(cos_theta_ijk_theta_s_zeta, 
+                                                        [nat,Nneigh,Nneigh,thetasN])
 
             # I am now using the same radial functions for angular and radial functions
             #bf_radial = tf.reshape(help_fn.bessel_function(all_rij_norm,
@@ -492,9 +508,8 @@ class mBP_model(tf.keras.Model):
         second_atom_idx = tf.cast(inputs[6], tf.int32)
         shift_vectors = tf.reshape(tf.cast(inputs[7][:,:neigh_max*3],tf.int32), (-1, neigh_max*3))
 
-        elements = (batch_species_encoder,
-                positions, nmax_diff, batch_nats,
-                cells,C6, 
+        elements = (batch_species_encoder,positions, 
+                    nmax_diff, batch_nats,cells,C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
 
         if self.features:
@@ -583,7 +598,6 @@ class mBP_model(tf.keras.Model):
             for idx, spec in enumerate(self.species_identity):
                 tf.summary.histogram(f'3. encoding /{spec}',self.trainable_species_encoder[idx],self._train_counter)
 
-         #   tf.summary.histogram('3. Parameters/1. width',self.width_value,self._train_counter)
         return {key: metrics[key] for key in metrics.keys()}
 
 

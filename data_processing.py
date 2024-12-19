@@ -19,10 +19,10 @@ from tfr_data_processing import write_tfr, get_tfrs
 import warnings
 
 #from ml_potentials.pbc import replicas_max_idx
-try:
-    from pbc import replicas_max_idx
-except:
-    from .pbc import replicas_max_idx
+#try:
+#    from pbc import replicas_max_idx
+#except:
+#    from .pbc import replicas_max_idx
 def get_energy_json(file, species):
     Ry2eV = 13.6057039763
     data = json.load(open(file))

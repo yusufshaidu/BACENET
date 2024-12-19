@@ -90,7 +90,8 @@ class wBP_Calculator(Calculator):
                           layer_normalize=configs['layer_normalize'],
                           thetas_trainable=configs['thetas_trainable'],
                           species_layer_sizes=configs['species_layer_sizes'],
-                          species_correlation=configs['species_correlation'])
+                          species_correlation=configs['species_correlation'],
+                          learn_angular_terms=configs['learn_angular_terms'])
 
         ckpts = [os.path.join(configs['model_outdir']+"/models", x.split('.index')[0]) 
                  for x in os.listdir(configs['model_outdir']+"/models") if x.endswith('index')]
