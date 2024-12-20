@@ -192,38 +192,18 @@ def create_model(configs):
                      atomic_energy_file=os.path.join(model_outdir,'atomic_energy.json'),
                      model_version=model_v,model_dir=model_outdir)
     initial_learning_rate = initial_lr
-    #if fixed_lr:
-    #    lr_schedule = initial_learning_rate
-    #else:
-    #    lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-    #        initial_learning_rate,
-    #        decay_steps=decay_step,
-    #        decay_rate=decay_rate,
-    #        staircase=True)
-    lr_schedule = initial_learning_rate
-
-    if not fixed_lr:
-        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
-        monitor='RMSE_F',
-        factor=decay_rate,
-        patience=decay_step,
-        verbose=1,
-        mode='auto',
-        min_delta=0.0001,
-        cooldown=0,
-        min_lr=min_lr,
-        )
+    '''
+    if fixed_lr:
+        lr_schedule = initial_learning_rate
     else:
-        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
-        monitor='RMSE_F',
-        factor=0.99,
-        patience=100000000,
-        verbose=1,
-        mode='auto',
-        min_delta=0.0001,
-        cooldown=0,
-        min_lr=min_lr,
-        )
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+            initial_learning_rate,
+            decay_steps=decay_step,
+            decay_rate=decay_rate,
+            staircase=True)
+    print(lr_schedule)
+    '''
+    lr_schedule = initial_learning_rate
 
     #callback_earlystop = tf.keras.callbacks.EarlyStopping(monitor='RMSE_F',
     #                                          patience=decay_step,
@@ -296,8 +276,7 @@ def create_model(configs):
                                                     save_freq=save_freq),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
                                                   update_freq='epoch'),
-                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True),
-                       cb_ReduceLROnPlateau]
+                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
     else:
         cp_callback = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                      save_weights_only=True,
@@ -305,11 +284,21 @@ def create_model(configs):
                                                     save_freq=save_freq),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
                                                   update_freq='epoch'),
-                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True),
-                       cb_ReduceLROnPlateau]
+                   tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
 
+    if not fixed_lr:
+        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='RMSE_F',
+        factor=decay_rate,
+        patience=decay_step,
+        verbose=1,
+        mode='auto',
+        min_delta=0.0001,
+        cooldown=0,
+        min_lr=min_lr,
+        )
 
-
+        cp_callback.append(cb_ReduceLROnPlateau)
     backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
     '''
     try:

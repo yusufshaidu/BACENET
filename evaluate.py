@@ -88,7 +88,7 @@ def create_model(configs):
         model_v = configs['model_version']
         if model_v == 'linear':
             model_call = mBP_model_linear
-        elif model_v == 'ase':
+        elif model_v == 'learnable_des':
             model_call = mBP_model_learn_3body
 
     nspec_embedding = configs['nspec_embedding']
@@ -187,10 +187,15 @@ def create_model(configs):
         e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
         _f_ref = []
         _f_pred = []
+        fmaes = []
+        frmses = []
         for i, j in enumerate(nat):
             j = tf.cast(j, tf.int32)
             _f_ref = np.append(_f_ref, force_ref[i][:j])
             _f_pred = np.append(_f_pred, force_pred[i][:j])
+            diff = force_ref[i][:j] - force_pred[i][:j]
+            fmaes.append(tf.reduce_mean(tf.abs(diff)))
+            frmses.append(tf.sqrt(tf.reduce_mean(tf.square(diff))))
 
         #force_ref = [tf.reshape(force_ref[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
         force_ref = tf.reshape(_f_ref, [-1,3])
@@ -198,8 +203,8 @@ def create_model(configs):
         force_pred = tf.reshape(_f_pred, [-1,3])
         mae = tf.reduce_mean(tf.abs(e_ref-e_pred))
         rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2))
-        fmae = tf.reduce_mean(tf.abs(force_ref-force_pred))
-        frmse = tf.sqrt(tf.reduce_mean((force_ref-force_pred)**2))
+        fmae = tf.reduce_mean(np.array(fmaes))
+        frmse = tf.sqrt(tf.reduce_mean(np.array(frmses)**2))
         errors.append([_epoch,rmse*1000,mae*1000,frmse*1000,fmae*1000])
 
         print(f'Ermse = {rmse*1000:.3f} and Emae = {mae*1000:.3f} | Frmse = {frmse*1000:.3f} and Fmae = {fmae*1000:.3f}')

@@ -7,7 +7,8 @@ from ase.io import write
 from data_processing import data_preparation, atomic_number
 from model_modified_manybody import mBP_model
 from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
-from model_modified_manybody_ase_atoms import mBP_model as mBP_model_ase
+#from model_modified_manybody_ase_atoms import mBP_model as mBP_model_ase
+from model_modified_manybody_learn_3body import mBP_model as mBP_model_learn_3body
 
 import os, sys, yaml,argparse, json
 import numpy as np
@@ -62,8 +63,8 @@ class wBP_Calculator(Calculator):
             model_v = configs['model_version']
             if model_v == 'linear':
                 model_call = mBP_model_linear
-            if model_v == 'ase':
-                model_call = mBP_model_ase
+            elif model_v == 'learnable_des':
+                model_call = mBP_model_learn_3body
         atomic_energy = configs['atomic_energy']
         if len(atomic_energy)==0:
             with open (os.path.join(configs['model_outdir'],'atomic_energy.json')) as df:

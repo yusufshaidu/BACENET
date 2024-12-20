@@ -116,10 +116,12 @@ class mBP_model(tf.keras.Model):
         #self.species_nets = Networks(self.nelement, [self.nspec_embedding], ['tanh'], prefix='species_encoder')
 
         if self.learn_angular_terms:
-            self.ang_funct_nets = Networks(self.thetaN, [128,128,128,self.thetaN], ['sigmoid', 'sigmoid','sigmoid','sigmoid'], 
+            #self.ang_funct_nets = Networks(self.thetaN, [128,128,128,self.thetaN], ['sigmoid', 'sigmoid','sigmoid','sigmoid'], 
+            self.ang_funct_nets = Networks(self.thetaN, [128,self.thetaN], ['sigmoid','silu'], 
                                  bias_initializer='ones',
                                  prefix='angular-functions')
-        self.radial_funct_net = Networks(self.Nrad, [128,128,128,self.Nrad], ['silu', 'silu','silu','linear'], 
+        #self.radial_funct_net = Networks(self.Nrad, [128,128,128,self.Nrad], ['silu', 'silu','silu','linear'], 
+        self.radial_funct_net = Networks(self.Nrad, [128,self.Nrad], ['silu','linear'], 
                                  bias_initializer='zeros',
                                  prefix='radial-functions')
     @tf.function(
