@@ -116,8 +116,8 @@ class mBP_model(tf.keras.Model):
         #self.species_nets = Networks(self.nelement, [self.nspec_embedding], ['tanh'], prefix='species_encoder')
 
         if self.learn_angular_terms:
-            self.ang_funct_nets = Networks(3, [128,128,128,self.thetaN], ['sigmoid', 'sigmoid','sigmoid','sigmoid'], 
-                                 bias_initializer='zeros',
+            self.ang_funct_nets = Networks(self.thetaN, [128,128,128,self.thetaN], ['sigmoid', 'sigmoid','sigmoid','sigmoid'], 
+                                 bias_initializer='ones',
                                  prefix='angular-functions')
         self.radial_funct_net = Networks(self.Nrad, [128,128,128,self.Nrad], ['silu', 'silu','silu','linear'], 
                                  bias_initializer='zeros',
@@ -359,34 +359,37 @@ class mBP_model(tf.keras.Model):
 
             cos_theta_ijk = tf.clip_by_value(cos_theta_ijk, clip_value_min=-1.0+reg2, clip_value_max=1.0-reg2)
 
-            
+            cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
+            sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
+            _cos_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',cos_theta_ijk,cos_theta_s) #nat x Nneigh X Nneigh x thetasN
+            _sin_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',sin_theta_ijk,sin_theta_s) #nat x Nneigh X Nneigh x thetasN
+
             #nat x thetasN x N_unique
             if not self.learn_angular_terms:
 
-                cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
-                sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
-                _cos_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',cos_theta_ijk,cos_theta_s) #nat x Nneigh X Nneigh x thetasN
-                _sin_theta_ijk_theta_s = tf.einsum('ijk,l->ijkl',sin_theta_ijk,sin_theta_s) #nat x Nneigh X Nneigh x thetasN
-                cos_theta_ijk_theta_s = 1.0 + _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s #nat x Nneigh X Nneigh x thetasN
                 #tf.debugging.check_numerics(cos_theta_ijk_theta_s, message='cos_theta_ijk_theta_s contains NaN')
 
+                cos_theta_ijk_theta_s = 1.0 + _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s #nat x Nneigh X Nneigh x thetasN
                 norm_ang = 2.0
 
                 #Nat,Nneigh, Nneigh,ThetasN
                 #note that the factor of 2 in BP functions cancels the 1/2 due to double counting
                 cos_theta_ijk_theta_s_zeta = tf.pow(cos_theta_ijk_theta_s / norm_ang, self.zeta) #nat x Nneigh X Nneigh x thetasN
             else:
-                cos_theta_ijk = tf.reshape(cos_theta_ijk, [-1])
-                cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
-                sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
-                angular_inputs = tf.stack([tf.ones_like(cos_theta_ijk, 
-                                                   dtype=tf.float32), 
-                                           cos_theta_ijk, 
-                                           sin_theta_ijk], axis=1) #[nat * Nneigh * Nneigh, 3]
+                #cos(theta-theta_s), we have not included 1 because it is just a shift that make the function positive
+                cos_theta_ijk_theta_s = _cos_theta_ijk_theta_s + _sin_theta_ijk_theta_s #nat x Nneigh X Nneigh x thetasN
+                cos_theta_ijk_theta_s = tf.reshape(cos_theta_ijk_theta_s, [-1, thetasN])
+                #cos_theta_ijk2 = cos_theta_ijk * cos_theta_ijk
+                #sin_theta_ijk = tf.sqrt(1.0 - cos_theta_ijk2)
+                #angular_inputs = tf.stack([tf.ones_like(cos_theta_ijk, 
+                #                                   dtype=tf.float32), 
+                #                           cos_theta_ijk, 
+                #                           sin_theta_ijk], axis=1) #[nat * Nneigh * Nneigh, 3]
 
                 #angular_inputs = tf.reshape(angular_inputs, [-1,3])
                 
-                cos_theta_ijk_theta_s_zeta = self.ang_funct_nets(angular_inputs) # expected to be nat*Nneigh*Nneighxthetas
+                #cos_theta_ijk_theta_s_zeta = self.ang_funct_nets(angular_inputs) # expected to be nat*Nneigh*Nneighxthetas
+                cos_theta_ijk_theta_s_zeta = self.ang_funct_nets(cos_theta_ijk_theta_s) # expected to be nat*Nneigh*Nneighxthetas
                 cos_theta_ijk_theta_s_zeta = tf.reshape(cos_theta_ijk_theta_s_zeta, 
                                                         [nat,Nneigh,Nneigh,thetasN])
 
