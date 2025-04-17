@@ -45,10 +45,6 @@ def example(data,nmax, nneigh_max):
     return tf.train.Example(features=tf.train.Features(feature=features))
 
 def write_tfr(prefix, data, nmax, nneigh_max, nelement=None, tfr_dir='tfrs',):
-    # Write the raw image files to `images.tfrecords`.
-    # First, process the two images into `tf.train.Example` messages.
-    # Then, write to a `.tfrecords` file.
-
     #data contains [positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
     #each has nconf as the first axis dimension
     if not os.path.exists(tfr_dir):

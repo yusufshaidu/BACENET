@@ -26,7 +26,8 @@ def find_three_non_negative_integers(n):
     # Stack valid triplets together
     valid_triplets = tf.stack([valid_i, valid_j, valid_k], axis=1)
     
-    return tf.reshape(valid_triplets, [-1])
+    #return tf.reshape(valid_triplets, [-1])
+    return valid_triplets
      
 @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
 def factorial( n):
