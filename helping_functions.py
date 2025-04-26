@@ -2,7 +2,115 @@ import numpy as np
 import tensorflow as tf
 import math 
 
-#start functions from chatgpt
+def find_three_non_negative_integers_handcoded(n):
+    # Create a tensor of integers from 0 to n
+    if n == 0:
+        return [[0, 0, 0]]
+    if n == 1:
+        return [[0, 0, 1],[0, 1, 0],[1, 0, 0]]
+    if n == 2:
+        return [[0, 0, 2],
+        [0, 1, 1],
+        [0, 2, 0],
+        [1, 0, 1],
+        [1, 1, 0],
+        [2, 0, 0]]
+    if n == 3:
+        return [[0, 0, 3],
+        [0, 1, 2],
+        [0, 2, 1],
+        [0, 3, 0],
+        [1, 0, 2],
+        [1, 1, 1],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+        [3, 0, 0]]
+    if n == 4:
+        return [[0, 0, 4],
+        [0, 1, 3],
+        [0, 2, 2],
+        [0, 3, 1],
+        [0, 4, 0],
+        [1, 0, 3],
+        [1, 1, 2],
+        [1, 2, 1],
+        [1, 3, 0],
+        [2, 0, 2],
+        [2, 1, 1],
+        [2, 2, 0],
+        [3, 0, 1],
+        [3, 1, 0],
+        [4, 0, 0]]
+    if n == 5:
+        return [[0, 0, 5],
+        [0, 1, 4],
+        [0, 2, 3],
+        [0, 3, 2],
+        [0, 4, 1],
+        [0, 5, 0],
+        [1, 0, 4],
+        [1, 1, 3],
+        [1, 2, 2],
+        [1, 3, 1],
+        [1, 4, 0],
+        [2, 0, 3],
+        [2, 1, 2],
+        [2, 2, 1],
+        [2, 3, 0],
+        [3, 0, 2],
+        [3, 1, 1],
+        [3, 2, 0],
+        [4, 0, 1],
+        [4, 1, 0],
+        [5, 0, 0]]
+    if n == 6:
+        return [[0, 0, 6],
+        [0, 1, 5],
+        [0, 2, 4],
+        [0, 3, 3],
+        [0, 4, 2],
+        [0, 5, 1],
+        [0, 6, 0],
+        [1, 0, 5],
+        [1, 1, 4],
+        [1, 2, 3],
+        [1, 3, 2],
+        [1, 4, 1],
+        [1, 5, 0],
+        [2, 0, 4],
+        [2, 1, 3],
+        [2, 2, 2],
+        [2, 3, 1],
+        [2, 4, 0],
+        [3, 0, 3],
+        [3, 1, 2],
+        [3, 2, 1],
+        [3, 3, 0],
+        [4, 0, 2],
+        [4, 1, 1],
+        [4, 2, 0],
+        [5, 0, 1],
+        [5, 1, 0],
+        [6, 0, 0]]
+def compute_n_comb_lxlylz(n):
+    #compute n!/(lx!ly!lz!), lx+ly+lz=n
+    if n == 0:
+        return [1.0] # 0!/(0!*0!*0!)
+    if n == 1:
+        #[[0, 0, 1],[0, 1, 0],[1, 0, 0]]
+        return [1.0,1.0,1.0]
+    if n == 2:
+        #[[0, 0, 2],[0, 1, 1],[0, 2, 0],[1, 0, 1],[1, 1, 0],[2, 0, 0]]
+        return [1.0, 2.0, 1.0, 2.0, 2.0, 1.0]
+    if n == 3:
+        #[[0, 0, 3],[0, 1, 2],[0, 2, 1],[0, 3, 0],[1, 0, 2],[1, 1, 1],[1, 2, 0],[2, 0, 1],[2, 1, 0],[3, 0, 0]]
+        return [1.0,3.0,3.0,1.0,3.0,6.0,3.0,3.0,3.0,1.0]
+    if n == 4:
+        #[[0, 0, 4],[0, 1, 3],[0, 2, 2],[0, 3, 1],[0, 4, 0],[1, 0, 3],[1, 1, 2],[1, 2, 1],
+        #[1, 3, 0],[2, 0, 2],[2, 1, 1],[2, 2, 0],[3, 0, 1],[3, 1, 0],[4, 0, 0]]
+        return [1.0,4.0,6.0,4.0,1.0,4.0,12.0,12.0,4.0,6.0,12.0,6.0,4.0,4.0,1.0]
+
 @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
 def find_three_non_negative_integers(n):
     # Create a tensor of integers from 0 to n
@@ -26,11 +134,11 @@ def find_three_non_negative_integers(n):
     # Stack valid triplets together
     valid_triplets = tf.stack([valid_i, valid_j, valid_k], axis=1)
     
-    #return tf.reshape(valid_triplets, [-1])
-    return valid_triplets
+    return tf.reshape(valid_triplets, [-1])
+    #return valid_triplets
      
 @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
-def factorial( n):
+def factorial(n):
     # Create a tensor of integers from 1 to n
     # Use tf.range to create a sequence from 1 to n + 1
     numbers = tf.range(1, n + 1, dtype=tf.float32)
@@ -257,6 +365,103 @@ def get_all_lxyz_idx(n):
     k = tf.range(0, n[2] + 1)
     X = tf.meshgrid(i,j,k, indexing='ij')
     return tf.reshape(tf.transpose(X), [-1])
+@tf.function
+def _angular_terms(radial_ij, rij_unit,nat, Nrad, spec_size, z):
+    '''
+    compute three-body computation
+
+    '''
+    Gp = tf.zeros((nat, Nrad,spec_size), dtype=tf.float32)
+    Gn = tf.zeros((nat, Nrad,spec_size), dtype=tf.float32)
+    zeta_fact = help_fn.factorial(z)
+    for n in range(z+1):
+        n_float = tf.cast(n, tf.float32)
+        
+        n_fact = help_fn.factorial(n)
+        z_n_fact = help_fn.factorial(z-n)
+        z_comb_n = zeta_fact / (z_n_fact * n_fact)
+
+        #lxlylz_indices = help_fn.find_three_non_negative_integers_handcoded(n)
+        lxlylz_indices = help_fn.find_three_non_negative_integers(n)
+
+        #lx!ly!lz!
+        fact_lxlylz = tf.reshape(tf.map_fn(help_fn.factorial, tf.reshape(lxlylz_indices, [-1]), 
+                                          fn_output_signature=tf.float32), [-1,3])
+        fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
+        nfact_lxlylz = n_fact / fact_lxlylz # n_lxlylz
+        #nfact_lxlylz =tf.cast(help_fn.compute_n_comb_lxlylz(n), tf.float32)
+        #nfact_lxlylz =help_fn.compute_n_comb_lxlylz(n)
+
+        #rx^lx * ry^ly * rz^lz
+        #this need to be regularized to avoid undefined derivatives: nat, neigh, Mn, 3
+        rij_lxlylz = tf.pow(rij_unit[:,:,None,:] + 1e-16, 
+                             tf.cast(lxlylz_indices, tf.float32)[None,None,:,:])
+        rij_lxlylz = tf.einsum('k,ijk->ijk',nfact_lxlylz, tf.reduce_prod(rij_lxlylz, axis=-1)) # nat, nneigh, Mn
+        #multiply by the radial function and sum over neighbors
+        gi_lxlylz = tf.einsum('ijkl,ijm->iklm',radial_ij[:,:,:,:,z], rij_lxlylz) # nat, neigh, Nrad, nembedding, Mn
+        gi_lxlylz = z_comb_n * gi_lxlylz # nat, Nrad, nembedding, Mn
+        gp = tf.reduce_sum(gi_lxlylz * gi_lxlylz, axis=-1)
+        Gp += gp
+        Gn += (-1.0)**n_float * gp
+    norm = tf.cast(2 ** (1 - z), tf.float32)
+    return [Gp * norm, Gn * norm]
+
+@tf.function
+def angular_terms(radial_ij, rij_unit,nat, neigh, z):
+    '''
+    compute vectorize three-body computation
+
+    '''
+    zeta_fact = factorial(z)
+    #expansion index
+    n = tf.range(z+1, dtype=tf.int32)
+
+    #lxlylz = tf.vectorized_map(find_three_non_negative_integers, n)
+    lxlylz = tf.map_fn(find_three_non_negative_integers, n,
+                       fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32))
+    lxlylz = tf.reshape(lxlylz, [-1,3])
+    lxlylz_sum = tf.reduce_sum(lxlylz, axis=-1) # the value of n for each lx, ly and lz
+
+    #rx^lx * ry^ly * rz^lz
+    #this need to be regularized to avoid undefined derivatives
+    rij_lxlylz = tf.pow(rij_unit[:,:,None,:] + 1e-16, tf.cast(lxlylz, tf.float32)[None,None,:,:])
+    g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1) #nat x neigh x n_lxlylz
+
+    #compute normalizations n! / lx!/ly!/lz!
+    nfact = tf.map_fn(factorial, lxlylz_sum, 
+                      fn_output_signature=tf.float32) #computed for all n_lxlylz
+
+    #lx!ly!lz!
+    fact_lxlylz = tf.reshape(tf.map_fn(factorial, tf.reshape(lxlylz, [-1]), 
+                                       fn_output_signature=tf.float32), [-1,3])
+    fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
+
+    nfact_lxlylz = nfact / fact_lxlylz # n_lxlylz
+
+    #compute zeta! / (zeta-n)! / n!
+
+    zeta_fact = factorial(z)
+    zeta_fact_n = tf.map_fn(factorial, z-lxlylz_sum,
+                            fn_output_signature=tf.float32,
+                            )
+
+    zetan_fact = zeta_fact / (zeta_fact_n * nfact)
+
+    fact_norm = nfact_lxlylz * zetan_fact
+
+    g_ij_lxlylz = tf.einsum('ijk,k->ijk',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
+
+    #g_ij_lxlylz = tf.reshape(g_ij_lxlylz, [nat,neigh,-1])
+
+    g_ilxlylz = tf.einsum('ijkl,ijm->iklm',radial_ij, g_ij_lxlylz) #shape=(nat,nrad,species,n_lxlylz)
+    g_ilxlylz *= zetan_fact
+    
+    gi3p = tf.reduce_sum(g_ilxlylz * g_ilxlylz, axis=-1)
+    _lambda = (-1.0)**tf.cast(lxlylz_sum,tf.float32)
+    gi3n = tf.einsum('ijkl,l->ijk',g_ilxlylz * g_ilxlylz,_lambda)
+    norm = 2.0 ** (1. - tf.cast(z, tf.float32))
+    return [gi3p * norm, gi3n * norm]
+
 
 def generate_all_lxyz(n):
     '''terms needed to compute the lxyz factorial'''

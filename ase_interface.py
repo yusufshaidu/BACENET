@@ -87,12 +87,10 @@ class wBP_Calculator(Calculator):
                           rmax_u = configs['rmax_u'],
                           rmin_d = configs['rmin_d'],
                           rmax_d = configs['rmax_d'],
-                          body_order=configs['body_order'],
-                          layer_normalize=configs['layer_normalize'],
-                          thetas_trainable=configs['thetas_trainable'],
-                          species_layer_sizes=configs['species_layer_sizes'],
+                          body_order=body_order,
                           species_correlation=configs['species_correlation'],
-                          learn_angular_terms=configs['learn_angular_terms'])
+                          species_layer_sizes=configs['species_layer_sizes'],
+                          radial_layer_sizes = configs['radial_layer_sizes'])
 
         ckpts = [os.path.join(configs['model_outdir']+"/models", x.split('.index')[0]) 
                  for x in os.listdir(configs['model_outdir']+"/models") if x.endswith('index')]

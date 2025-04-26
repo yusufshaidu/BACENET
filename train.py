@@ -14,16 +14,7 @@ from tensorflow.keras.optimizers import Adam
 
 import argparse
 from data_processing import data_preparation
-#from model import mBP_model
-#from model_legendre_polynomial import mBP_model
-from model_modified_manybody import mBP_model
-from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
-from model_modified_manybody_learn_3body import mBP_model as mBP_model_learn_3body
-
-
-#from tensorflow.keras import mixed_precision
-#mixed_precision.set_global_policy('mixed_float16')
-
+from model import mBP_model
 
 def default_config():
     configs = {}
@@ -80,6 +71,7 @@ def default_config():
     configs['species_layer_sizes'] = []
     configs['species_correlation'] = 'tensor'
     configs['learn_angular_terms'] = False
+    configs['radial_layer_sizes'] = [64,64]
     return configs
 
 def create_model(configs):
@@ -116,21 +108,21 @@ def create_model(configs):
         pbc = [False,False,False]
     initial_lr = configs['initial_lr']
     model_call = mBP_model
-    print('model_version' in list(configs.keys()))
-    if 'model_version' in list(configs.keys()):
-        model_v = configs['model_version']
-        if model_v == 'linear':
-            model_call = mBP_model_linear
-        elif model_v == 'learnable_des':
-            model_call = mBP_model_learn_3body
+    model_v = configs['model_version']
+    #print('model_version' in list(configs.keys()))
+    #if 'model_version' in list(configs.keys()):
+    #    model_v = configs['model_version']
+    #    if model_v == 'linear':
+    #        model_call = mBP_model_linear
+    #    elif model_v == 'learnable_des':
+    #        model_call = mBP_model_learn_3body
 
-        print('I am using variable width')
     #this is the global step
     decay_step = configs['decay_step']
     decay_rate = configs['decay_rate']
     #activations are basically tanh and linear for now
     activations = configs['activations']
-    print(activations,species_layer_sizes)
+    radial_layer_sizes = configs['radial_layer_sizes']
     
     assert len(activations) == len(layer_sizes),'the number of activations must be same as the number of layer'
     if activations[-1] != 'linear':
@@ -152,10 +144,6 @@ def create_model(configs):
     test_fraction = configs['test_fraction']
     l1_norm = configs['l1_norm']
     l2_norm = configs['l2_norm']
-    l1_norm = 0.0
-    l2_norm = 0.0
-
-    thetas_trainable = configs['thetas_trainable']
     atomic_energy = configs['atomic_energy']
     if len(atomic_energy)==0:
         try:
@@ -192,17 +180,6 @@ def create_model(configs):
                      atomic_energy_file=os.path.join(model_outdir,'atomic_energy.json'),
                      model_version=model_v,model_dir=model_outdir)
     initial_learning_rate = initial_lr
-    '''
-    if fixed_lr:
-        lr_schedule = initial_learning_rate
-    else:
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-            initial_learning_rate,
-            decay_steps=decay_step,
-            decay_rate=decay_rate,
-            staircase=True)
-    print(lr_schedule)
-    '''
     lr_schedule = initial_learning_rate
 
     #callback_earlystop = tf.keras.callbacks.EarlyStopping(monitor='RMSE_F',
@@ -212,8 +189,8 @@ def create_model(configs):
     if opt_method in ['adamW', 'AdamW', 'adamw']:
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
-            weight_decay=0.0001,
-            amsgrad=False,
+            weight_decay=1e-8,
+            amsgrad=True,
             clipnorm=None,
             clipvalue=configs['clip_value'],
             use_ema=False,
@@ -234,10 +211,10 @@ def create_model(configs):
         optimizer = tf.keras.optimizers.Adam(
                                              learning_rate=lr_schedule,
                                              use_ema=False,
-                                             weight_decay=0.0001, 
+                                             weight_decay=1e-8, 
                                              clipnorm=None,
                                              clipvalue=configs['clip_value'],
-                                             amsgrad=False,
+                                             amsgrad=True,
                                              )
     
 #    train_writer = tf.summary.create_file_writer(model_outdir+'/train')
@@ -344,12 +321,14 @@ def create_model(configs):
                       rmin_u=rmin_u,rmax_u=rmax_u,
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       body_order=body_order,
-                      layer_normalize=configs['layer_normalize'],
-                      thetas_trainable=thetas_trainable,
+                      #layer_normalize=configs['layer_normalize'],
+                      #thetas_trainable=thetas_trainable,
                       species_layer_sizes=species_layer_sizes,
                       species_correlation=configs['species_correlation'],
-                      learn_angular_terms=configs['learn_angular_terms'])
+                      #learn_angular_terms=configs['learn_angular_terms'],
+                      radial_layer_sizes = radial_layer_sizes)
 
+    #precompute features
     model.compile(optimizer=optimizer, 
                   loss="mse", 
                   metrics=["MAE", 'loss'])

@@ -1,8 +1,6 @@
 import tensorflow as tf
 from data_processing import data_preparation
-from model_modified_manybody import mBP_model
-from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
-from model_modified_manybody_learn_3body import mBP_model as mBP_model_learn_3body
+from model import mBP_model
 
 import os, sys, yaml,argparse, json
 import numpy as np
@@ -69,6 +67,7 @@ def create_model(configs):
         
     atomic_energy = configs['atomic_energy']
     include_vdw = configs['include_vdw']
+    radial_layer_sizes = configs['radial_layer_sizes']
     rmin_u = configs['rmin_u']
     rmax_u = configs['rmax_u']
     rmin_d = configs['rmin_d']
@@ -76,20 +75,20 @@ def create_model(configs):
     body_order = configs['body_order']
     min_radial_center = configs['min_radial_center']
     #species_out_act = configs['species_out_act']
-    thetas_trainable = configs['thetas_trainable']
+    #thetas_trainable = configs['thetas_trainable']
     if include_vdw:
         rc = np.max([rc_rad,rmax_d])
     else:
         rc = rc_rad
 
     model_call = mBP_model
-    print('model_version' in list(configs.keys()))
-    if 'model_version' in list(configs.keys()):
-        model_v = configs['model_version']
-        if model_v == 'linear':
-            model_call = mBP_model_linear
-        elif model_v == 'learnable_des':
-            model_call = mBP_model_learn_3body
+    #print('model_version' in list(configs.keys()))
+    #if 'model_version' in list(configs.keys()):
+    #    model_v = configs['model_version']
+    #    if model_v == 'linear':
+    #        model_call = mBP_model_linear
+    #    elif model_v == 'learnable_des':
+    #        model_call = mBP_model_learn_3body
 
     nspec_embedding = configs['nspec_embedding']
     try:
@@ -124,11 +123,12 @@ def create_model(configs):
                       rmin_u=rmin_u,rmax_u=rmax_u,
                       rmin_d=rmin_d,rmax_d=rmax_d,
                       body_order=body_order,
-                      layer_normalize=configs['layer_normalize'],
-                      thetas_trainable=thetas_trainable,
+                      #layer_normalize=configs['layer_normalize'],
+                      #thetas_trainable=thetas_trainable,
                       species_layer_sizes=species_layer_sizes,
                       species_correlation=configs['species_correlation'],
-                      learn_angular_terms=configs['learn_angular_terms'])
+                      #learn_angular_terms=configs['learn_angular_terms'],
+                      radial_layer_sizes=radial_layer_sizes)
     
     #load the last check points
     
