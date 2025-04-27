@@ -287,18 +287,7 @@ class mBP_model(tf.keras.Model):
                     tf.RaggedTensor.from_value_rowids(species_encoder_extended,
                                                       first_atom_idx).to_tensor()
              
-            if self.include_vdw:
-                C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx)
-                C6_ij = \
-                    tf.RaggedTensor.from_value_rowids(C6_ij,
-                                                      first_atom_idx).to_tensor()
-
-                #nat x Nneigh from C6_extended in 1xNeigh and C6 in nat
-                C6_ij = tf.sqrt(C6_ij)
-                evdw = self.vdw_contribution((all_rij_norm, C6_ij))[0]
-    #            tf.debugging.check_numerics(evdw, message='Total_energy_vdw contains NaN')
-
-
+            
             #since fcut =0 for rij > rc, there is no need for any special treatment
             #species_encoder Nneigh and reshaped to nat x Nneigh x embedding
             #fcuts is nat x Nneigh and reshaped to nat x Nneigh
@@ -496,7 +485,26 @@ class mBP_model(tf.keras.Model):
             #atomic_descriptors /= (self.std_descriptors + 1e-8)
 
             #predict energy and forces
-            atomic_energies = self.atomic_nets(atomic_descriptors)
+            atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
+            if self.include_vdw:
+                # C6 has a shape of nat
+                C6 = tf.nn.relu(atomic_energies[:,1])
+                atomic_energies = atomic_energies[:,0]
+                C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx)
+                C6_ij = \
+                    tf.RaggedTensor.from_value_rowids(C6_ij,
+                                                      first_atom_idx).to_tensor()
+
+                #nat x Nneigh from C6_extended in 1xNeigh and C6 in nat
+                C6_ij = tf.sqrt(C6_ij + 1e-16)
+                evdw = help_fn.vdw_contribution((all_rij_norm, C6_ij,
+                                                 self.rmin_u,
+                                                 self.rmax_u,
+                                                 self.rmin_d,
+                                                 self.rmax_d))[0]
+    #            tf.debugging.check_numerics(evdw, message='Total_energy_vdw contains NaN')
+
+
             total_energy = tf.reduce_sum(atomic_energies)
             
 
@@ -511,6 +519,10 @@ class mBP_model(tf.keras.Model):
         #forces = tf.zeros((nmax_diff+nat,3))   
         
         #return [tf.cast(total_energy, tf.float32), tf.cast(forces, tf.float32), tf.cast(atomic_features, tf.float32)]
+        if self.include_vdw:
+            C6 = tf.pad(C6,[[0,nmax_diff]])
+            return [total_energy, forces, atomic_features,C6]
+
         return [total_energy, forces, atomic_features]
 
     @tf.function
@@ -618,6 +630,13 @@ class mBP_model(tf.keras.Model):
                                      parallel_iterations=self.batch_size)
             #energies, forces, atomic_features = self.func_map(elements)
             return features, self.feature_size
+        if self.include_vdw:
+
+            energies, forces, atomic_features, C6 = tf.map_fn(self.tf_predict_energy_forces, elements, 
+                                     fn_output_signature=[tf.float32, tf.float32, tf.float32,tf.float32],
+                                     parallel_iterations=self.batch_size)
+            #energies, forces, atomic_features = self.func_map(elements)
+            return energies, forces, atomic_features, C6
 
         energies, forces, atomic_features = tf.map_fn(self.tf_predict_energy_forces, elements, 
                                      fn_output_signature=[tf.float32, tf.float32, tf.float32],
@@ -643,13 +662,12 @@ class mBP_model(tf.keras.Model):
         #target_f = tf.cast(target_f, tf.float32)
 
         with tf.GradientTape() as tape:
-            e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
-            # Compute the loss value
-            # (the loss function is configured in `compile()`)
+            if self.include_vdw:
+                e_pred, forces, _,C6 = self(inputs_target[:9], training=True)  # Forward pass
+            else:
+                e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
             ediff = (e_pred - target)
             forces = tf.reshape(forces, [-1, 3*nmax])
-
-            #emse_loss = tf.reduce_mean((ediff/batch_nats)**2)
             emse_loss = tf.reduce_mean((ediff)**2)
 
             fmse_loss = tf.map_fn(help_fn.force_loss, 
@@ -701,6 +719,8 @@ class mBP_model(tf.keras.Model):
             #tf.summary.histogram(f'4. angular terms: lambda 2',lambda2,self._train_counter)
             for idx, spec in enumerate(self.species_identity):
                 tf.summary.histogram(f'3. encoding /{spec}',self.trainable_species_encoder[idx],self._train_counter)
+            if self.include_vdw:
+                tf.summary.histogram(f'4. C6 parameters',C6, self._train_counter)
 
         return {key: metrics[key] for key in metrics.keys()}
 

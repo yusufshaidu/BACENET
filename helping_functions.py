@@ -279,18 +279,19 @@ def switch(r, rmin,rmax):
     return res
 
 def vdw_contribution(x):
-    rmin_u = self.rmin_u
-    rmax_u = self.rmax_u
-    rmin_d = self.rmin_d
-    rmax_d = self.rmax_d
     rij_norm = x[0]
     C6ij = x[1]
+    rmin_u = x[2]
+    rmax_u = x[3]
+    rmin_d = x[4]
+    rmax_d = x[5]
+
 
     rij_norm_inv6  = 1.0 / (rij_norm**6 + 1e-8)
     #rij_norm_inv2 = rij_norm_inv * rij_norm_inv
     #rij_norm_inv6 = rij_norm_inv2 * rij_norm_inv2 * rij_norm_inv2
 
-    energy = -(1 - self.switch(rij_norm, rmin_u, rmax_u)) * self.switch(rij_norm,rmin_d, rmax_d) * rij_norm_inv6
+    energy = -(1 - switch(rij_norm, rmin_u, rmax_u)) * switch(rij_norm,rmin_d, rmax_d) * rij_norm_inv6
     energy = energy * C6ij
     energy = 0.5 * tf.reduce_sum(energy)
     return [energy]

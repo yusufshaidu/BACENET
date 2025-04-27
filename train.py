@@ -181,6 +181,27 @@ def create_model(configs):
                      model_version=model_v,model_dir=model_outdir)
     initial_learning_rate = initial_lr
     lr_schedule = initial_learning_rate
+    if not fixed_lr:
+        '''cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='RMSE_F',
+        factor=decay_rate,
+        patience=decay_step,
+        verbose=1,
+        mode='auto',
+        min_delta=0.0001,
+        cooldown=0,
+        min_lr=min_lr,
+        )
+        #cp_callback.append(cb_ReduceLROnPlateau)
+        '''
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate,
+        decay_steps=decay_step,
+        decay_rate=decay_rate,
+        staircase=True,
+        name='ExponentialDecay')
+
+
 
     #callback_earlystop = tf.keras.callbacks.EarlyStopping(monitor='RMSE_F',
     #                                          patience=decay_step,
@@ -263,19 +284,7 @@ def create_model(configs):
                                                   update_freq='epoch'),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
 
-    if not fixed_lr:
-        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
-        monitor='RMSE_F',
-        factor=decay_rate,
-        patience=decay_step,
-        verbose=1,
-        mode='auto',
-        min_delta=0.0001,
-        cooldown=0,
-        min_lr=min_lr,
-        )
-
-        cp_callback.append(cb_ReduceLROnPlateau)
+    
     backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
     '''
     try:
