@@ -4,11 +4,8 @@ from ase.calculators.calculator import FileIOCalculator,Calculator, all_changes
 from ase.io import write
 #import tensorflow as tf
 #import tensorflow as tf
+from model import mBP_model
 from data_processing import data_preparation, atomic_number
-from model_modified_manybody import mBP_model
-from model_modified_manybody_linear_scaling import mBP_model as mBP_model_linear
-#from model_modified_manybody_ase_atoms import mBP_model as mBP_model_ase
-from model_modified_manybody_learn_3body import mBP_model as mBP_model_learn_3body
 
 import os, sys, yaml,argparse, json
 import numpy as np
@@ -20,7 +17,7 @@ from pathlib import Path
 import os
 
 class wBP_Calculator(Calculator):
-    implemented_properties = ['energy', 'forces','stress']
+    implemented_properties = ['energy', 'forces']
     #implemented_properties = ['energy', 'forces']
 #    ignored_changes = {'pbc'}
 #    discard_results_on_any_change = True
@@ -58,13 +55,6 @@ class wBP_Calculator(Calculator):
             rc = configs['rc_rad']
 
         model_call = mBP_model
-        #print('model_version' in list(configs.keys()))
-        if 'model_version' in list(configs.keys()):
-            model_v = configs['model_version']
-            if model_v == 'linear':
-                model_call = mBP_model_linear
-            elif model_v == 'learnable_des':
-                model_call = mBP_model_learn_3body
         atomic_energy = configs['atomic_energy']
         if len(atomic_energy)==0:
             with open (os.path.join(configs['model_outdir'],'atomic_energy.json')) as df:
@@ -72,25 +62,8 @@ class wBP_Calculator(Calculator):
 
         self.atomic_energy = np.array([atomic_energy[key] for key in configs['species']])
         self.species_identity = np.array([atomic_number(key) for key in configs['species']])
-        self.model = model_call(configs['layer_sizes'],
-                          configs['rc_rad'], self.species_identity, 
-                          1,
-                          configs['activations'],
-                          configs['RsN_rad'],
-                          configs['thetaN'],configs['zeta'],
-                          train_writer=configs['model_outdir'],
-                          fcost=0.0,
-                          nelement=configs['nelement'],
-                          nspec_embedding=configs['nspec_embedding'],
-                          include_vdw=configs['include_vdw'],
-                          rmin_u = configs['rmin_u'],
-                          rmax_u = configs['rmax_u'],
-                          rmin_d = configs['rmin_d'],
-                          rmax_d = configs['rmax_d'],
-                          body_order=body_order,
-                          species_correlation=configs['species_correlation'],
-                          species_layer_sizes=configs['species_layer_sizes'],
-                          radial_layer_sizes = configs['radial_layer_sizes'])
+        configs['batch_size'] = 1
+        self.model = model_call(configs)
 
         ckpts = [os.path.join(configs['model_outdir']+"/models", x.split('.index')[0]) 
                  for x in os.listdir(configs['model_outdir']+"/models") if x.endswith('index')]
@@ -117,7 +90,8 @@ class wBP_Calculator(Calculator):
                                  atomic_energy=self.atomic_energy,
                                  model_version=configs['model_version'],
                                  model_dir=configs['model_outdir'],
-                                 evaluate_test=-1)
+                                 evaluate_test=-1,
+                                 max_workers=1)
 
 #        print(data)
 #        print(model(data))

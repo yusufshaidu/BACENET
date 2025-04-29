@@ -8,25 +8,52 @@ import train
 from pathlib import Path
 
 def create_model(configs):
-
     #Read in model parameters
     #I am parsing yaml files with all the parameters
-
+    #
     _configs = train.default_config()
+
     for key in _configs:
         if key not in configs.keys():
             configs[key] = _configs[key]
+    # Data preparation
+    print('Preparing data...')
+    model_outdir = configs['outdir']
+    if not os.path.exists(model_outdir):
+        os.mkdir(model_outdir)
+    if configs['include_vdw']:
+        rc = np.max([configs['rc_rad'], configs['rmax_d']])
+    else:
+        rc = configs['rc_rad']
+
+    _pbc = configs['pbc']
+    pbc = [True,True,True] if _pbc else [False,False,False]
+
+    with open (os.path.join(model_outdir,'atomic_energy.json')) as df:
+        atomic_energy = json.load(df)
+        atomic_energy = np.array([atomic_energy[key] for key in configs['species']])
+
+    train_data, test_data, species_identity = data_preparation(
+        data_dir=configs['data_dir'],
+        species=configs['species'],
+        data_format=configs['data_format'],
+        energy_key=configs['energy_key'],
+        force_key=configs['force_key'],
+        rc=rc,
+        pbc=configs['pbc'],
+        batch_size=configs['batch_size'],
+        test_fraction=configs['test_fraction'],
+        atomic_energy=atomic_energy,
+        atomic_energy_file=os.path.join(model_outdir,'atomic_energy.json'),
+        model_version=configs['model_version'],
+        model_dir=model_outdir,
+        evaluate_test=1
+        )
+
+    configs['species_identity'] = species_identity
+
 
     #
-    layer_sizes = configs['layer_sizes']
-    species_layer_sizes = configs['species_layer_sizes']
-    zeta = configs['zeta']
-    thetaN = configs['thetaN']
-    Nrad = configs['RsN_rad']
-    #RsN_ang = configs['RsN_ang']
-    rc_rad = configs['rc_rad']
-    #rc_ang = configs['rc_ang']
-    nelement = configs['nelement']
     epoch = configs['epoch']
     try:
         interval = configs['interval']
@@ -34,106 +61,25 @@ def create_model(configs):
         interval = 1
         print('all saved checkpoints will be evaluated')
     #estimate initial parameters
-    #width_ang = RsN_ang * RsN_ang / (rc_ang-0.25)**2
-    #width = RsN_rad * RsN_rad / (rc_rad-0.25)**2
     #trainable linear model
     fcost = configs['fcost']
-    #trainable linear model
-    _pbc = configs['pbc']
-    print(_pbc)
-    if _pbc:
-        pbc = [True,True,True]
-    else:
-        pbc = [False,False,False]
     #activations are basically tanh and linear for now
     activations = configs['activations']
 
-    assert len(activations) == len(layer_sizes),'the number of activations must be same as the number of layer'
+    assert len(activations) == len(configs['layer_sizes']),'the number of activations must be same as the number of layer'
 
-    species = configs['species']
-    batch_size = configs['batch_size']
-    model_outdir = configs['model_outdir']
-    outdir = configs['test_outdir']
-    if not os.path.exists(outdir):
-        os.mkdir(outdir)
-
-    data_dir = configs['data_dir']
-    data_format = configs['data_format']
-    energy_key = configs['energy_key']
-    force_key = configs['force_key']
     test_fraction = configs['test_fraction']
     if test_fraction < 1.0:
         print(f'you are evaluating only on a {test_fraction*100} % of you test dataset')
         
-    atomic_energy = configs['atomic_energy']
-    include_vdw = configs['include_vdw']
-    radial_layer_sizes = configs['radial_layer_sizes']
-    rmin_u = configs['rmin_u']
-    rmax_u = configs['rmax_u']
-    rmin_d = configs['rmin_d']
-    rmax_d = configs['rmax_d']
-    body_order = configs['body_order']
-    min_radial_center = configs['min_radial_center']
-    #species_out_act = configs['species_out_act']
-    #thetas_trainable = configs['thetas_trainable']
-    if include_vdw:
-        rc = np.max([rc_rad,rmax_d])
-    else:
-        rc = rc_rad
-
     model_call = mBP_model
-    #print('model_version' in list(configs.keys()))
-    #if 'model_version' in list(configs.keys()):
-    #    model_v = configs['model_version']
-    #    if model_v == 'linear':
-    #        model_call = mBP_model_linear
-    #    elif model_v == 'learnable_des':
-    #        model_call = mBP_model_learn_3body
-
-    nspec_embedding = configs['nspec_embedding']
     try:
         error_file = configs['error_file']
     except:
         error_file = 'error_file'
 
-    if len(atomic_energy)==0:
-        with open (os.path.join(model_outdir,'atomic_energy.json')) as df:
-            atomic_energy = json.load(df)
-
-    atomic_energy = np.array([atomic_energy[key] for key in species])
-
-    train_data, test_data, species_identity = data_preparation(data_dir, species, data_format,
-                     energy_key, force_key,
-                     rc, pbc, batch_size,
-                     test_fraction=test_fraction,
-                     atomic_energy=atomic_energy,
-                     model_version=model_v, model_dir=model_outdir,
-                     evaluate_test=1)
-
-    model = model_call(layer_sizes,
-                      rc_rad, species_identity, batch_size,
-                      activations,
-                      Nrad,
-                      thetaN,zeta,
-                      train_writer=model_outdir,
-                      fcost=fcost,
-                      nelement=nelement,
-                      nspec_embedding=nspec_embedding,
-                      include_vdw=include_vdw,
-                      rmin_u=rmin_u,rmax_u=rmax_u,
-                      rmin_d=rmin_d,rmax_d=rmax_d,
-                      body_order=body_order,
-                      #layer_normalize=configs['layer_normalize'],
-                      #thetas_trainable=thetas_trainable,
-                      species_layer_sizes=species_layer_sizes,
-                      species_correlation=configs['species_correlation'],
-                      #learn_angular_terms=configs['learn_angular_terms'],
-                      radial_layer_sizes=radial_layer_sizes)
+    model = model_call(configs)
     
-    #load the last check points
-    
-#    ckpts = tf.train.latest_checkpoint(model_outdir+"/models")
-#    ckpts = tf.train.load_checkpoint(model_outdir+"/models")
     ckpts = [os.path.join(model_outdir+"/models", x.split('.index')[0]) for x in os.listdir(model_outdir+"/models") if x.endswith('index')]
     ckpts.sort()
 
@@ -172,7 +118,7 @@ def create_model(configs):
 
         _epoch = ckpts_idx[i]
         if len(ck) > 1:
-            pfile = Path(os.path.join(outdir, f'energy_last_test_{_epoch}.dat'))
+            pfile = Path(os.path.join(configs['test_outdir'], f'energy_last_test_{_epoch}.dat'))
             if int(i) % interval != 0 or pfile.is_file():
                 continue
 
@@ -209,8 +155,8 @@ def create_model(configs):
 
         print(f'Ermse = {rmse*1000:.3f} and Emae = {mae*1000:.3f} | Frmse = {frmse*1000:.3f} and Fmae = {fmae*1000:.3f}')
         #print(f'Forces: the test rmse = {rmse} and mae = {mae}')
-        np.savetxt(os.path.join(outdir, f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
-        np.savetxt(os.path.join(outdir, f'forces_last_test_{_epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
+        np.savetxt(os.path.join(configs['outdir'], f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
+        np.savetxt(os.path.join(configs['outdir'], f'forces_last_test_{_epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
     np.savetxt(error_file, np.array(errors), header='E_rmse E_mae F_rmse F_mae', fmt='%10.3f')
     
 if __name__ == '__main__':

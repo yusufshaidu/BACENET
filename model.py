@@ -25,94 +25,70 @@ import warnings
 
 class mBP_model(tf.keras.Model):
    
-    def __init__(self, layer_sizes, 
-                rcut, species_identity, 
-                batch_size,
-                activations,
-                Nrad,
-                thetaN,zeta,
-                fcost=0.0,
-                ecost=1.0,
-                nelement=128,
-                train_writer=None,
-                l1=0.0,l2=0.0,
-                nspec_embedding=4,
-                include_vdw=False,
-                rmin_u=3.0,
-                rmax_u=5.0,
-                rmin_d=11.0,
-                rmax_d=12.0,
-                body_order=3,
-                features=False,
-                layer_normalize=False,
-                species_layer_sizes=[], #the last layer is eforced to be equal nspec_embedding
-                species_correlation='tensor',
-                radial_layer_sizes = [64,64]
-                 ):
+    def __init__(self, configs):
         
         #allows to use all the base class of tf.keras Model
         super().__init__()
         
         #self.loss_tracker = self.metrics.Mean(name='loss')
+        #network section
+        self.layer_sizes = configs['layer_sizes']
+        self._activations = configs['activations']
+        self._radial_layer_sizes = configs['radial_layer_sizes']
+        self.species_layer_sizes = configs['species_layer_sizes']
 
-        self.layer_sizes = layer_sizes
-        self.rcut = rcut
-        self.species_identity = species_identity # atomic number
-        self.batch_size = batch_size
-        self._activations = activations
-        self._radial_layer_sizes = radial_layer_sizes
-        self.Nrad = Nrad
-        self.thetaN = thetaN
-        self.zeta = int(zeta)
-        self.body_order = body_order
-        self.species_correlation = species_correlation
-        #base_size = self.Nrad * self.thetaN
-        base_size = self.Nrad * (2*self.zeta)
+        #features parameters
+        self.rcut = configs['rc_rad']
+        self.Nrad = int(configs['Nrad'])
+        self.zeta = configs['zeta'] if type(configs['zeta'])==list \
+                else list(range(1,int(configs['zeta'])+1))
+        self.nzeta = len(self.zeta)
+        print(f'we are sampling zeta as: {self.zeta} with count {self.nzeta}')
+        self.body_order = configs['body_order']
+        base_size = self.Nrad * (2*self.nzeta)
         self.feature_size = self.Nrad + base_size
-       
-        self.fcost = float(fcost)
-        self.ecost = float(ecost)
+        if self.body_order == 4:
+            self.feature_size += self.Nrad * (3*self.nzeta)
+        self.species_correlation = configs['species_correlation']
+        self.species_identity = configs['species_identity'] # atomic number
         self.nspecies = len(self.species_identity)
-        self.train_writer = tf.summary.create_file_writer(train_writer+'/train')
-        self.l1 = l1
-        self.l2 = l2
-        self.include_vdw = include_vdw
-        self.rmin_u = rmin_u
-        self.rmax_u = rmax_u
-        self.rmin_d = rmin_d
-        self.rmax_d = rmax_d
-        self.layer_normalize = layer_normalize
-        self.tf_pi = tf.constant(math.pi, dtype=tf.float32)
-        # the number of elements in the periodic table
-        self.nelement = nelement
-        
-        self.species_layer_sizes = species_layer_sizes
-        #if not self.species_layer_sizes:
-        #    self.species_layer_sizes = [self.nspec_embedding]
-        self.nspec_embedding = nspec_embedding
-        if self.species_layer_sizes[-1] != self.nspec_embedding:
-            warnings.warn(f'the species_embedding variable is no longer used')
-            self.nspec_embedding = self.species_layer_sizes[-1]
 
+        self.nspec_embedding = self.species_layer_sizes[-1]
         if self.species_correlation == 'tensor':
             self.spec_size = self.nspec_embedding*self.nspec_embedding
         else:
             self.spec_size = self.nspec_embedding
-
-        if self.body_order == 4:
-            #for k in range(3,self.body_order):
-            self.feature_size += self.Nrad * (3*self.zeta)
         self.feature_size *= self.spec_size
-        self.features = features
-
+                
         species_activations = ['silu' for x in self.species_layer_sizes[:-1]]
         species_activations.append('linear')
 
+        #optimization parameters
+        self.batch_size = configs['batch_size']
+        self.fcost = float(configs['fcost'])
+        self.ecost = float(configs['ecost'])
+        self.train_writer = tf.summary.create_file_writer(configs['outdir']+'/train')
+        self.l1 = float(configs['l1_norm'])
+        self.l2 = float(configs['l2_norm'])
+        self.learn_radial = configs['learn_radial']
+
+
+        #dispersion parameters
+        self.include_vdw = configs['include_vdw']
+        self.rmin_u = configs['rmin_u']
+        self.rmax_u = configs['rmax_u']
+        self.rmin_d = configs['rmin_d']
+        self.rmax_d = configs['rmax_d']
+        # the number of elements in the periodic table
+        self.nelement = configs['nelement']
+        
+        #if not self.species_layer_sizes:
+        #    self.species_layer_sizes = [self.nspec_embedding]
+        self.features = False
         if not self.features:     
             self.atomic_nets = Networks(self.feature_size, 
                     self.layer_sizes, self._activations, 
-                    l1=self.l1, l2=self.l2, 
-                    normalize=self.layer_normalize)
+                    l1=self.l1, l2=self.l2) 
 
        # create a species embedding network with 1 hidden layer Nembedding x Nspecies
         self.species_nets = Networks(self.nelement, 
@@ -120,9 +96,11 @@ class mBP_model(tf.keras.Model):
                 species_activations, prefix='species_encoder')
         #self.species_nets = Networks(self.nelement, [self.nspec_embedding], ['tanh'], prefix='species_encoder')
 
-        self._radial_layer_sizes.append(self.Nrad*(1+self.zeta))
-        radial_activations = ['silu' for s in self._radial_layer_sizes]
-        self.radial_funct_net = Networks(self.Nrad, self._radial_layer_sizes, 
+        #radial network
+        if self.learn_radial:
+            self._radial_layer_sizes.append(self.Nrad*(1+self.nzeta))
+            radial_activations = ['silu' for s in self._radial_layer_sizes]
+            self.radial_funct_net = Networks(self.Nrad, self._radial_layer_sizes, 
                                          radial_activations, 
                                          l1=self.l1, l2=self.l2,
                                  bias_initializer='zeros',
@@ -177,19 +155,19 @@ class mBP_model(tf.keras.Model):
     def compute_cosine_terms(self, n):
         lxlylz = tf.map_fn(help_fn.find_three_non_negative_integers, n,
                                    fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32),
-                                   parallel_iterations=self.zeta)
+                                   parallel_iterations=self.nzeta)
         lxlylz = tf.reshape(lxlylz, [-1,3])
         lxlylz_sum = tf.reduce_sum(lxlylz, axis=-1) # the value of n for each lx, ly and lz
 
         #compute normalizations n! / lx!/ly!/lz!
         nfact = tf.map_fn(help_fn.factorial, lxlylz_sum,
                           fn_output_signature=tf.float32,
-                          parallel_iterations=self.zeta) #computed for all n_lxlylz
+                          parallel_iterations=self.nzeta) #computed for all n_lxlylz
 
         #lx!ly!lz!
         fact_lxlylz = tf.reshape(tf.map_fn(help_fn.factorial, tf.reshape(lxlylz, [-1]),
                                            fn_output_signature=tf.float32,
-                                           parallel_iterations=self.zeta), [-1,3],
+                                           parallel_iterations=self.nzeta), [-1,3],
                                  )
         fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
         return lxlylz, lxlylz_sum, nfact, fact_lxlylz
@@ -219,7 +197,7 @@ class mBP_model(tf.keras.Model):
         '''
         rc = tf.constant(self.rcut,dtype=tf.float32)
         Nrad = tf.constant(self.Nrad, dtype=tf.int32)
-        thetasN = tf.constant(self.thetaN, dtype=tf.int32)
+        #thetasN = tf.constant(self.thetaN, dtype=tf.int32)
 
         nat = x[3]
         nmax_diff = x[2]
@@ -239,10 +217,10 @@ class mBP_model(tf.keras.Model):
         shift_vector = tf.cast(tf.reshape(x[8][:num_neigh*3], 
                                           [num_neigh,3]), tf.float32)
         
-        tstep = self.tf_pi / tf.cast(thetasN, tf.float32)
-        theta_s = tf.range(1,thetasN+1, dtype=tf.float32) * tstep
-        cos_theta_s = tf.cos(theta_s)
-        sin_theta_s = tf.sin(theta_s)
+        #tstep = self.tf_pi / tf.cast(thetasN, tf.float32)
+        #theta_s = tf.range(1,thetasN+1, dtype=tf.float32) * tstep
+        #cos_theta_s = tf.cos(theta_s)
+        #sin_theta_s = tf.sin(theta_s)
 
 
         with tf.GradientTape() as g:
@@ -294,17 +272,20 @@ class mBP_model(tf.keras.Model):
             #_Nneigh = tf.shape(all_rij_norm)
             #neigh = _Nneigh[1]
             kn_rad = tf.ones(Nrad,dtype=tf.float32)
-            bf_radial = tf.reshape(
-                    help_fn.bessel_function(all_rij_norm,
+            bf_radial = help_fn.bessel_function(all_rij_norm,
                                             rc,kn_rad,
-                                            Nrad), [-1, Nrad]) #
-            bf_radial = self.radial_funct_net(bf_radial)
-            bf_radial = tf.reshape(bf_radial, [nat, -1, Nrad, self.zeta+1])
-            radial_ij = tf.einsum('ijkl,ijm->ijkml',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembeddingxzeta (l=zeta)
-            radial_ij = tf.reshape(radial_ij, [nat,-1,Nrad*self.spec_size,self.zeta+1])
-            #we are currently avaraging over all the radial components alomg zeta: we should probably take on the first component
+                                            Nrad) #
+            if self.learn_radial:
+                bf_radial = tf.reshape(bf_radial, [-1,Nrad])
+                bf_radial = self.radial_funct_net(bf_radial)
+                bf_radial = tf.reshape(bf_radial, [nat, -1, Nrad, self.nzeta+1])
+                radial_ij = tf.einsum('ijkl,ijm->ijkml',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembeddingxzeta (l=zeta)
+                radial_ij = tf.reshape(radial_ij, [nat,-1,Nrad*self.spec_size,self.nzeta+1])
+                atomic_descriptors = tf.reduce_sum(radial_ij[:,:,:,0], axis=1) # sum over neigh
+            else:
+                radial_ij = tf.einsum('ijk,ijm->ijkm',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembeddingxzeta (l=zeta)
+                atomic_descriptors = tf.reduce_sum(radial_ij, axis=1) # sum over neigh
             #atomic_descriptors = tf.reduce_sum(radial_ij, axis=(1,-1)) / tf.cast(self.zeta+1, tf.float32) # sum over neigh and zeta
-            atomic_descriptors = tf.reduce_sum(radial_ij[:,:,:,0], axis=1) # sum over neigh
             #atomic_descriptors = tf.reshape(atomic_descriptors, 
             #                                [nat, Nrad*self.spec_size]
             #                                )
@@ -318,12 +299,15 @@ class mBP_model(tf.keras.Model):
             #    tf.reduce_sum(radial_ij[:,:,:,:,0], axis=1),
             #    2)] 
             @tf.function
-            def _angular_terms(z):
+            def _angular_terms(x):
                 '''
                 compute vectorize three-body computation
 
                 '''
                 #expansion index
+                z = tf.cast(x[0][0], tf.int32)
+                r_idx = tf.cast(x[1][0], tf.int32)
+
                 n = tf.range(z+1, dtype=tf.int32)
                 lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.compute_cosine_terms(n)
                 
@@ -331,7 +315,7 @@ class mBP_model(tf.keras.Model):
                 '''
                 lxlylz = tf.map_fn(help_fn.find_three_non_negative_integers, n,
                                    fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32),
-                                   parallel_iterations=self.zeta)
+                                   parallel_iterations=self.nzeta)
                 lxlylz = tf.reshape(lxlylz, [-1,3])
                 lxlylz_sum = tf.reduce_sum(lxlylz, axis=-1) # the value of n for each lx, ly and lz
 
@@ -340,7 +324,7 @@ class mBP_model(tf.keras.Model):
                 n2 = tf.range(0,2*z+1,2, dtype=tf.int32)
                 lxlylz2 = tf.map_fn(help_fn.find_three_non_negative_integers, n,
                                    fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32),
-                                   parallel_iterations=self.zeta)
+                                   parallel_iterations=self.nzeta)
                 lxlylz2 = tf.reshape(lxlylz2, [-1,3])
                 lxlylz2_sum = tf.reduce_sum(lxlylz2, axis=-1) # the value of n for each lx, ly and lz
                 '''
@@ -348,80 +332,41 @@ class mBP_model(tf.keras.Model):
                 #this need to be regularized to avoid undefined derivatives
                 rij_lxlylz = tf.pow(rij_unit[:,:,None,:] + 1e-16, tf.cast(lxlylz, tf.float32)[None,None,:,:])
                 g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1) #nat x neigh x n_lxlylz
-                ###################
-                #include (1 - cos(theta) * cos(theta)) # This enables probing of theta around pi/2
-                #n2 = tf.range(0,2*z+1,2, dtype=tf.int32)
-                #lxlylz2, lxlylz2_sum, nfact2, fact_lxlylz2 = self.compute_cosine_terms(n2)
-                #rij_lxlylz2 = tf.pow(rij_unit[:,:,None,:] + 1e-16, tf.cast(lxlylz2, tf.float32)[None,None,:,:])
-                #g_ij_lxlylz2 = tf.reduce_prod(rij_lxlylz2, axis=-1) #nat x neigh x n_lxlylz
-
-                '''
-                #compute normalizations n! / lx!/ly!/lz!
-                nfact = tf.map_fn(help_fn.factorial, lxlylz_sum,
-                                  fn_output_signature=tf.float32,
-                                  parallel_iterations=self.zeta) #computed for all n_lxlylz
-
-                #lx!ly!lz!
-                fact_lxlylz = tf.reshape(tf.map_fn(help_fn.factorial, tf.reshape(lxlylz, [-1]),
-                                                   fn_output_signature=tf.float32,
-                                                   parallel_iterations=self.zeta), [-1,3],
-                                         )
-                fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
-                '''
 
                 nfact_lxlylz = nfact / fact_lxlylz # n_lxlylz
-                #nfact_lxlylz2 = nfact2 / fact_lxlylz2 # n_lxlylz
 
                 #compute zeta! / (zeta-n)! / n!
 
                 zeta_fact = help_fn.factorial(z)
                 zeta_fact_n = tf.map_fn(help_fn.factorial, z-lxlylz_sum,
                                         fn_output_signature=tf.float32,
-                                        parallel_iterations=self.zeta
+                                        parallel_iterations=self.nzeta
                                         )
-                # for the Cos^2 term, we need to recompute compute zCn for each n from n=lxlylz2_sum since it has many more that lxlylz_sum
-                # We compute zC(2n/2)
                 z_float = tf.cast(z, tf.float32)
-                #lxlylz2_sum_by2 = tf.cast(lxlylz2_sum/2, tf.int32)
-                #zeta_fact_n2 = tf.map_fn(help_fn.factorial, z-lxlylz2_sum_by2,
-                #                        fn_output_signature=tf.float32,
-                #                        parallel_iterations=self.zeta
-                #                        )
 
                 zetan_fact = zeta_fact / (zeta_fact_n * nfact)
-                #zetan_fact2 = zeta_fact / (zeta_fact_n2 * nfact2)
 
                 fact_norm = nfact_lxlylz * zetan_fact
-                #fact_norm2 = nfact_lxlylz2 * zetan_fact2
 
 
                 g_ij_lxlylz = tf.einsum('ijk,k->ijk',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
-                #for the cos^2 terms
-                #g_ij_lxlylz2 = tf.einsum('ijk,k->ijk',g_ij_lxlylz2, fact_norm2) # shape=(nat, neigh, n_lxlylz)
 
-                #g_ij_lxlylz = tf.reshape(g_ij_lxlylz, [nat,neigh,-1])
-
-                g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,z], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
-                #g_ilxlylz2 = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,z], g_ij_lxlylz2) #shape=(nat,nrad*species,n_lxlylz)
+                if self.learn_radial:
+                    g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,r_idx], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
+                else:
+                    g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij, g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
                 g2_ilxlylz = g_ilxlylz * g_ilxlylz
                 gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
 
                 _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
-                #_lambda_minus2 = tf.pow(-1.0, tf.cast(lxlylz2_sum,tf.float32))
                 gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #nat,nrad*nspec
-                #the factor 2 is a normalization to scale the functions to stay around 2 similar to the original terms
-                #gi3_2n = 2.0 * tf.einsum('ijk,k->ij',g_ilxlylz2 * g_ilxlylz2 ,_lambda_minus2) #nat,nrad*nspec
 
                 norm = tf.pow(2.0 , 1. - z_float)
                 #j==k term should be removed, lambda=-1 contribute nothing
                 #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
                 #G_jk = 2 * R_j_equal_k 
                 if self.body_order == 4:
-                    #TODO: Implement the 1-cos^2theta for four body interactions
                     # here we have four possible combination of lambda [(1,1), (1,-1), (-1,1), (-1,-1)] but only three of them are unique
-                    #_lambda_plus = (1.0)**tf.cast(lxlylz_sum,tf.float32)
-                    #_lambda_ll_plus_minus = tf.einsum('i,j->ij',_lambda_minus, _lambda_plus) 
-                    #_lambda_ll_minus_minus = tf.einsum('i,j->ij',_lambda_minus, _lambda_minus) 
                     #contribution after summing over k and l
                     g_ilxlylz_lambda_minus = tf.einsum('ijk,k->ijk',g_ilxlylz,_lambda_minus)
                      
@@ -432,7 +377,11 @@ class mBP_model(tf.keras.Model):
                     
                     g_ij_ll = tf.einsum('ijm,ijn->ijmn',g_ij_lxlylz, g_ij_lxlylz)
                     #contribution after summing over j
-                    g_i_ll_j = tf.einsum('ijk,ijmn->ikmn',radial_ij[:,:,:,z], g_ij_ll) #nat nrad*nspec,n_lxlylz,n_lzlylz
+                    if self.learn_radial:
+                        g_i_ll_j = tf.einsum('ijk,ijmn->ikmn',radial_ij[:,:,:,r_idx], g_ij_ll) #nat nrad*nspec,n_lxlylz,n_lzlylz
+                    else:
+                        g_i_ll_j = tf.einsum('ijk,ijmn->ikmn',radial_ij, g_ij_ll) #nat nrad*nspec,n_lxlylz,n_lzlylz
+
                     #sum over the last two axes
                     # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
                     norm *= norm
@@ -440,17 +389,30 @@ class mBP_model(tf.keras.Model):
                     gi4pp = tf.reduce_sum(g_i_ll_kl_pp * g_i_ll_j, axis=(2,3)) * norm #nat,nrad*nspec
                     gi4np = tf.reduce_sum(g_i_ll_kl_np * g_i_ll_j, axis=(2,3)) * norm
                     gi4nn = tf.reduce_sum(g_i_ll_kl_nn * g_i_ll_j, axis=(2,3)) * norm
-                    #gi4np = tf.einsum('ijklm, lm->ijk',g_i_ll_kl * g_i_ll_j, _lambda_ll_plus_minus) * norm * norm * 0.5
-                    #gi4nn = tf.einsum('ijklm, lm->ijk',g_i_ll_kl * g_i_ll_j, _lambda_ll_minus_minus) * norm * norm * 0.5
                     return [gi3p * norm, gi3n * norm, gi4pp, gi4np, gi4nn]
 
 
 
                 return [gi3p * norm, gi3n * norm]
+            #batch the radial term to have zeta components first
+
+            #radial_terms = tf.cast([radial_ij[:,:,:,i] 
+            #                        for i in range(1,self.nzeta+1)], tf.float32)
+            
             if self.body_order == 3:
-                Gp,Gn = tf.map_fn(_angular_terms, tf.range(1,self.zeta+1),
-                              fn_output_signature=[tf.float32,tf.float32],
-                              parallel_iterations=self.zeta)
+                #Because the computation cost for element of the loop is very different,
+                #it might be faster to use a standard lood rather than vectorization.
+
+                Gp = []
+                Gn = []
+                for i, z in enumerate(self.zeta):
+                    gp,gn = _angular_terms(([z], [i+1]))
+                    Gp.append(gp)
+                    Gn.append(gn)
+
+                #Gp,Gn = tf.map_fn(_angular_terms, (tf.constant(self.zeta)[:,None], tf.range(1,self.nzeta+1)[:,None]),
+                #              fn_output_signature=[tf.float32,tf.float32],
+                #              parallel_iterations=self.nzeta)
                 Gi3 = tf.concat([Gp,Gn], 0) 
                 #this is equivalent to 
                 #for lambda in [-1,1]; for z in range(1, zeta+1)
@@ -461,10 +423,24 @@ class mBP_model(tf.keras.Model):
                 atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_3], axis=1)
 
             elif self.body_order == 4:
-                G3p,G3n,G4pp,G4np,G4nn = tf.map_fn(_angular_terms, tf.range(1,self.zeta+1),
-                              fn_output_signature=[tf.float32,tf.float32,tf.float32,tf.float32,tf.float32],
-                              parallel_iterations=self.zeta)
-            
+                #G3p,G3n,G4pp,G4np,G4nn = tf.map_fn(_angular_terms, (tf.constant(self.zeta)[:,None], tf.range(1,self.nzeta+1)[:,None]),
+                #              fn_output_signature=[tf.float32,tf.float32,tf.float32,tf.float32,tf.float32],
+                #              parallel_iterations=self.nzeta)
+                #Because the computation cost for element of the loop is very different,
+                #it might be faster to use a standard lood rather than vectorization.
+                G3p = []
+                G3n = []
+                G4pp = []
+                G4np = []
+                G4nn = []
+                for i, z in enumerate(self.zeta):
+                    gp,gn,g4pp,g4np,g4nn = _angular_terms(([z], [i+1]))
+                    G3p.append(gp)
+                    G3n.append(gn)
+                    G4pp.append(g4pp)
+                    G4np.append(g4np)
+                    G4nn.append(g4nn)
+
                 Gi4 = tf.concat([G3p,G3n,G4pp,G4np,G4nn], 0) 
                 #this is equivalent to 
                 #for lambda in [-1,1]; for z in range(1, zeta+1)
@@ -485,11 +461,11 @@ class mBP_model(tf.keras.Model):
             #atomic_descriptors /= (self.std_descriptors + 1e-8)
 
             #predict energy and forces
-            atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
+            _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
             if self.include_vdw:
                 # C6 has a shape of nat
-                C6 = tf.nn.relu(atomic_energies[:,1])
-                atomic_energies = atomic_energies[:,0]
+                C6 = tf.nn.relu(_atomic_energies[:,1])
+                atomic_energies = _atomic_energies[:,0]
                 C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx)
                 C6_ij = \
                     tf.RaggedTensor.from_value_rowids(C6_ij,
@@ -502,8 +478,10 @@ class mBP_model(tf.keras.Model):
                                                  self.rmax_u,
                                                  self.rmin_d,
                                                  self.rmax_d))[0]
+            else:
+                atomic_energies = _atomic_energies
     #            tf.debugging.check_numerics(evdw, message='Total_energy_vdw contains NaN')
-
+         
 
             total_energy = tf.reduce_sum(atomic_energies)
             
@@ -542,6 +520,7 @@ class mBP_model(tf.keras.Model):
         # because the number of data point may not be exactly divisible by the self.batch_size.
 
         # todo: we need to pass nmax if we use padded tensors
+       #[0-positions,1-species_encoder,2-C6,3-cells,4-natoms,5-i,6-j,7-S,8-neigh, 9-energy,10-forces]
         batch_nats = tf.cast(tf.reshape(inputs[4], [-1]), tf.int32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
         batch_nmax = tf.tile([nmax], [batch_size])
@@ -607,6 +586,7 @@ class mBP_model(tf.keras.Model):
         # Final reshape
         batch_species_encoder = tf.reshape(batch_species_encoder, [batch_size, nmax * self.nspec_embedding])
 
+       #[0-positions,1-species_encoder,2-C6,3-cells,4-natoms,5-i,6-j,7-S,8-neigh, 9-energy,10-forces]
 
         C6 = inputs[2]
         cells = tf.reshape(inputs[3], [-1, 9])

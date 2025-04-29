@@ -277,7 +277,7 @@ def switch(r, rmin,rmax):
     res = tf.where(x<=0., 1.0, -6.0*x**5+15.0*x**4-10.0*x**3+1.0)
     res = tf.where(x>1.0, 0.0, res)
     return res
-
+@tf.function
 def vdw_contribution(x):
     rij_norm = x[0]
     C6ij = x[1]
@@ -287,7 +287,7 @@ def vdw_contribution(x):
     rmax_d = x[5]
 
 
-    rij_norm_inv6  = 1.0 / (rij_norm**6 + 1e-8)
+    rij_norm_inv6  = 1.0 / (tf.pow(rij_norm, 6) + 1e-12)
     #rij_norm_inv2 = rij_norm_inv * rij_norm_inv
     #rij_norm_inv6 = rij_norm_inv2 * rij_norm_inv2 * rij_norm_inv2
 
