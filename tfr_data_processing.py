@@ -23,9 +23,10 @@ def example(data,nmax, nneigh_max):
     nat = int(data[4])
     ndiff = (nmax - nat)
     positions = np.pad(data[0].flatten(), pad_width=(0,ndiff*3)).tolist()
-    forces = np.pad(data[10].flatten(), pad_width=(0,ndiff*3)).tolist()
+    forces = np.pad(data[11].flatten(), pad_width=(0,ndiff*3)).tolist()
     atomic_number = np.pad(data[1].flatten(), pad_width=(0,ndiff)).tolist()
     C6 = np.pad(data[2].flatten(), pad_width=(0,ndiff)).tolist()
+    gaussian_width = np.pad(data[9].flatten(), pad_width=(0,ndiff)).tolist()
     nneigh = int(data[8])
     ndiff = nneigh_max - nneigh
     i_idx = np.pad(data[5].flatten(), pad_width=(0,ndiff)).tolist()
@@ -40,7 +41,8 @@ def example(data,nmax, nneigh_max):
                 'j':_int64_feature(j_idx),
                 'S':_int64_feature(S_idx),
                 'nneigh':_int64_feature([data[8]]),
-                'energy':_float_feature([data[9]]),
+                'gaussian_width':_float_feature(gaussian_width),
+                'energy':_float_feature([data[10]]),
                 'forces':_float_feature(forces)}
     return tf.train.Example(features=tf.train.Features(feature=features))
 
@@ -85,6 +87,7 @@ def _parse_function(example_proto):
                 'j':tf.io.FixedLenSequenceFeature([],tf.int64,allow_missing=True),
                 'S':tf.io.FixedLenSequenceFeature([],tf.int64,allow_missing=True),
                 'nneigh':tf.io.FixedLenFeature([], tf.int64),
+                'gaussian_width':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
                 'energy':tf.io.FixedLenFeature([], tf.float32),
                 'forces':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True)}
     return tf.io.parse_single_example(example_proto, feature_description)
