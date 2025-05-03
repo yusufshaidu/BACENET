@@ -384,11 +384,12 @@ class mBP_model(tf.keras.Model):
 
                     #sum over the last two axes
                     # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
-                    norm *= norm
-                    norm *= 0.5
-                    gi4pp = tf.reduce_sum(g_i_ll_kl_pp * g_i_ll_j, axis=(2,3)) * norm #nat,nrad*nspec
-                    gi4np = tf.reduce_sum(g_i_ll_kl_np * g_i_ll_j, axis=(2,3)) * norm
-                    gi4nn = tf.reduce_sum(g_i_ll_kl_nn * g_i_ll_j, axis=(2,3)) * norm
+                    _norm = norm
+                    _norm *= norm
+                    _norm *= 0.5
+                    gi4pp = tf.reduce_sum(g_i_ll_kl_pp * g_i_ll_j, axis=(2,3)) * _norm #nat,nrad*nspec
+                    gi4np = tf.reduce_sum(g_i_ll_kl_np * g_i_ll_j, axis=(2,3)) * _norm
+                    gi4nn = tf.reduce_sum(g_i_ll_kl_nn * g_i_ll_j, axis=(2,3)) * _norm
                     return [gi3p * norm, gi3n * norm, gi4pp, gi4np, gi4nn]
 
 

@@ -110,6 +110,15 @@ def compute_n_comb_lxlylz(n):
         #[[0, 0, 4],[0, 1, 3],[0, 2, 2],[0, 3, 1],[0, 4, 0],[1, 0, 3],[1, 1, 2],[1, 2, 1],
         #[1, 3, 0],[2, 0, 2],[2, 1, 1],[2, 2, 0],[3, 0, 1],[3, 1, 0],[4, 0, 0]]
         return [1.0,4.0,6.0,4.0,1.0,4.0,12.0,12.0,4.0,6.0,12.0,6.0,4.0,4.0,1.0]
+def compute_number_of_terms_lxlylz(n):
+    number_of_triplets = {0: 1, 1: 3, 2: 6, 3: 10, 4: 15, 
+                          5: 21, 6: 28, 7: 36, 8: 45, 9: 55, 
+                          10: 66, 11: 78, 12: 91, 13: 105, 14: 120, 
+                          15: 136, 16: 153, 17: 171, 18: 190, 19: 210, 20: 231}
+    total = 0
+    for i in range(n+1):
+        total += number_of_triplets[i]
+    return total
 
 @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
 def find_three_non_negative_integers(n):

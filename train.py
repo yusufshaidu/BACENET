@@ -15,6 +15,8 @@ from tensorflow.keras.optimizers import Adam
 import argparse
 from data_processing import data_preparation
 from model import mBP_model
+from model_lcomp import mBP_model as mBP_model_lcomp
+
 def default_config():
     return {
         'layer_sizes': None,
@@ -230,9 +232,13 @@ def create_model(configs):
         )
 
     configs['species_identity'] = species_identity
-
+    
     with strategy.scope():
-        model = mBP_model(configs)
+
+        if configs['model_version'] == 'linear_lcomp':
+            model = mBP_model_lcomp(configs)
+        else:
+            model = mBP_model(configs)
 
         model.compile(optimizer=optimizer, 
                   loss="mse", 
