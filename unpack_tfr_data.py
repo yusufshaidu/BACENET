@@ -12,6 +12,7 @@ def unpack_data(data):
     result.append(data['j'])
     result.append(data['S'])
     result.append(data['nneigh'])
+    result.append(data['gaussian_width'])
     result.append(data['energy'])
     result.append(data['forces'])
     return result

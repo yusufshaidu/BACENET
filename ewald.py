@@ -1,77 +1,42 @@
 import tensorflow as tf
 import numpy as np
-from mendeleev import element
-from scipy.special import erf
 import scipy.constants as constants
 
 pi = tf.constant(np.pi)
+CONV_FACT = 1e10 * constants.e / (4 * pi * constants.epsilon_0)
 
-
-class ewald():
+class ewald:
     '''
     A pyth on class to implement ewasld sum with gaussian charge distribution
     '''
-    def __init__(self, positions, cell, gaussian_width,
-                 acc_factor, species,
-                 Gmax, rmax, eta):
+    def __init__(self, positions, cell, n_atoms, gaussian_width,
+                 accuracy, gmax,pbc): 
         '''
            positions: atomic positions in Angstrom
            cell: cell dimension
            gaussian_width: gaussian width for each atom
            Gmax: maximum G for the the reciprocal summation
            rmax: cutoff distance for the short range term
-           eta: width of the uniform gaussians
         '''
-        self._cell = cell 
-        self._positions = positions
-        self.covalent_radii = [element(x).covalent_radius * 0.001 for x in species_sequence]
-        #convert to gaussian width and to angstrom unit
-        #multiply by  rt(2) because the gaussian is defined with
-        self._gaussian_width = gaussian_width if gaussian_width else np.asarray(self.covalent_radii) 
-        self.n_atoms = len(positions)
-        self.sqrt_pi = math.sqrt(pi)
+        self._cell = tf.convert_to_tensor(cell, dtype=tf.float32)
+        self._n_atoms = tf.cast(n_atoms, tf.int32)
+        self._positions = tf.convert_to_tensor(positions, dtype=tf.float32)
+        self._accuracy = accuracy
+        self._gaussian_width = tf.convert_to_tensor(gaussian_width,dtype=tf.float32) # this should be learnable, maybe!
+        self._sqrt_pi = tf.sqrt(pi)
+
         self.volume = tf.reduce_sum(cell[0] * tf.linalg.cross(cell[1], cell[2]))
-        self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
-
-        # If a is not provided, use a default value
-        if eta is None:
-            eta = (self.n_atoms * w / (self.volume**2)) ** (1 / 6) * self.sqrt_pi
-
-        # If the real space cutoff, reciprocal space cutoff and eta have not been
-        # specified, use the accuracy and the weighting w to determine default
-        # similarly as in https://doi.org/10.1080/08927022.2013.840898
-        if rmax is None and Gmax is None:
-            f = np.sqrt(-np.log(acc_factor))
-            rmax = f / eta
-            Gmax = 2 * eta * f
-        elif rmax is None or Gmax is None:
-            raise ValueError(
-                "If you do not want to use the default cutoffs, please provide "
-                "both cutoffs rmax and Gmax."
-            )
-
-        self.eta = eta
-        self.eta_squared = self.eta**2
-        self.Gmax = Gmax
-        self.rmax = rmax
 
         #structure properties
-        self.lattice_length = np.linalg.norm(cell,axis=1)
-        _PBC = PBC if PBC else False
+        self.cell_length = tf.linalg.norm(cell,axis=1)
+        self.pbc = pbc if pbc else False
 
-        if _PBC:
-            struct_prop = compute_structure_props(lattice_vectors)
-            volume, recip_lattice_vectors = struct_prop
-
-            gamma_max = 1/(np.sqrt(2.0)*np.min(gaussian_width))
-            _kmax = kmax if kmax else 2.* gamma_max * np.sqrt(-np.log(acc_factor))
-
-
-
-
-    def real_space_term(gaussian_width,
-                          coords,
-                          compute_forces=False):
+        if self.pbc:
+            self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
+            gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(gaussian_width))
+            self._gmax = gmax if gmax else 2.* gamma_max * tf.sqrt(-tf.log(accuracy))
+        
+    def real_space_term(self):
         '''
         calculates the self interaction contribution to the electrostatic energy
         Args:
@@ -86,32 +51,24 @@ class ewald():
         # q1, q2 are in electronic charge unit
         #1e10 comes from angstrom
         #CONV_FACT = 1e10 * e_charge / (4 * np.pi * epsilon_0)
-        CONV_FACT = 1e10 * constants.e / (4 * np.pi * constants.epsilon_0)
 
-        Natoms = len(gaussian_width)
-
-        coords = np.asarray(coords)
-        if Natoms == 1:
-            rij = np.zeros(3)
-            gamma_all = 1./np.sqrt(2.)* 1./gaussian_width
-        else:
-            rij = coords[:,np.newaxis] - coords
-            gamma_all = 1.0/np.sqrt(gaussian_width[:,np.newaxis]**2 + np.asarray(gaussian_width)**2)
+        rij = self._positions[:,None,:] - self._positions[None,:,:]
+        gamma_ij = tf.sqrt(self._gaussian_width[:,None]**2 + self._gaussian_width**2)
 
         #compute the norm of all distances
-        rij_norm = np.linalg.norm(rij, axis=-1)
+        rij_norm = tf.linalg.norm(rij + 1e-12, axis=-1)
         #trick to set the i==j element of the matrix to zero
-        rij_norm_inv = np.nan_to_num(1 / rij_norm, posinf=0, neginf=0)
+        rij_norm_inv = 1 / (rij_norm+1e-12)
 
         #erf_term = np.where(rij_norm>0, erf(gamma_all*rij_norm)/rij_norm, 0)
-        erf_term = erf(gamma_all*rij_norm) * rij_norm_inv
-        V = erf_term.copy()
+        erf_term = tf.erf(rij_norm/gamma_ij/tf.sqrt(2.0)) * rij_norm_inv
+        Vij = erf_term.copy()
 
-        V *=CONV_FACT
-        E_diag = CONV_FACT * 2 / np.sqrt(np.pi) * 1/(np.sqrt(2.0)*gaussian_width)
-        diag_indexes = np.diag_indices(Natoms)
-        V[diag_indexes] = E_diag
+        
+        E_diag = 1. / self._sqrt_pi * 1.0/(self._gaussian_width)
+        Vij = tf.linalg.set_diag(Vij, E_diag) * CONV_FACT
 
+        ''' 
         if compute_forces:
             #rij_tmp = np.where(rij_norm>0, 1/rij_norm**2,0)
 
@@ -122,5 +79,72 @@ class ewald():
             F_norm = np.tile(F_norm[:,:,np.newaxis], 3)
             force = rij * F_norm
             return [V, CONV_FACT*force, rij, gamma_all]
-        return [V, rij, gamma_all]
+        '''
+        return Vij
 
+
+    def recip_space_term(self): 
+        '''
+        calculates the interaction contribution to the electrostatic energy
+        '''
+
+
+        #compute the norm of all distances
+        # the force on k due to atoms j is
+        # rk-ri
+        rij = self._positions[:,None,:] - self._positions[None,:,:]
+        gamma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width**2
+
+        # refine kmax
+        #gamma_max = tf.reduce_max(gamma_ij)
+        #err = np.exp(-self.kmax**2/(4*gamma_max**2))
+       # while err > acc_factor:
+       #     kmax += 0.1
+       #     err = np.exp(-kmax**2/(4*gamma_max**
+
+       #         2))
+       # kmax *= 1.00001
+
+        # Build integer index grid for k-vectors
+        # Estimate index ranges for each dimension
+        b1_norm, b2_norm, b3_norm = tf.linalg.norm(self.reciprocal_cell, axis=-1)
+        nmax1 = tf.cast(tf.math.floor(self._gmax / b1_norm), tf.int32)
+        nmax2 = tf.cast(tf.math.floor(self._gmax/ b2_norm), tf.int32)
+        nmax3 = tf.cast(tf.math.floor(self._gmax / b3_norm), tf.int32)
+        
+        n1 = tf.range(-nmax1, nmax1 + 1, dtype=tf.int32)
+        n2 = tf.range(-nmax2, nmax2 + 1, dtype=tf.int32)
+        n3 = tf.range(-nmax3, nmax3 + 1, dtype=tf.int32)
+
+        # Meshgrid of indices
+        n1g, n2g, n3g = tf.meshgrid(n1, n2, n3, indexing='ij')
+        replicas = tf.stack([tf.reshape(n1g, [-1]),
+                            tf.reshape(n2g, [-1]),
+                            tf.reshape(n3g, [-1])], axis=1)  # [M,3]
+        replicas = tf.cast(replicas, tf.float32)
+        g_all = tf.matmul(replicas, self.reciprocal_cell)  # [M,3] = n · recip_cell (each row n * recip_cell)
+        # Mask: exclude (0,0,0) and enforce |k|<=kmax
+        g_norm = tf.linalg.norm(g_all, axis=1)
+        nonzero = ~tf.reduce_all(tf.equal(replicas, 0), axis=1)
+        mask = tf.logical_and(g_norm <= self._gmax, nonzero)
+        g_vecs = tf.boolean_mask(g_all, mask)  # [K,3]
+        g_sq = g_norm*g_norm  # [K]
+
+        # Prepare factors for summation
+        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
+        # shape [K, N]
+        g2_gamma2 = tf.einsum('ij,l->ijl', gamma_ij2/2.0, g_sq) # [N,N,K]
+        exp_ij = tf.exp(-g2_gamma2)
+        exp_ij_by_g_sq = exp_ij / g_sq[None,None,:]
+
+        # The cosine term: shape [N,N,K]
+        cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
+
+        # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/2)/g_sq[k] * cos_term[k]
+        # Compute exp outer product and divide by k^2
+        Vij = tf.reduce_sum(exp_ij_by_g_sq * cos_term, axis=-1)  # [N,N]
+
+        # Multiply by prefactor (charges, 4π/V, Coulomb constant e²/4πε0 in eV·Å units) so that E = 1/2 \sum_ij Vij
+        Vij *= CONV_FACT * (4.* np.pi / volume)
+        
+        return Vij 

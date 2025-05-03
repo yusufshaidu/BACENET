@@ -92,7 +92,6 @@ def convert_json2ASE_atoms(atomic_energy, file, C6_spec, species):
 
 
     C6 = np.asarray([C6_spec[ss] for ss in symbols])
-
     unitL = data['unit_of_length']
 
     if unitL in ['bohr', 'BOHR', 'Bohr']:
@@ -213,6 +212,10 @@ def _process_file(args):
         atoms = file
         atoms, energy, forces = process_ase(atoms, evaluate_test)
 
+    covalent_radii = [element(x).covalent_radius for x in species_sequence]
+    #convert to gaussian width and to angstrom unit 
+    gaussian_width = np.asarray(covalent_radii) * 0.01
+    
     # Ensure box
     if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
         atoms.set_cell(np.eye(3) * 100)
@@ -225,6 +228,7 @@ def _process_file(args):
         'cells':      atoms.cell,
         'atomic_number':   atoms.get_array('encoder'),
         'C6':        atoms.get_array('C6'),
+        'gaussian_width': gaussian_width,
         'energy':    energy,
         'forces':    forces,
         'natoms':    atoms.get_global_number_of_atoms(),

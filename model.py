@@ -17,6 +17,7 @@ import ase
 from ase.neighborlist import neighbor_list
 from ase import Atoms
 from unpack_tfr_data import unpack_data
+from ewald import ewald
 import warnings
 
 
@@ -172,6 +173,29 @@ class mBP_model(tf.keras.Model):
         fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
         return lxlylz, lxlylz_sum, nfact, fact_lxlylz
 
+    @tf.function
+    def compute_charges(self, Vij, E1, E2):
+        '''comput charges through the solution of linear system'''
+        
+        Aij = Vij + tf.set_diag(tf.zeros_like(Vij), E2)
+        Aij = tf.pad(Aij, [[0,1],[0,1]], constant_values = 1.0)
+        new_values = tf.constant([0.0], dtype=tf.float32)
+        shape = tf.shape(Aij)
+        index = tf.reshape(shape - 1, (1, 2))
+        Aij = tf.tensor_scatter_nd_update(Aij, index, new_value)
+        charges = tf.linalg.solve(Aij, E1[:,None])
+        return tf.reshape(charges, [-1])
+
+    @tf.function
+    def compute_coulumb_energy(self,charges, E1, E2, Vij):
+        '''compute the coulumb energy
+        Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2
+        '''
+        q = charges
+        q2 = q * q
+        q_outer = q[:,None] * q[None,:]
+        E = E1 * q + 0.5 * (E2 * q2 + tf.reduce_sum(Vij * q_outer, axis=-1))
+        return tf.reduce_sum(E)
 
     @tf.function(
                 input_signature=[(
@@ -216,12 +240,8 @@ class mBP_model(tf.keras.Model):
         second_atom_idx = x[7][:num_neigh]
         shift_vector = tf.cast(tf.reshape(x[8][:num_neigh*3], 
                                           [num_neigh,3]), tf.float32)
-        
-        #tstep = self.tf_pi / tf.cast(thetasN, tf.float32)
-        #theta_s = tf.range(1,thetasN+1, dtype=tf.float32) * tstep
-        #cos_theta_s = tf.cos(theta_s)
-        #sin_theta_s = tf.sin(theta_s)
-
+        if self.coulumb:
+            gaussian_width = x[10][:nat]
 
         with tf.GradientTape() as g:
             #'''
@@ -463,7 +483,7 @@ class mBP_model(tf.keras.Model):
 
             #predict energy and forces
             _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
-            if self.include_vdw:
+            if self.include_vdw and not self.coulumb:
                 # C6 has a shape of nat
                 C6 = tf.nn.relu(_atomic_energies[:,1])
                 atomic_energies = _atomic_energies[:,0]
@@ -479,6 +499,46 @@ class mBP_model(tf.keras.Model):
                                                  self.rmax_u,
                                                  self.rmin_d,
                                                  self.rmax_d))[0]
+            elif self.include_vdw and self.coulumb:
+                E1 = _atomic_energies[:,1]
+                E2 = tf.nn.relu(_atomic_energies[:,2])
+                C6 = tf.nn.relu(_atomic_energies[:,3])
+
+                _ewald = ewald(positions, cell, nat, 
+                        gaussian_width,self.accuracy, None, self.pbc)
+                if self.pbc:
+                    Vij = _ewald.recip_space_term()
+                else:
+                    Vij = _ewald.real_space_term()
+                charges = self.compute_charges(Vij, E1, E2)
+                ecoul = self.compute_coulumb_energy(charges, E1, E2, Vij)
+                atomic_energies = _atomic_energies[:,0]
+                C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx)
+                C6_ij = \
+                    tf.RaggedTensor.from_value_rowids(C6_ij,
+                                                      first_atom_idx).to_tensor()
+
+                #nat x Nneigh from C6_extended in 1xNeigh and C6 in nat
+                C6_ij = tf.sqrt(C6_ij + 1e-16)
+                evdw = help_fn.vdw_contribution((all_rij_norm, C6_ij,
+                                                 self.rmin_u,
+                                                 self.rmax_u,
+                                                 self.rmin_d,
+                                                 self.rmax_d))[0]
+
+            elif self.coulumb and not self.include_vdw:
+                E1 = _atomic_energies[:,1]
+                E2 = tf.nn.relu(_atomic_energies[:,2])
+                _ewald = ewald(positions, cell, nat,
+                        gaussian_width,self.accuracy, None, self.pbc)
+                if self.pbc:
+                    Vij = _ewald.recip_space_term()
+                else:
+                    Vij = _ewald.real_space_term()
+                charges = self.compute_charges(Vij, E1, E2)
+                ecoul = self.compute_coulumb_energy(charges, E1, E2, Vij)
+                atomic_energies = _atomic_energies[:,0]
+
             else:
                 atomic_energies = _atomic_energies
     #            tf.debugging.check_numerics(evdw, message='Total_energy_vdw contains NaN')
@@ -489,6 +549,8 @@ class mBP_model(tf.keras.Model):
 
             if self.include_vdw:
                 total_energy += evdw
+            if self.coulumb:
+                total_energy += ecoul
 
             #forces = g.jacobian(total_energy, positions)
         forces = g.gradient(total_energy, positions)
@@ -498,10 +560,16 @@ class mBP_model(tf.keras.Model):
         #forces = tf.zeros((nmax_diff+nat,3))   
         
         #return [tf.cast(total_energy, tf.float32), tf.cast(forces, tf.float32), tf.cast(atomic_features, tf.float32)]
-        if self.include_vdw:
+        if self.include_vdw and not self.coulumb:
             C6 = tf.pad(C6,[[0,nmax_diff]])
             return [total_energy, forces, atomic_features,C6]
-
+        elif self.include_vdw and self.coulumb
+            C6 = tf.pad(C6,[[0,nmax_diff]])
+            charges = tf.pad(charges,[[0,nmax_diff]])
+            return [total_energy, forces, atomic_features,C6, charges]
+        elif self.coulumb and not self.include_vdw
+            charges = tf.pad(charges,[[0,nmax_diff]])
+            return [total_energy, forces, atomic_features,charges]
         return [total_energy, forces, atomic_features]
 
     @tf.function
@@ -600,8 +668,14 @@ class mBP_model(tf.keras.Model):
         second_atom_idx = tf.cast(inputs[6], tf.int32)
         #shift_vectors = tf.reshape(tf.cast(inputs[7][:,:neigh_max*3],tf.int32), (-1, neigh_max*3))
         shift_vectors = tf.cast(inputs[7][:,:neigh_max*3],tf.int32)
+        if self.coulumb:
+            gaussian_width = tf.cast(x[10], tf.float32)
+            elements = (batch_species_encoder,positions, 
+                    nmax_diff, batch_nats,cells,C6, 
+                first_atom_idx,second_atom_idx,shift_vectors,num_neigh, gaussian_width)
 
-        elements = (batch_species_encoder,positions, 
+        else:
+            elements = (batch_species_encoder,positions, 
                     nmax_diff, batch_nats,cells,C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
 
@@ -611,13 +685,24 @@ class mBP_model(tf.keras.Model):
                                      parallel_iterations=self.batch_size)
             #energies, forces, atomic_features = self.func_map(elements)
             return features, self.feature_size
-        if self.include_vdw:
-
+        if self.include_vdw and not self.coulumb:
             energies, forces, atomic_features, C6 = tf.map_fn(self.tf_predict_energy_forces, elements, 
                                      fn_output_signature=[tf.float32, tf.float32, tf.float32,tf.float32],
                                      parallel_iterations=self.batch_size)
             #energies, forces, atomic_features = self.func_map(elements)
             return energies, forces, atomic_features, C6
+        if self.include_vdw and self.coulumb:
+            energies, forces, atomic_features, C6, charges = tf.map_fn(self.tf_predict_energy_forces, elements, 
+                                     fn_output_signature=[tf.float32, tf.float32, tf.float32,tf.float32,tf.float32],
+                                     parallel_iterations=self.batch_size)
+            #energies, forces, atomic_features = self.func_map(elements)
+            return energies, forces, atomic_features, C6, charges
+        if (not self.include_vdw) and self.coulumb:
+            energies, forces, atomic_features, charges = tf.map_fn(self.tf_predict_energy_forces, elements, 
+                                     fn_output_signature=[tf.float32, tf.float32, tf.float32,tf.float32],
+                                     parallel_iterations=self.batch_size)
+            #energies, forces, atomic_features = self.func_map(elements)
+            return energies, forces, atomic_features, charges
 
         energies, forces, atomic_features = tf.map_fn(self.tf_predict_energy_forces, elements, 
                                      fn_output_signature=[tf.float32, tf.float32, tf.float32],
@@ -634,19 +719,30 @@ class mBP_model(tf.keras.Model):
 
         #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
         #target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
-        target = tf.reshape(inputs_target[9], [-1])
         batch_nats = tf.cast(tf.reshape(inputs_target[4], [-1]), tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
         
-        target_f = inputs_target[10][:,:nmax*3]
         #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
         #target_f = tf.cast(target_f, tf.float32)
 
         with tf.GradientTape() as tape:
-            if self.include_vdw:
+            if self.include_vdw and (not self.coulumb) :
                 e_pred, forces, _,C6 = self(inputs_target[:9], training=True)  # Forward pass
+                target = tf.reshape(inputs_target[9], [-1])
+                target_f = inputs_target[10][:,:nmax*3]
+            elif (self.include_vdw) and (self.coulumb) :
+                e_pred, forces, _,C6, charges = self(inputs_target[:10], training=True)  # Forward pass
+                target = tf.reshape(inputs_target[10], [-1])
+                target_f = inputs_target[11][:,:nmax*3]
+            elif (not self.include_vdw) and (self.coulumb) :
+                e_pred, forces, _,charges = self(inputs_target[:10], training=True)  # Forward pass
+                target = tf.reshape(inputs_target[10], [-1])
+                target_f = inputs_target[11][:,:nmax*3]
             else:
                 e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
+                target = tf.reshape(inputs_target[9], [-1])
+                target_f = inputs_target[10][:,:nmax*3]
+
             ediff = (e_pred - target)
             forces = tf.reshape(forces, [-1, 3*nmax])
             emse_loss = tf.reduce_mean((ediff)**2)
@@ -713,14 +809,30 @@ class mBP_model(tf.keras.Model):
         #inputs = inputs_target[:9]
 
         #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
-        target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
+        if self.include_vdw and (not self.coulumb) :
+            e_pred, forces, _,C6 = self(inputs_target[:9], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[9], [-1])
+            target_f = inputs_target[10][:,:nmax*3]
+        elif (self.include_vdw) and (self.coulumb) :
+            e_pred, forces, _,C6, charges = self(inputs_target[:10], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[10], [-1])
+            target_f = inputs_target[11][:,:nmax*3]
+        elif (not self.include_vdw) and (self.coulumb) :
+            e_pred, forces, _,charges = self(inputs_target[:10], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[10], [-1])
+            target_f = inputs_target[11][:,:nmax*3]
+        else:
+            e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[9], [-1])
+            target_f = inputs_target[10][:,:nmax*3]
+        #target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
         batch_nats = tf.cast(tf.reshape(inputs_target[4], [-1]), tf.float32)
 
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
 
-        target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
+        #target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
 
-        e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
+        #e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
         forces = tf.reshape(forces, [-1, nmax*3])
         #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
@@ -764,11 +876,27 @@ class mBP_model(tf.keras.Model):
 
         #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
 
-        target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
+       # target = tf.cast(tf.reshape(inputs_target[9], [-1]), tf.float32)
         batch_nats = tf.cast(tf.reshape(inputs_target[4], [-1]), tf.float32)
         nmax = tf.cast(tf.reduce_max(batch_nats), tf.int32)
-        target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
-        e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
+       # target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
+        if self.include_vdw and (not self.coulumb) :
+            e_pred, forces, _,C6 = self(inputs_target[:9], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[9], [-1])
+            target_f = inputs_target[10][:,:nmax*3]
+        elif (self.include_vdw) and (self.coulumb) :
+            e_pred, forces, _,C6, charges = self(inputs_target[:10], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[10], [-1])
+            target_f = inputs_target[11][:,:nmax*3]
+        elif (not self.include_vdw) and (self.coulumb) :
+            e_pred, forces, _,charges = self(inputs_target[:10], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[10], [-1])
+            target_f = inputs_target[11][:,:nmax*3]
+        else:
+            e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
+            target = tf.reshape(inputs_target[9], [-1])
+            target_f = inputs_target[10][:,:nmax*3]
+#        e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
         forces = tf.reshape(forces, [-1, nmax*3])
         target_f = tf.cast(target_f, tf.float32)
 
@@ -792,5 +920,4 @@ class mBP_model(tf.keras.Model):
         metrics.update({'RMSE': rmse})
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
-
         return [target, e_pred, metrics, tf.reshape(target_f, [-1, nmax, 3]),tf.reshape(forces, [-1, nmax, 3]), batch_nats]
