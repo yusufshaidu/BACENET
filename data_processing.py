@@ -201,7 +201,7 @@ def _process_file(args):
     """
     Worker function: loads one file, computes all the arrays, returns a dict.
     """
-    file, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test = args
+    file, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii = args
 
     # 1) Load ASE Atoms object & compute energy/forces
     if data_format == 'panna_json':
@@ -212,9 +212,7 @@ def _process_file(args):
         atoms = file
         atoms, energy, forces = process_ase(atoms, evaluate_test)
 
-    covalent_radii = [element(x).covalent_radius for x in species_sequence]
-    #convert to gaussian width and to angstrom unit 
-    gaussian_width = np.asarray(covalent_radii) * 0.01
+    gaussian_width = np.array([covalent_radii[x] for x in atoms.get_chemical_symbols()])
     
     # Ensure box
     if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
@@ -244,8 +242,9 @@ def load_structure_data_parallel(files, data_format, species, atomic_energy,
     """
     Parallel version of load_structure_data.
     """
+    covalent_radii = {x:element(x).covalent_radius*0.01 for x in species}
     args_iter = (
-        (f, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test)
+        (f, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii)
         for f in files
     )
 

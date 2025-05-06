@@ -130,15 +130,25 @@ def create_model(configs):
 
         #print(weights)
 
-        e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
+        if ['coulumb']:
+
+            e_ref, e_pred, metrics, force_ref, force_pred,nat,_charges = model.predict(test_data)
+            charges = []
+        else:
+            e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
+
         _f_ref = []
         _f_pred = []
         fmaes = []
         frmses = []
+        idx = []
         for i, j in enumerate(nat):
             j = tf.cast(j, tf.int32)
             _f_ref = np.append(_f_ref, force_ref[i][:j])
             _f_pred = np.append(_f_pred, force_pred[i][:j])
+            if ['coulumb']:
+                charges = np.append(charges, _charges[i][:j])
+            idx = np.append(idx, np.arange(1,j+1).tolist())
             diff = force_ref[i][:j] - force_pred[i][:j]
             fmaes.append(tf.reduce_mean(tf.abs(diff)))
             frmses.append(tf.sqrt(tf.reduce_mean(tf.square(diff))))
@@ -156,7 +166,8 @@ def create_model(configs):
         print(f'Ermse = {rmse*1000:.3f} and Emae = {mae*1000:.3f} | Frmse = {frmse*1000:.3f} and Fmae = {fmae*1000:.3f}')
         #print(f'Forces: the test rmse = {rmse} and mae = {mae}')
         np.savetxt(os.path.join(configs['outdir'], f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
-        np.savetxt(os.path.join(configs['outdir'], f'forces_last_test_{_epoch}.dat'), np.stack([force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
+        np.savetxt(os.path.join(configs['outdir'], f'forces_last_test_{_epoch}.dat'), np.stack([idx,force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
+        np.savetxt(os.path.join(configs['outdir'], f'charges_{_epoch}.dat'), np.stack([idx, charges]).T)
     np.savetxt(error_file, np.array(errors), header='E_rmse E_mae F_rmse F_mae', fmt='%10.3f')
     
 if __name__ == '__main__':

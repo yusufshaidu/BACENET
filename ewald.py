@@ -61,8 +61,8 @@ class ewald:
         rij_norm_inv = 1 / (rij_norm+1e-12)
 
         #erf_term = np.where(rij_norm>0, erf(gamma_all*rij_norm)/rij_norm, 0)
-        erf_term = tf.erf(rij_norm/gamma_ij/tf.sqrt(2.0)) * rij_norm_inv
-        Vij = erf_term.copy()
+        erf_term = tf.math.erf(rij_norm/gamma_ij/tf.sqrt(2.0)) * rij_norm_inv
+        Vij = tf.identity(erf_term)
 
         
         E_diag = 1. / self._sqrt_pi * 1.0/(self._gaussian_width)

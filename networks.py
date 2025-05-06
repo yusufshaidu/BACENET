@@ -26,16 +26,17 @@ def Networks(input_size, layer_sizes,
                                         bias_initializer=bias_initializer,
                                         kernel_regularizer=regularizers.L1L2(l1=l1,l2=l2),
                                         bias_regularizer=regularizers.L1L2(l1=l1,l2=l2),
-                                        activity_regularizer=None,
+                                        activity_regularizer=regularizers.L1L2(l1=l1,l2=l2),
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
                                         dtype=mixed_precision.set_global_policy('float32'),
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activation}'
                                         ))
-#        model.add(tf.keras.layers.BatchNormalization())
-        if normalize:
+        if normalize and i == 0:
+#            model.add(tf.keras.layers.BatchNormalization())
             model.add(tf.keras.layers.LayerNormalization())
+            #model.add(tf.keras.layers.Attention())
         i += 1
 
     if activations[-1] == 'linear':
@@ -44,7 +45,7 @@ def Networks(input_size, layer_sizes,
                                         bias_initializer=bias_initializer,
                                         kernel_regularizer=regularizers.L1L2(l1=l1,l2=l2),
                                         bias_regularizer=regularizers.L1L2(l1=l1,l2=l2),
-                                        activity_regularizer=None,
+                                        activity_regularizer=regularizers.L1L2(l1=l1,l2=l2),
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
@@ -61,7 +62,7 @@ def Networks(input_size, layer_sizes,
                                         bias_initializer=bias_initializer,
                                         kernel_regularizer=regularizers.L1L2(l1=l1,l2=l2),
                                         bias_regularizer=regularizers.L1L2(l1=l1,l2=l2),
-                                        activity_regularizer=None,
+                                        activity_regularizer=regularizers.L1L2(l1=l1,l2=l2),
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,

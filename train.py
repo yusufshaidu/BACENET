@@ -15,7 +15,6 @@ from tensorflow.keras.optimizers import Adam
 import argparse
 from data_processing import data_preparation
 from model import mBP_model
-from model_lcomp import mBP_model as mBP_model_lcomp
 
 def default_config():
     return {
@@ -64,8 +63,38 @@ def default_config():
         'radial_layer_sizes': [64, 64],
         'learn_radial': True,
         'activations': None,
+        'coulumb': False,
+        'accuracy': 1e-6,
+        'total_charge': 0.0,
+        'features': False,
+        'normalize': False
     }
+def get_compiled_model(configs,optimizer):
 
+    model = mBP_model(configs)
+    model.compile(optimizer=optimizer,
+                  loss="mse",
+                  metrics=["MAE", 'loss'])
+    return model
+#This is an example from tensorflow
+#TODO
+def make_or_restore_model(model_outdir,callbacks):
+    # Either restore the latest model, or create a fresh one
+    # if there is no checkpoint available.
+    #checkpoints = [model_outdir + "/model/" + name for name in os.listdir(checkpoint_dir)]
+    if os.path.exists(model_outdir+"/tmp_backup"):
+        print("Restoring from checkpoints using BackupAndRestore")
+        backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", 
+                                                          delete_checkpoint=False)
+        callbacks.append(backupandrestore)
+    #This needs the entire model to be saved instead of only the weights
+    #if checkpoints:
+    #    latest_checkpoint = max(checkpoints, key=os.path.getctime)
+    #    print("Restoring from", latest_checkpoint)
+        #return tf.keras.models.load_model(latest_checkpoint)
+        return callbacks
+    print("Creating a new model")
+    return callbacks
 def create_model(configs):
 
 
@@ -138,12 +167,16 @@ def create_model(configs):
              name='adam')
 
     #save checkpoints
-    checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}.ckpt"
+    checkpoint_dir = model_outdir+"/models"
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
+   
+    checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.ckpt"
 
-    checkpoint_dir = os.path.dirname(checkpoint_path)
+    #checkpoint_dir = os.path.dirname(checkpoint_path)
 
     # Create a callback that saves the model's weights
-    cp_callback = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
+    callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                      save_weights_only=True,
                                                      verbose=1,
                                                     save_freq=configs['save_freq']),
@@ -168,8 +201,8 @@ def create_model(configs):
               swa_lr2=configs['swa_lr2'],
               swa_freq=5,
               verbose=1)
-        cp_callback.append(swa)
-    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
+        callbacks.append(swa)
+#    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
 
     assert len(configs['activations']) == len(configs['layer_sizes']),'the number of activations must be same as the number of layer'
     if configs['activations'][-1] != 'linear':
@@ -232,35 +265,27 @@ def create_model(configs):
         )
 
     configs['species_identity'] = species_identity
-    
+    if os.path.exists(model_outdir+"/tmp_backup"):
+        print("Restoring from")
+        backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
+                                                          delete_checkpoint=False)
+        callbacks.append(backupandrestore)
+
     with strategy.scope():
-
-        if configs['model_version'] == 'linear_lcomp':
-            model = mBP_model_lcomp(configs)
-        else:
-            model = mBP_model(configs)
-
-        model.compile(optimizer=optimizer, 
-                  loss="mse", 
-                  metrics=["MAE", 'loss'])
+#        model = make_or_restore_model(checkpoint_dir, callbacks)
+        model = get_compiled_model(configs,optimizer)
+        #model = mBP_model(configs)
+        #model.compile(optimizer=optimizer, 
+        #          loss="mse", 
+        #          metrics=["MAE", 'loss'])
 
     model.save_weights(checkpoint_path.format(epoch=0))
-    try:
-        model.fit(train_data,
+    model.fit(train_data,
              epochs=configs['num_epochs'],
              batch_size=global_batch_size,
              validation_data=test_data,
              validation_freq=10,
-             callbacks=[cp_callback,backupandrestore])
-    except:
-#      pass
-
-        model.fit(train_data,
-              epochs=configs['num_epochs'],
-               batch_size=configs['batch_size'],
-             validation_data=test_data,
-             validation_freq=10,
-             callbacks=[cp_callback])
+             callbacks=callbacks)
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='create ML model')
