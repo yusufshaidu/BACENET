@@ -73,28 +73,22 @@ def get_compiled_model(configs,optimizer):
 
     model = mBP_model(configs)
     model.compile(optimizer=optimizer,
-                  loss="mse",
-                  metrics=["MAE", 'loss'])
+                  #loss="mse",
+                  metrics=["MAE"])
     return model
 #This is an example from tensorflow
 #TODO
-def make_or_restore_model(model_outdir,callbacks):
+def make_or_restore_model(model_outdir,configs,optimizer):
     # Either restore the latest model, or create a fresh one
     # if there is no checkpoint available.
-    #checkpoints = [model_outdir + "/model/" + name for name in os.listdir(checkpoint_dir)]
-    if os.path.exists(model_outdir+"/tmp_backup"):
-        print("Restoring from checkpoints using BackupAndRestore")
-        backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", 
-                                                          delete_checkpoint=False)
-        callbacks.append(backupandrestore)
-    #This needs the entire model to be saved instead of only the weights
-    #if checkpoints:
-    #    latest_checkpoint = max(checkpoints, key=os.path.getctime)
-    #    print("Restoring from", latest_checkpoint)
-        #return tf.keras.models.load_model(latest_checkpoint)
-        return callbacks
+    checkpoint_dir = model_outdir + "/models/"
+    checkpoints = [checkpoint_dir + name for name in os.listdir(checkpoint_dir)]
+    if checkpoints:
+        latest_checkpoint = max(checkpoints, key=os.path.getctime)
+        print("Restoring from", latest_checkpoint)
+        return tf.keras.models.load_model(latest_checkpoint,custom_objects=None)
     print("Creating a new model")
-    return callbacks
+    return get_compiled_model(configs,optimizer)
 def create_model(configs):
 
 
@@ -177,7 +171,7 @@ def create_model(configs):
 
     # Create a callback that saves the model's weights
     callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
-                                                     save_weights_only=True,
+                                                     save_weights_only=False,
                                                      verbose=1,
                                                     save_freq=configs['save_freq']),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
@@ -266,26 +260,37 @@ def create_model(configs):
 
     configs['species_identity'] = species_identity
     if os.path.exists(model_outdir+"/tmp_backup"):
-        print("Restoring from")
-        backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
+        print("Restoring from checkpoint {model_outdir+'/tmp_backup'}")
+    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
                                                           delete_checkpoint=False)
-        callbacks.append(backupandrestore)
+    #    callbacks.append(backupandrestore)
 
     with strategy.scope():
-#        model = make_or_restore_model(checkpoint_dir, callbacks)
+        #model = make_or_restore_model(model_outdir,configs,optimizer)
         model = get_compiled_model(configs,optimizer)
         #model = mBP_model(configs)
         #model.compile(optimizer=optimizer, 
         #          loss="mse", 
         #          metrics=["MAE", 'loss'])
 
-    model.save_weights(checkpoint_path.format(epoch=0))
+#    model.save_weights(checkpoint_path.format(epoch=0))
+    try:
+        model.fit(train_data,
+             epochs=configs['num_epochs'],
+             batch_size=global_batch_size,
+             validation_data=test_data,
+             validation_freq=10,
+             callbacks=[callbacks, backupandrestore])
+    except:
+        pass
+
     model.fit(train_data,
              epochs=configs['num_epochs'],
              batch_size=global_batch_size,
              validation_data=test_data,
              validation_freq=10,
              callbacks=callbacks)
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='create ML model')
