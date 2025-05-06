@@ -171,7 +171,7 @@ def create_model(configs):
 
     # Create a callback that saves the model's weights
     callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
-                                                     save_weights_only=False,
+                                                     save_weights_only=True,
                                                      verbose=1,
                                                     save_freq=configs['save_freq']),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
