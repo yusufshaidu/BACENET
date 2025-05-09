@@ -5,19 +5,15 @@ import mendeleev
 from mendeleev import element
 import math 
 import itertools, os
-from tensorflow.keras import backend as K
-from tensorflow.keras import regularizers
 #from tensorflow.keras import mixed_precision
 #mixed_precision.set_global_policy('mixed_float16')
 from networks import Networks
 import helping_functions as help_fn
 
 from functools import partial
-import ase
-from ase.neighborlist import neighbor_list
-from ase import Atoms
 from unpack_tfr_data import unpack_data
 from ewald import ewald
+
 import warnings
 
 
@@ -314,7 +310,6 @@ class mBP_model(tf.keras.Model):
             radial_ij = tf.einsum('ijkl,ijm->ijkml',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembeddingxzeta (l=zeta)
             radial_ij = tf.reshape(radial_ij, [nat,-1,Nrad*self.spec_size,self.number_radial_components])
             atomic_descriptors = tf.reduce_sum(radial_ij[:,:,:,0], axis=1) # sum over neigh
-            #atomic_descriptors = tf.reduce_sum(radial_ij, axis=(1,-1)) / tf.cast(self.zeta+1, tf.float32) # sum over neigh and zeta
             #atomic_descriptors = tf.reshape(atomic_descriptors, 
             #                                [nat, Nrad*self.spec_size]
             #                                )
@@ -328,19 +323,18 @@ class mBP_model(tf.keras.Model):
             #    tf.reduce_sum(radial_ij[:,:,:,:,0], axis=1),
             #    2)] 
             @tf.function
-            def _angular_terms(x):
+            def _angular_terms(z):
                 '''
                 compute vectorize three-body computation
 
                 '''
                 #expansion index
-                z = x[0][0]
-                r_idx = x[1][0]
+                #z = x[0][0]
+                #r_idx = x[1][0]
 
                 n = tf.range(z+1, dtype=tf.int32)
                 lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.compute_cosine_terms(n)
                 
-                #include (1 - cos(theta) * cos(theta)) # This enables probing of theta around pi/2
                 '''
                 lxlylz = tf.map_fn(help_fn.find_three_non_negative_integers, n,
                                    fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32),
@@ -371,7 +365,6 @@ class mBP_model(tf.keras.Model):
                                         fn_output_signature=tf.float32,
                                         parallel_iterations=self.nzeta
                                         )
-                z_float = tf.cast(z, tf.float32)
 
                 zetan_fact = zeta_fact / (zeta_fact_n * nfact)
 
@@ -379,7 +372,9 @@ class mBP_model(tf.keras.Model):
 
 
                 g_ij_lxlylz = tf.einsum('ijk,k->ijk',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
-
+                return g_ij_lxlylz, lxlylz_sum
+                '''
+            ############################################
                 g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,r_idx], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
                 g2_ilxlylz = g_ilxlylz * g_ilxlylz
                 gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
@@ -420,8 +415,10 @@ class mBP_model(tf.keras.Model):
                     gi4np = tf.reduce_sum(g_i_ll_kl_np * g_i_ll_j, axis=(2,3)) * _norm
                     gi4nn = tf.reduce_sum(g_i_ll_kl_nn * g_i_ll_j, axis=(2,3)) * _norm
                     return [gi3p * norm, gi3n * norm, gi4pp, gi4np, gi4nn]
-
-                return [gi3p * norm, gi3n * norm]
+     
+                return [gi3p * norm, gi3n * norm, g_ij_lxlylz]
+                '''
+            #########################################
             #batch  the radial term to have zeta components first
 
             #radial_terms = tf.cast([radial_ij[:,:,:,i] 
@@ -431,16 +428,28 @@ class mBP_model(tf.keras.Model):
                 #Because the computation cost for element of the loop is very different,
                 #it might be faster to use a standard lood rather than vectorization.
 
-                #Gp = []
-                #Gn = []
-                #for i, z in enumerate(self.zeta):
-                #    gp,gn,gp05,gn05 = _angular_terms(([z], [i+1]))
-                #    Gp.append(gp)
-                #    Gn.append(gn)
-                elements = (tf.constant(self.zeta, dtype=tf.int32)[:,None], tf.range(1,self.nzeta+1)[:,None])
-                Gp,Gn = tf.map_fn(_angular_terms, elements,
-                              fn_output_signature=[tf.float32,tf.float32],
-                              parallel_iterations=self.nzeta)
+                Gp = []
+                Gn = []
+                g_ij_lxlylz_all = {}
+                for i, z in enumerate(self.zeta):
+                    g_ij_lxlylz, lxlylz_sum = _angular_terms(z)
+                    #save this for 4body interaction
+                    g_ij_lxlylz_all[z] = g_ij_lxlylz
+                    g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,i+1], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
+                    g2_ilxlylz = g_ilxlylz * g_ilxlylz
+                    z_float = tf.cast(z, tf.float32)
+                    norm = tf.pow(2.0 , 1. - z_float)
+                    gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1) * norm
+                    _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
+                    gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) * norm #nat,nrad*nspec
+
+                    Gp.append(gi3p)
+                    Gn.append(gi3n)
+                    
+                #elements = (tf.constant(self.zeta, dtype=tf.int32)[:,None], tf.range(1,self.nzeta+1)[:,None])
+                #Gp,Gn = tf.map_fn(_angular_terms, elements,
+                #              fn_output_signature=[tf.float32,tf.float32],
+                #              parallel_iterations=self.nzeta)
                 Gi3 = tf.concat([Gp,Gn], 0) 
                 #this is equivalent to 
                 #for lambda in [-1,1]; for z in range(1, zeta+1)
@@ -498,8 +507,12 @@ class mBP_model(tf.keras.Model):
             atomic_features = tf.reshape(atomic_descriptors, [-1])
             if self.features:
                 return atomic_features
-            #atomic_descriptors -= self.mean_descriptors
-            #atomic_descriptors /= (self.std_descriptors + 1e-8)
+            #compute the mean as std for each component of the descriptor in this configuration
+            mean_descriptors = tf.math.reduce_mean(atomic_descriptors, axis=0)
+            std_descriptors = tf.math.reduce_std(atomic_descriptors, axis=0)
+
+            atomic_descriptors -= mean_descriptors
+            atomic_descriptors /= (std_descriptors + 1e-8)
 
             #predict energy and forces
             _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
