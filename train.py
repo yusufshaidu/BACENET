@@ -57,7 +57,7 @@ def default_config():
         'min_lr': 1e-5,
         'swa_lr': 1e-4,
         'swa_lr2': 1e-3,
-        'clip_value': 1e9,
+        'clip_value': None,
         'species_layer_sizes': [],
         'species_correlation': 'dot',
         'radial_layer_sizes': [64, 64],
@@ -73,7 +73,7 @@ def get_compiled_model(configs,optimizer):
 
     model = mBP_model(configs)
     model.compile(optimizer=optimizer,
-                  #loss="mse",
+                  loss="mse",
                   metrics=["MAE"])
     return model
 #This is an example from tensorflow
@@ -104,17 +104,19 @@ def create_model(configs):
     if not os.path.exists(model_outdir):
         os.mkdir(model_outdir)
 
+    #lr_schedule = configs['initial_lr']
     # Learning rate schedule
     if not configs['fixed_lr']:
-        '''cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
-        monitor='RMSE_F',
-        factor=decay_rate,
-        patience=decay_step,
+        '''
+        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='RMSE',# energy rmse 
+        factor=configs['decay_rate'],
+        patience=configs['decay_step'],
         verbose=1,
         mode='auto',
         min_delta=0.0001,
         cooldown=0,
-        min_lr=min_lr,
+        min_lr=configs['min_lr'],
         )
         #cp_callback.append(cb_ReduceLROnPlateau)
         '''
@@ -154,7 +156,7 @@ def create_model(configs):
         optimizer = tf.keras.optimizers.Adam(
              learning_rate=lr_schedule,
              use_ema=False,
-             weight_decay=1e-8, 
+             weight_decay=0.001, 
              clipnorm=None,
              clipvalue=configs['clip_value'],
              amsgrad=False,
@@ -177,6 +179,9 @@ def create_model(configs):
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
                                                   update_freq='epoch'),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
+    #if not configs['fixed_lr']:
+    #    callbacks.append(cb_ReduceLROnPlateau)
+
 
     if configs['start_swa'] > -1:
         try:
@@ -260,7 +265,7 @@ def create_model(configs):
 
     configs['species_identity'] = species_identity
     if os.path.exists(model_outdir+"/tmp_backup"):
-        print("Restoring from checkpoint {model_outdir+'/tmp_backup'}")
+        print("Restoring from checkpoint {model_outdir}+'/tmp_backup'")
     backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
                                                           delete_checkpoint=False)
     #    callbacks.append(backupandrestore)

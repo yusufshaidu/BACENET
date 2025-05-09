@@ -105,8 +105,13 @@ class mBP_model(tf.keras.Model):
         #radial network
         #self._radial_layer_sizes.append(self.Nrad*(1+self.nzeta))
         # each body order learn single component of the radial functions
-        number_radial_components = self.Nrad * (self.body_order - 1)
-        self._radial_layer_sizes.append(number_radial_components)
+        #one radial function per components and different one for 3 and 4 body 
+        if self.body_order == 3:
+            self.number_radial_components = (self.nzeta + 1)
+        if self.body_order == 4:
+            self.number_radial_components = (2 * self.nzeta + 1)
+
+        self._radial_layer_sizes.append(self.number_radial_components * self.Nrad)
         radial_activations = ['silu' for s in self._radial_layer_sizes]
         self.radial_funct_net = Networks(self.Nrad, self._radial_layer_sizes, 
                                          radial_activations, 
@@ -305,10 +310,9 @@ class mBP_model(tf.keras.Model):
                                             Nrad) #
             bf_radial = tf.reshape(bf_radial, [-1,Nrad])
             bf_radial = self.radial_funct_net(bf_radial)
-            #single radial ffunction for each body order starting at 2 body
-            bf_radial = tf.reshape(bf_radial, [nat, -1, Nrad, self.body_order-1])
+            bf_radial = tf.reshape(bf_radial, [nat, -1, Nrad, self.number_radial_components])
             radial_ij = tf.einsum('ijkl,ijm->ijkml',bf_radial, species_encoder_ij) # nat x Nneigh x Nrad x nembeddingxzeta (l=zeta)
-            radial_ij = tf.reshape(radial_ij, [nat,-1,Nrad*self.spec_size,self.body_order - 1])
+            radial_ij = tf.reshape(radial_ij, [nat,-1,Nrad*self.spec_size,self.number_radial_components])
             atomic_descriptors = tf.reduce_sum(radial_ij[:,:,:,0], axis=1) # sum over neigh
             #atomic_descriptors = tf.reduce_sum(radial_ij, axis=(1,-1)) / tf.cast(self.zeta+1, tf.float32) # sum over neigh and zeta
             #atomic_descriptors = tf.reshape(atomic_descriptors, 
@@ -324,13 +328,14 @@ class mBP_model(tf.keras.Model):
             #    tf.reduce_sum(radial_ij[:,:,:,:,0], axis=1),
             #    2)] 
             @tf.function
-            def _angular_terms(z):
+            def _angular_terms(x):
                 '''
                 compute vectorize three-body computation
 
                 '''
                 #expansion index
-                z = z[0]
+                z = x[0][0]
+                r_idx = x[1][0]
 
                 n = tf.range(z+1, dtype=tf.int32)
                 lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.compute_cosine_terms(n)
@@ -375,7 +380,7 @@ class mBP_model(tf.keras.Model):
 
                 g_ij_lxlylz = tf.einsum('ijk,k->ijk',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
 
-                g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,1], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
+                g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,r_idx], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
                 g2_ilxlylz = g_ilxlylz * g_ilxlylz
                 gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
 
@@ -393,7 +398,7 @@ class mBP_model(tf.keras.Model):
                 if self.body_order == 4:
                     # here we have four possible combination of lambda [(1,1), (1,-1), (-1,1), (-1,-1)] but only three of them are unique
                     #contribution after summing over k and l
-                    g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,2], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
+                    g_ilxlylz = tf.einsum('ijk,ijl->ikl',radial_ij[:,:,:,self.nzeta+r_idx], g_ij_lxlylz) #shape=(nat,nrad*species,n_lxlylz)
                     g_ilxlylz_lambda_minus = tf.einsum('ijk,k->ijk',g_ilxlylz,_lambda_minus)
 
                      
@@ -404,7 +409,7 @@ class mBP_model(tf.keras.Model):
                     
                     g_ij_ll = tf.einsum('ijm,ijn->ijmn',g_ij_lxlylz, g_ij_lxlylz)
                     #contribution after summing over j
-                    g_i_ll_j = tf.einsum('ijk,ijmn->ikmn',radial_ij[:,:,:,2], g_ij_ll) #nat nrad*nspec,n_lxlylz,n_lzlylz
+                    g_i_ll_j = tf.einsum('ijk,ijmn->ikmn',radial_ij[:,:,:,self.nzeta+r_idx], g_ij_ll) #nat nrad*nspec,n_lxlylz,n_lzlylz
 
                     #sum over the last two axes
                     # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
@@ -432,8 +437,8 @@ class mBP_model(tf.keras.Model):
                 #    gp,gn,gp05,gn05 = _angular_terms(([z], [i+1]))
                 #    Gp.append(gp)
                 #    Gn.append(gn)
-
-                Gp,Gn = tf.map_fn(_angular_terms, tf.constant(self.zeta, dtype=tf.int32)[:,None],
+                elements = (tf.constant(self.zeta, dtype=tf.int32)[:,None], tf.range(1,self.nzeta+1)[:,None])
+                Gp,Gn = tf.map_fn(_angular_terms, elements,
                               fn_output_signature=[tf.float32,tf.float32],
                               parallel_iterations=self.nzeta)
                 Gi3 = tf.concat([Gp,Gn], 0) 
@@ -446,7 +451,7 @@ class mBP_model(tf.keras.Model):
                 atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_3], axis=1)
 
             elif self.body_order == 4:
-                G3p,G3n,G4pp,G4np,G4nn = tf.map_fn(_angular_terms, tf.constant(self.zeta, dtype=tf.int32)[:,None],
+                G3p,G3n,G4pp,G4np,G4nn = tf.map_fn(_angular_terms, elements,
                               fn_output_signature=[tf.float32,tf.float32,tf.float32,tf.float32,tf.float32],
                               parallel_iterations=self.nzeta)
                 #Because the computation cost for element of the loop is very different,
@@ -873,7 +878,7 @@ class mBP_model(tf.keras.Model):
             tf.summary.scalar('2. Metrics/3. V_MAE_F',mae_f,self._train_counter)
 
 
-        metrics.update({'loss': loss})
+        metrics.update({'V_loss': loss})
 
         return {key: metrics[key] for key in metrics.keys()}
 
