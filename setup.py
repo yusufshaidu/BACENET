@@ -7,12 +7,12 @@ setup(
     author="Yusuf Shaidu",
     author_email="yusufshaidu@gmail.com",
     url="https://gitlab.com/yusufshaidu/ml-potentials",  # your repo URL
-    #packages=find_packages(exclude=["tests*", "examples*"]),
+    packages=find_packages(exclude=["tools*", "examples*"]),
     python_requires=">=3.7, <4",
     install_requires=[
         "numpy>=1.19",
-        "tensorflow>=2.4",
-        "swa-tfkeras>=0.0.8",
+        "tensorflow>=2.9, <2.16",
+        "keras-swa>=0.0.8",
         "ase>=3.20",
         "pyyaml>=5.1",
     ],
@@ -20,9 +20,9 @@ setup(
         "console_scripts": [
             # replace `train.py`'s `if __name__=='__main__': ...` 
             # with a `main()` function or point it here
-            "wBPlinear-train = train:create_model",
-            "wBPlinear-evaluate = evaluate:create_model",
-            "wBPlinear-ase = evaluate:create_model",
+            "wBPlinear-train = silssf.train:main",
+            "wBPlinear-evaluate = silssf.evaluate:main",
+            "wBPlinear-ase = silssf.ase_interface:wBP_Calculator",
         ],
     },
     classifiers=[

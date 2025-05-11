@@ -13,8 +13,8 @@ from tensorflow.keras.optimizers import Adam
 
 
 import argparse
-from data_processing import data_preparation
-from model import mBP_model
+from data.data_processing import data_preparation
+from models.model import mBP_model
 
 def default_config():
     return {
@@ -60,7 +60,7 @@ def default_config():
         'clip_value': None,
         'species_layer_sizes': [],
         'species_correlation': 'dot',
-        'radial_layer_sizes': [64, 64],
+        'radial_layer_sizes': [128, 128],
         'learn_radial': True,
         'activations': None,
         'coulumb': False,
@@ -72,6 +72,27 @@ def default_config():
 def get_compiled_model(configs,optimizer):
 
     model = mBP_model(configs)
+    '''
+    We should do something for tensorflow > 2.15.0
+    #fake call to build the model
+    #positions,species_encoder,C6,cells,natoms,i,j,S,neigh,gaussian_width
+    example_input = [
+     tf.zeros((1, 1*3),     dtype=tf.float32),
+     tf.zeros((1, 1),       dtype=tf.float32),
+     tf.zeros((1, 1),       dtype=tf.float32),
+     tf.zeros((1, 9),       dtype=tf.float32),
+     tf.zeros((1,),         dtype=tf.int32),
+     tf.zeros((1, 8),    dtype=tf.int32),
+     tf.zeros((1, 8),    dtype=tf.int32),
+     tf.zeros((1, 16),    dtype=tf.int32),
+     tf.zeros((1,),           dtype=tf.int32),
+     tf.zeros((1,1),           dtype=tf.float32)
+     ]
+
+    #model = mBP_model(configs)
+    # This will “dry run” through call() and allocate weights:
+    model(example_input, training=False)
+    '''
     model.compile(optimizer=optimizer,
                   loss="mse",
                   metrics=["MAE"])
@@ -167,7 +188,8 @@ def create_model(configs):
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
    
-    checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.ckpt"
+    #checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.ckpt"
+    checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.weights.h5"
 
     #checkpoint_dir = os.path.dirname(checkpoint_path)
 
@@ -278,7 +300,7 @@ def create_model(configs):
         #          loss="mse", 
         #          metrics=["MAE", 'loss'])
 
-#    model.save_weights(checkpoint_path.format(epoch=0))
+    model.save_weights(checkpoint_path.format(epoch=0))
     try:
         model.fit(train_data,
              epochs=configs['num_epochs'],
@@ -296,8 +318,8 @@ def create_model(configs):
              validation_freq=10,
              callbacks=callbacks)
 
-if __name__ == '__main__':
-
+#if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(description='create ML model')
     parser.add_argument('-c', '--config', type=str,
                         help='configuration file', required=True)

@@ -1,10 +1,10 @@
 import tensorflow as tf
-from data_processing import data_preparation
-from model import mBP_model
+from data.data_processing import data_preparation
+from models.model import mBP_model
 
 import os, sys, yaml,argparse, json
 import numpy as np
-import train
+import silssf.train as train
 from pathlib import Path
 
 def create_model(configs):
@@ -19,8 +19,9 @@ def create_model(configs):
     # Data preparation
     print('Preparing data...')
     model_outdir = configs['outdir']
-    if not os.path.exists(model_outdir):
-        os.mkdir(model_outdir)
+    
+    if not os.path.exists(configs['test_outdir']):
+        os.mkdir(configs['test_outdir'])
     if configs['include_vdw']:
         rc = np.max([configs['rc_rad'], configs['rmax_d']])
     else:
@@ -80,17 +81,21 @@ def create_model(configs):
 
     model = model_call(configs)
     
-    ckpts = [os.path.join(model_outdir+"/models", x.split('.index')[0]) for x in os.listdir(model_outdir+"/models") if x.endswith('index')]
+    #ckpts = [os.path.join(model_outdir+"/models", x.split('.index')[0]) 
+    ckpts = [os.path.join(model_outdir+"/models", x.split('.weights.h5')[0]) 
+             for x in os.listdir(model_outdir+"/models") if x.endswith('h5')]
     ckpts.sort()
 
     #print(ckpts)
     
     if epoch == -1: 
-        ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        #ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
         ckpts_idx.sort()
         epoch = ckpts_idx[-1]
         idx=f"{epoch:04d}"
-        ck = [model_outdir+"/models/"+f"ckpts-{idx}.ckpt"]
+        #ck = [model_outdir+"/models/"+f"ckpts-{idx}.ckpt"]
+        ck = [model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"]
 #        model.load_weights(ck).expect_partial()
         ckpts_idx = [epoch]
 
@@ -100,11 +105,13 @@ def create_model(configs):
         print('############')
         print('I am evaluating all saved check points: may take some time except some of them are already done!!!')
         print('############')
-        ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        #ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
         ckpts_idx.sort()
 
         #idx=f"{epoch:04d}"
-        ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.ckpt" for idx in ckpts_idx]
+        #ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.ckpt" for idx in ckpts_idx]
+        ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.weights.h5" for idx in ckpts_idx]
 
 
     try:
@@ -112,7 +119,7 @@ def create_model(configs):
     except:
         errors = []
 
-    print(errors)
+    #print(errors)
     for i,_ck in enumerate(ck):
         
 
@@ -122,19 +129,25 @@ def create_model(configs):
             if int(i) % interval != 0 or pfile.is_file():
                 continue
 
+        #model = tf.keras.models.load_model(_ck)
+        #model.load_weights(_ck).expect_partial()
+        #print(_ck)
+        #print(_ck)
+        model.load_weights(_ck, skip_mismatch=True)
 
-        model.load_weights(_ck).expect_partial()
         print(f'evaluating {_epoch} epoch')
 
-        #    weights = model.get_weights()
+ #       weights = model.get_weights()
 
-        #print(weights)
+#        print(weights[0])
 
         if configs['coulumb']:
-            e_ref, e_pred, metrics, force_ref, force_pred,nat,_charges = model.predict(test_data)
+            e_ref, e_pred, metrics, force_ref, force_pred,nat,_charges,stress = model.predict(test_data)
             charges = []
         else:
-            e_ref, e_pred, metrics, force_ref, force_pred,nat = model.predict(test_data)
+            e_ref, e_pred, metrics, force_ref, force_pred,nat,stress = model.predict(test_data)
+        
+        
 
         _f_ref = []
         _f_pred = []
@@ -156,22 +169,26 @@ def create_model(configs):
         force_ref = tf.reshape(_f_ref, [-1,3])
         #force_pred = [tf.reshape(_f_pred[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
         force_pred = tf.reshape(_f_pred, [-1,3])
-        mae = tf.reduce_mean(tf.abs(e_ref-e_pred))
-        rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2))
-        fmae = tf.reduce_mean(np.array(fmaes))
-        frmse = tf.sqrt(tf.reduce_mean(np.array(frmses)**2))
+        mae = tf.reduce_mean(tf.abs(e_ref-e_pred)).numpy()
+        rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2)).numpy()
+        fmae = tf.reduce_mean(np.array(fmaes)).numpy()
+        frmse = tf.sqrt(tf.reduce_mean(np.array(frmses)**2)).numpy()
         errors.append([_epoch,rmse*1000,mae*1000,frmse*1000,fmae*1000])
+        #print(errors)
 
         print(f'Ermse = {rmse*1000:.3f} and Emae = {mae*1000:.3f} | Frmse = {frmse*1000:.3f} and Fmae = {fmae*1000:.3f}')
         #print(f'Forces: the test rmse = {rmse} and mae = {mae}')
-        np.savetxt(os.path.join(configs['outdir'], f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
-        np.savetxt(os.path.join(configs['outdir'], f'forces_last_test_{_epoch}.dat'), np.stack([idx,force_ref[:,0], force_ref[:,1], force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
+        np.savetxt(os.path.join(configs['test_outdir'], f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
+        np.savetxt(os.path.join(configs['test_outdir'], f'forces_last_test_{_epoch}.dat'), np.stack([idx,force_ref[:,0], force_ref[:,1], 
+                                                                                                force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T)
         if configs['coulumb']:
-            np.savetxt(os.path.join(configs['outdir'], f'charges_{_epoch}.dat'), np.stack([idx, charges]).T)
+            np.savetxt(os.path.join(configs['test_outdir'], f'charges_{_epoch}.dat'), np.stack([idx, charges]).T)
+    #print(errors)
     np.savetxt(error_file, np.array(errors), header='E_rmse E_mae F_rmse F_mae', fmt='%10.3f')
     
-if __name__ == '__main__':
+#if __name__ == '__main__':
 
+def main():
     parser = argparse.ArgumentParser(description='create ML model')
     parser.add_argument('-c', '--config', type=str,
                         help='configuration file', required=True)

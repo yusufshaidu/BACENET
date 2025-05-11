@@ -2,7 +2,7 @@ import tensorflow as tf
 from functools import partial
 import numpy as np
 import os
-from unpack_tfr_data import np_unpack_data
+from data.unpack_tfr_data import np_unpack_data
 def _bytes_feature(value):
     """Returns a bytes_list from a string / byte."""
     if isinstance(value, type(tf.constant(0))):
@@ -113,7 +113,7 @@ def load_tfrs(filenames):
 def get_tfrs(filenames, batch_size):
     AUTOTUNE = tf.data.AUTOTUNE
     dataset = load_tfrs(filenames)
-    dataset = dataset.shuffle(128)
+    dataset = dataset.shuffle(1204)
     dataset = dataset.prefetch(buffer_size=AUTOTUNE)
     dataset = dataset.batch(batch_size,
                             num_parallel_calls=AUTOTUNE,

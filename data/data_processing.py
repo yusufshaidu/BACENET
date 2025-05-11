@@ -15,7 +15,7 @@ from ase import Atoms
 import json
 import ase
 from ase.neighborlist import neighbor_list
-from tfr_data_processing import write_tfr, get_tfrs
+from data.tfr_data_processing import write_tfr, get_tfrs
 import warnings
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -169,7 +169,7 @@ def input_function(x, shuffle=True, batch_size=32): # inner function that will b
 #    dataset = dataset.batch(batch_size).repeat(num_epochs) # split dataset into batch_size batches and repeat process for num_epochs
 #    return dataset
 
-def process_ase(atoms, evaluate_test):
+def process_ase(atoms, evaluate_test,species,atomic_energy,C6_spec):
         # Ensure a nonzero box
         if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
             atoms.set_cell(np.eye(3) * 100)
@@ -210,7 +210,7 @@ def _process_file(args):
         forces = atoms.get_array(force_key)
     else:
         atoms = file
-        atoms, energy, forces = process_ase(atoms, evaluate_test)
+        atoms, energy, forces = process_ase(atoms, evaluate_test, species,atomic_energy,C6_spec)
 
     gaussian_width = np.array([covalent_radii[x] for x in atoms.get_chemical_symbols()])
     
