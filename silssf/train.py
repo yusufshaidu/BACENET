@@ -1,20 +1,25 @@
-from __future__ import absolute_import, division, print_function, unicode_literals
+#from __future__ import absolute_import, division, print_function, unicode_literals
+import os
+'''
+The following command is used to supress the following wied message
+I tensorflow/core/framework/local_rendezvous.cc:421] Local rendezvous recv item cancelled. Key hash:
+'''
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
+
 import numpy as np
-#from IPython.display import clear_output
-#import tensorflow
-import tensorflow.compat.v2.feature_column as fc
 import tensorflow as tf
 from swa.tfkeras import SWA
 import math 
 import os, json
 from tensorflow.keras.optimizers import Adam
-
-
-
+from data.unpack_tfr_data import unpack_data
+from networks.networks import Networks
+import functions.helping_functions as help_fn
 
 import argparse
 from data.data_processing import data_preparation
-from models.model import mBP_model
+from models import model
+import logging
 
 def default_config():
     return {
@@ -69,34 +74,45 @@ def default_config():
         'features': False,
         'normalize': False
     }
-def get_compiled_model(configs,optimizer):
-
-    model = mBP_model(configs)
-    '''
-    We should do something for tensorflow > 2.15.0
+def get_compiled_model(configs,optimizer,example_input):
+    
+    _model = model.mBP_model(configs=configs)
+    #We should do something for tensorflow > 2.15.0
     #fake call to build the model
-    #positions,species_encoder,C6,cells,natoms,i,j,S,neigh,gaussian_width
-    example_input = [
-     tf.zeros((1, 1*3),     dtype=tf.float32),
-     tf.zeros((1, 1),       dtype=tf.float32),
-     tf.zeros((1, 1),       dtype=tf.float32),
-     tf.zeros((1, 9),       dtype=tf.float32),
-     tf.zeros((1,),         dtype=tf.int32),
-     tf.zeros((1, 8),    dtype=tf.int32),
-     tf.zeros((1, 8),    dtype=tf.int32),
-     tf.zeros((1, 16),    dtype=tf.int32),
-     tf.zeros((1,),           dtype=tf.int32),
-     tf.zeros((1,1),           dtype=tf.float32)
-     ]
-
-    #model = mBP_model(configs)
     # This will “dry run” through call() and allocate weights:
-    model(example_input, training=False)
-    '''
-    model.compile(optimizer=optimizer,
-                  loss="mse",
-                  metrics=["MAE"])
-    return model
+    #example_input = unpack_data(example_input)
+#    outs = _model(example_input, training=False)
+    _model.compile(optimizer=optimizer,
+                  loss=help_fn.quad_loss,
+                  loss_f = help_fn.force_loss)
+
+    #model._training_state = {"epoch":0, "step":0, "steps_per_epoch":None}
+
+    #              metrics=["MAE"],
+    #              run_eagerly=False)
+   # print(model.summary())
+    return _model
+
+class CustomCallback(tf.keras.callbacks.Callback):
+    def on_train_begin(self, logs=None):
+        keys = list(logs.keys())
+        print("Starting training; got log keys: {}".format(keys))
+
+    def on_train_end(self, logs=None):
+        keys = list(logs.keys())
+        print("Stop training; got log keys: {}".format(keys))
+
+    def on_epoch_begin(self, epoch, logs=None):
+        keys = list(logs.keys())
+        #self.model._training_state = None
+#        self.model._training_state["epoch"] = epoch
+        print("Start epoch {} of training; got log keys: {}".format(epoch, keys))
+
+    def on_epoch_end(self, epoch, logs=None):
+        keys = list(logs.keys())
+        print("End epoch {} of training; got log keys: {}".format(epoch, keys))
+
+
 #This is an example from tensorflow
 #TODO
 def make_or_restore_model(model_outdir,configs,optimizer):
@@ -110,48 +126,7 @@ def make_or_restore_model(model_outdir,configs,optimizer):
         return tf.keras.models.load_model(latest_checkpoint,custom_objects=None)
     print("Creating a new model")
     return get_compiled_model(configs,optimizer)
-def create_model(configs):
-
-
-    #Read in model parameters
-    #I am parsing yaml files with all the parameters
-    #
-    _configs = default_config()
-    
-    for key in _configs:
-        if key not in configs.keys():
-            configs[key] = _configs[key]
-    model_outdir = configs['outdir']
-    if not os.path.exists(model_outdir):
-        os.mkdir(model_outdir)
-
-    #lr_schedule = configs['initial_lr']
-    # Learning rate schedule
-    if not configs['fixed_lr']:
-        '''
-        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
-        monitor='RMSE',# energy rmse 
-        factor=configs['decay_rate'],
-        patience=configs['decay_step'],
-        verbose=1,
-        mode='auto',
-        min_delta=0.0001,
-        cooldown=0,
-        min_lr=configs['min_lr'],
-        )
-        #cp_callback.append(cb_ReduceLROnPlateau)
-        '''
-        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=configs['initial_lr'],
-        decay_steps=configs['decay_step'],
-        decay_rate=configs['decay_rate'],
-        staircase=True,
-        name='ExponentialDecay')
-
-    else:
-        lr_schedule = configs['initial_lr']
-    
-    #optimization
+def opt(configs, lr_schedule):
     if configs['opt_method'] in ['adamW', 'AdamW', 'adamw']:
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
@@ -183,13 +158,58 @@ def create_model(configs):
              amsgrad=False,
              name='adam')
 
+    #optimizer.lr = optimizer.learning_rate
+    return optimizer
+
+def create_model(configs):
+
+
+    #Read in model parameters
+    #I am parsing yaml files with all the parameters
+    #
+    _configs = default_config()
+    
+    for key in _configs:
+        if key not in configs.keys():
+            configs[key] = _configs[key]
+    model_outdir = configs['outdir']
+    if not os.path.exists(model_outdir):
+        os.mkdir(model_outdir)
+
+    lr_schedule = configs['initial_lr']
+    # Learning rate schedule
+    if not configs['fixed_lr']:
+        cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor='RMSE_F',# energy rmse 
+        factor=configs['decay_rate'],
+        patience=configs['decay_step'],
+        verbose=1,
+        mode='auto',
+        min_delta=0.0001,
+        cooldown=0,
+        min_lr=configs['min_lr'],
+        )
+
+        '''
+        lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
+        initial_learning_rate=configs['initial_lr'],
+        decay_steps=configs['decay_step'],
+        decay_rate=configs['decay_rate'],
+        staircase=True,
+        name='ExponentialDecay')
+        '''
+
+    else:
+        lr_schedule = configs['initial_lr']
+    
     #save checkpoints
     checkpoint_dir = model_outdir+"/models"
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
    
-    #checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.ckpt"
-    checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.weights.h5"
+    checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.ckpt"
+#    checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.weights.h5"
+    #checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.keras"
 
     #checkpoint_dir = os.path.dirname(checkpoint_path)
 
@@ -201,16 +221,25 @@ def create_model(configs):
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
                                                   update_freq='epoch'),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
-    #if not configs['fixed_lr']:
-    #    callbacks.append(cb_ReduceLROnPlateau)
+                 #CustomCallback()]
+    if not configs['fixed_lr']:
+        callbacks.append(cb_ReduceLROnPlateau)
+    
 
+
+    if os.path.exists(model_outdir+"/tmp_backup"):
+        print(f"Restoring from checkpoint {model_outdir}+'/tmp_backup'")
+        epochs = np.loadtxt(model_outdir+"/metrics.dat",skiprows=1, usecols=0)
+        last_epoch = int(epochs[-1])
+    else:
+        last_epoch = 0
 
     if configs['start_swa'] > -1:
-        try:
-            epochs = np.loadtxt(model_outdir+"/metrics.dat",skiprows=1, usecols=0)
-            last_epoch = int(epochs[-1])
-        except:
-            last_epoch = 0
+        #try:
+        #    epochs = np.loadtxt(model_outdir+"/metrics.dat",skiprows=1, usecols=0)
+        #    last_epoch = int(epochs[-1])
+        #except:
+        #    last_epoch = 0
         if configs['start_swa'] < last_epoch:
             print(f"start_epoch_swa must be larger than the last saved epoch but are {configs['start_swa']} and {last_epoch}")
             print(f"setting start_swa to {last_epoch+2}")
@@ -222,7 +251,7 @@ def create_model(configs):
               swa_lr2=configs['swa_lr2'],
               swa_freq=5,
               verbose=1)
-        callbacks.append(swa)
+#        callbacks.append(swa)
 #    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
 
     assert len(configs['activations']) == len(configs['layer_sizes']),'the number of activations must be same as the number of layer'
@@ -242,14 +271,18 @@ def create_model(configs):
     
     #checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}-{val_loss:.5f}.keras"
 #    checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}.keras"
+    '''
     if tf.config.list_physical_devices('GPU'):
         strategy = tf.distribute.MirroredStrategy()
+        print(f'found {strategy.num_replicas_in_sync} GPUs!')
     else:  # Use the Default Strategy
         strategy = tf.distribute.get_strategy()
-
+    
     global_batch_size = (configs['batch_size'] *
                      strategy.num_replicas_in_sync)
-    # Data preparation
+    '''
+    global_batch_size = configs['batch_size']
+# Data preparation
     print('Preparing data...')
     if configs['include_vdw']:
         rc = np.max([configs['rc_rad'], configs['rmax_d']])
@@ -268,8 +301,7 @@ def create_model(configs):
         except:
             atomic_energy = []
 
-
-    train_data, test_data, species_identity = data_preparation(
+    train_data, test_data, species_identity, nsamples = data_preparation(
         data_dir=configs['data_dir'],
         species=configs['species'], 
         data_format=configs['data_format'],
@@ -282,29 +314,25 @@ def create_model(configs):
         atomic_energy=atomic_energy,
         atomic_energy_file=os.path.join(model_outdir,'atomic_energy.json'),
         model_version=configs['model_version'],
-        model_dir=model_outdir
+        model_dir=model_outdir,n_epochs=configs['num_epochs']
         )
 
     configs['species_identity'] = species_identity
-    if os.path.exists(model_outdir+"/tmp_backup"):
-        print("Restoring from checkpoint {model_outdir}+'/tmp_backup'")
     backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
                                                           delete_checkpoint=False)
     #    callbacks.append(backupandrestore)
 
-    with strategy.scope():
-        #model = make_or_restore_model(model_outdir,configs,optimizer)
-        model = get_compiled_model(configs,optimizer)
-        #model = mBP_model(configs)
-        #model.compile(optimizer=optimizer, 
-        #          loss="mse", 
-        #          metrics=["MAE", 'loss'])
-
+    #with strategy.scope():
+    model = get_compiled_model(configs,
+                                   opt(configs, lr_schedule),list(train_data)[0])
     model.save_weights(checkpoint_path.format(epoch=0))
+    #model.save(checkpoint_path.format(epoch=0))
     try:
         model.fit(train_data,
              epochs=configs['num_epochs'],
              batch_size=global_batch_size,
+             #steps_per_epoch = nsamples // global_batch_size, 
+             #initial_epoch = last_epoch,
              validation_data=test_data,
              validation_freq=10,
              callbacks=[callbacks, backupandrestore])
@@ -314,6 +342,8 @@ def create_model(configs):
     model.fit(train_data,
              epochs=configs['num_epochs'],
              batch_size=global_batch_size,
+             #steps_per_epoch=nsamples // global_batch_size, 
+             #initial_epoch = last_epoch,
              validation_data=test_data,
              validation_freq=10,
              callbacks=callbacks)

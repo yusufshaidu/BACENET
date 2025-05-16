@@ -146,7 +146,8 @@ def find_three_non_negative_integers(n):
     return tf.reshape(valid_triplets, [-1])
     #return valid_triplets
      
-@tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
+#@tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
+@tf.function(jit_compile=True)
 def factorial(n):
     # Create a tensor of integers from 1 to n
     # Use tf.range to create a sequence from 1 to n + 1
@@ -319,8 +320,8 @@ def _tf_fcut(r,rc):
     x = tf.tanh(1 - r / rc)
     return tf.where(r<=rc, x*x*x, tf.zeros(dim, dtype=tf.float32))
 
-@tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                             tf.TensorSpec(shape=(), dtype=tf.float32)])
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                             tf.TensorSpec(shape=(), dtype=tf.float32)],jit_compile=False)
 def tf_fcut_rbf(r,rc):
     p = tf.constant(6, dtype=tf.float32)
     x = r / rc
@@ -349,22 +350,22 @@ def tf_app_gaussian(x):
     args16 = args8 * args8
     args32 = args16 * args16
     return args32 * args32
-@tf.function(input_signature=[tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+@tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
                               tf.TensorSpec(shape=(), dtype=tf.float32),
                               tf.TensorSpec(shape=(None,), dtype=tf.float32),
                               tf.TensorSpec(shape=(), dtype=tf.int32),
-                              ])
+                              ], jit_compile=False)
 def bessel_function(r,rc,kn,n):
     
     pi = tf.constant(math.pi, dtype=tf.float32)
     nkn_rad = tf.range(1, n+1, dtype=tf.float32) * kn
-    rn = pi / rc * tf.einsum('k,ij->ijk',nkn_rad, r)
+    rn = pi / rc * tf.einsum('j,i->ij',nkn_rad, r)
 
     dim = tf.shape(r)
     p = 6
     fc_over_r = tf_fcut_rbf(r,rc) / (r + 1e-20)
 
-    return tf.sqrt(2.0/rc)*tf.einsum('ijk,ij->ijk',tf.sin(rn),fc_over_r) # nat, nneigh,nrad
+    return tf.sqrt(2.0/rc)*tf.einsum('ij,i->ij',tf.sin(rn),fc_over_r) # nat, nneigh,nrad
 
 def help_func(n):
     return tf.ones(n+1, tf.int32) * n
@@ -484,9 +485,13 @@ def rescale_params(x, a, b):
     rsmax = tf.reduce_max(x)
     return a + (b - a) * (x - rsmin) / (rsmax - rsmin + 1e-12)
 
-#@tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.int32),
-#                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
-#                              tf.TensorSpec(shape=(None,), dtype=tf.float32))])
+def quad_loss(y, y_pred):
+    loss = tf.reduce_mean((y - y_pred)**2)
+    return loss
+
+@tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              tf.TensorSpec(shape=(None,), dtype=tf.float32))])
 def force_loss(x):
 
     nat = tf.cast(x[0], tf.int32)
@@ -494,9 +499,9 @@ def force_loss(x):
     force_pred = tf.reshape(x[2][:3*nat], (nat,3))
     loss = tf.reduce_mean((force_ref - force_pred)**2)
     return loss
-#@tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.int32),
-#                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
-#                              tf.TensorSpec(shape=(None,), dtype=tf.float32))])
+@tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              tf.TensorSpec(shape=(None,), dtype=tf.float32))])
 
 def force_mse(x):
 
@@ -505,9 +510,9 @@ def force_mse(x):
     force_pred = tf.reshape(x[2][:3*nat], (nat,3))
     fmse = tf.reduce_mean((force_ref - force_pred)**2)
     return fmse
-#@tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.int32),
-#                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
-#                              tf.TensorSpec(shape=(None,), dtype=tf.float32))])
+@tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              tf.TensorSpec(shape=(None,), dtype=tf.float32))])
 
 def force_mae(x):
 

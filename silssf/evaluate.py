@@ -34,7 +34,7 @@ def create_model(configs):
         atomic_energy = json.load(df)
         atomic_energy = np.array([atomic_energy[key] for key in configs['species']])
 
-    train_data, test_data, species_identity = data_preparation(
+    train_data, test_data, species_identity, _ = data_preparation(
         data_dir=configs['data_dir'],
         species=configs['species'],
         data_format=configs['data_format'],
@@ -82,20 +82,23 @@ def create_model(configs):
     model = model_call(configs)
     
     #ckpts = [os.path.join(model_outdir+"/models", x.split('.index')[0]) 
-    ckpts = [os.path.join(model_outdir+"/models", x.split('.weights.h5')[0]) 
-             for x in os.listdir(model_outdir+"/models") if x.endswith('h5')]
+    #         for x in os.listdir(model_outdir+"/models") if x.endswith('ckpt')]
+    ckpts = [os.path.join(configs['outdir']+"/models", x.split('.index')[0])
+                 for x in os.listdir(configs['outdir']+"/models") if x.endswith('index')
+             ]
+    #ckpts = [os.path.join(model_outdir+"/models", x.split('.weights.h5')[0]) 
     ckpts.sort()
 
     #print(ckpts)
     
     if epoch == -1: 
-        #ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
-        ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
+        ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        #ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
         ckpts_idx.sort()
         epoch = ckpts_idx[-1]
         idx=f"{epoch:04d}"
-        #ck = [model_outdir+"/models/"+f"ckpts-{idx}.ckpt"]
-        ck = [model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"]
+        ck = [model_outdir+"/models/"+f"ckpts-{idx}.ckpt"]
+        #ck = [model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"]
 #        model.load_weights(ck).expect_partial()
         ckpts_idx = [epoch]
 
@@ -105,13 +108,13 @@ def create_model(configs):
         print('############')
         print('I am evaluating all saved check points: may take some time except some of them are already done!!!')
         print('############')
-        #ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
-        ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
+        ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
+        #ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
         ckpts_idx.sort()
 
         #idx=f"{epoch:04d}"
-        #ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.ckpt" for idx in ckpts_idx]
-        ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.weights.h5" for idx in ckpts_idx]
+        ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.ckpt" for idx in ckpts_idx]
+        #ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.weights.h5" for idx in ckpts_idx]
 
 
     try:
@@ -130,10 +133,10 @@ def create_model(configs):
                 continue
 
         #model = tf.keras.models.load_model(_ck)
-        #model.load_weights(_ck).expect_partial()
+        model.load_weights(_ck).expect_partial()
         #print(_ck)
         #print(_ck)
-        model.load_weights(_ck, skip_mismatch=True)
+        #model.load_weights(_ck, skip_mismatch=True)
 
         print(f'evaluating {_epoch} epoch')
 

@@ -64,30 +64,27 @@ class wBP_Calculator(Calculator):
         self.species_identity = np.array([atomic_number(key) for key in configs['species']])
         configs['batch_size'] = 1
         model_outdir = configs['model_outdir']
-    #    ckpts = [os.path.join(configs['model_outdir']+"/models", x.split('.index')[0]) 
-    #             for x in os.listdir(configs['model_outdir']+"/models") if x.endswith('index')]
-    #    ckpts.sort()
-        ckpts = [os.path.join(model_outdir+"/models", x.split('.weights.h5')[0])
-             for x in os.listdir(model_outdir+"/models") if x.endswith('h5')]
+        ckpts = [os.path.join(configs['model_outdir']+"/models", x.split('.index')[0]) 
+                 for x in os.listdir(configs['model_outdir']+"/models") if x.endswith('index')]
+        ckpts.sort()
+    #    ckpts = [os.path.join(model_outdir+"/models", x.split('.weights.h5')[0])
+    #         for x in os.listdir(model_outdir+"/models") if x.endswith('h5')]
         #ckpts.sort()
         ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
         ckpts_idx.sort()
         epoch = ckpts_idx[-1]
         idx=f"{epoch:04d}"
-        #ck = [model_outdir+"/models/"+f"ckpts-{idx}.ckpt"]
-        self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"
-
-
+        ck = [model_outdir+"/models/"+f"ckpts-{idx}.ckpt"]
+        #self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"
         
-        #ckpts = [os.path.join(self.model_outdir, x.split('.index')[0]) for x in os.listdir(self.model_outdir) if x.endswith('index')]
 
-        #self.model.load_weights(ckpts[-1]).expect_partial()
+        self.model.load_weights(ckpts[-1]).expect_partial()
         self.configs = configs
     def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
         Calculator.calculate(self, atoms)
         configs = self.configs
         data, test_data, \
-                species_identity = \
+                species_identity, _ = \
                 data_preparation([atoms], 
                                  configs['species'],
                                  'ase',

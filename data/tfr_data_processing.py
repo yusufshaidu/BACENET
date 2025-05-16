@@ -92,14 +92,48 @@ def _parse_function(example_proto):
                 'forces':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True)}
     return tf.io.parse_single_example(example_proto, feature_description)
 
+def load_tfrs(filenames,batch_size):
+    AUTOTUNE = tf.data.AUTOTUNE
+    ignore_order = tf.data.Options()
+    ignore_order.experimental_deterministic = False  # disable order, increase speed
+    dataset = tf.data.TFRecordDataset(
+        filenames,
+        buffer_size=batch_size,
+        num_parallel_reads=AUTOTUNE
+    )  # automatically interleaves reads from multiple files
+    dataset = dataset.with_options(
+        ignore_order
+    )  # uses data as soon as it streams in, rather than in its original order
+    
+    dataset = dataset.map(_parse_function,
+                          num_parallel_calls=AUTOTUNE)
+
+    # returns a dataset
+    #dataset.cache()
+    return dataset
+
+def get_tfrs(filenames, batch_size,repeat_count=None):
+    AUTOTUNE = tf.data.AUTOTUNE
+    dataset = load_tfrs(filenames,batch_size)
+    dataset = dataset.shuffle(1204)
+    dataset = dataset.prefetch(buffer_size=AUTOTUNE)
+    dataset = dataset.batch(batch_size,
+                            num_parallel_calls=AUTOTUNE,
+                            deterministic=False)
+    #if repeat_count is None:
+    #    repeat_count = batch_size
+    #dataset = dataset.repeat(count=repeat_count)
+    return dataset
+
+'''
 def load_tfrs(filenames):
     AUTOTUNE = tf.data.AUTOTUNE
     ignore_order = tf.data.Options()
     ignore_order.experimental_deterministic = False  # disable order, increase speed
     dataset = tf.data.TFRecordDataset(
         filenames,
-        #buffer_size=16,
-        num_parallel_reads=16
+        buffer_size=16,
+        num_parallel_reads=AUTOTUNE
     )  # automatically interleaves reads from multiple files
     dataset = dataset.with_options(
         ignore_order
@@ -110,12 +144,17 @@ def load_tfrs(filenames):
     #dataset.cache()
     return dataset
 
-def get_tfrs(filenames, batch_size):
+def get_tfrs(filenames, batch_size, repeat_count=None):
     AUTOTUNE = tf.data.AUTOTUNE
     dataset = load_tfrs(filenames)
-    dataset = dataset.shuffle(1204)
-    dataset = dataset.prefetch(buffer_size=AUTOTUNE)
+    dataset = dataset.shuffle(buffer_size=batch_size)
     dataset = dataset.batch(batch_size,
                             num_parallel_calls=AUTOTUNE,
-                            deterministic=False)
+                            deterministic=False,
+                            drop_remainder=False)
+    #if repeat_count is None:
+    #    repeat_count = batch_size
+    #dataset = dataset.repeat(count=repeat_count)
+    dataset = dataset.prefetch(buffer_size=AUTOTUNE)
     return dataset
+'''

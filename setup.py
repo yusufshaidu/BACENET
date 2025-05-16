@@ -10,8 +10,10 @@ setup(
     packages=find_packages(exclude=["tools*", "examples*"]),
     python_requires=">=3.7, <4",
     install_requires=[
+        #GPU enabled tensorflow==14.0 requires cuda 11.7 and cuDNN 8.9 
         "numpy>=1.19",
-        "tensorflow>=2.9, <2.16",
+        "tensorflow>=2.14, <2.16",
+        #"keras<=2.15.0",
         "keras-swa>=0.0.8",
         "ase>=3.20",
         "pyyaml>=5.1",

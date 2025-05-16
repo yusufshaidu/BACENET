@@ -423,7 +423,8 @@ def data_preparation(data_dir, species, data_format,
                      atomic_energy_file=None,
                      model_version='v0',
                      model_dir='tmp',
-                     evaluate_test=0,max_workers=8):
+                     evaluate_test=0,max_workers=8,
+                     n_epochs=64):
     
 #    rc = np.max([rc_rad, rc_ang])
 
@@ -437,10 +438,12 @@ def data_preparation(data_dir, species, data_format,
         #collect configurations
     #all_configs_ase = []
 
+   
     #print(f'we have a total of {len(files)} configurations')
     #shuffle dataset before splitting
     # this method shuffle files in-place
-
+    n_samples = int((1-test_fraction) * len(files))
+    repeat_count = n_samples // batch_size * n_epochs
     random.Random(42).shuffle(files)
 
     #determine atomic zeros
@@ -563,8 +566,8 @@ def data_preparation(data_dir, species, data_format,
         if evaluate_test == 0:
             filenames_test = tf.io.gfile.glob(model_dir+"/tfrs_validate/test*.tfrecords")
 
-    train_data = get_tfrs(filenames, batch_size)
-    test_data = get_tfrs(filenames_test, batch_size)
+    train_data = get_tfrs(filenames, batch_size, repeat_count)
+    test_data = get_tfrs(filenames_test, batch_size, repeat_count)
 
 
     '''
@@ -581,4 +584,4 @@ def data_preparation(data_dir, species, data_format,
                      test_fraction,
                      atomic_energy,C6_spec)
     '''
-    return [train_data, test_data, species_identity]
+    return [train_data, test_data, species_identity, n_samples]
