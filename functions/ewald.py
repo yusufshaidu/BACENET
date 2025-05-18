@@ -2,7 +2,8 @@ import tensorflow as tf
 import numpy as np
 import scipy.constants as constants
 import math
-pi = tf.constant(math.pi)
+#pi = tf.constant(math.pi)
+pi = 3.141592653589793
 CONV_FACT = 1e10 * constants.e / (4 * pi * constants.epsilon_0)
 
 class ewald:

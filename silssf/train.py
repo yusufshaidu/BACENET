@@ -80,17 +80,13 @@ def get_compiled_model(configs,optimizer,example_input):
     #We should do something for tensorflow > 2.15.0
     #fake call to build the model
     # This will “dry run” through call() and allocate weights:
-    #example_input = unpack_data(example_input)
-#    outs = _model(example_input, training=False)
+    example_input = unpack_data(example_input)
+    outs = _model(example_input, training=False)
     _model.compile(optimizer=optimizer,
                   loss=help_fn.quad_loss,
                   loss_f = help_fn.force_loss)
 
-    #model._training_state = {"epoch":0, "step":0, "steps_per_epoch":None}
-
-    #              metrics=["MAE"],
-    #              run_eagerly=False)
-   # print(model.summary())
+    print(_model.summary())
     return _model
 
 class CustomCallback(tf.keras.callbacks.Callback):
@@ -113,7 +109,7 @@ class CustomCallback(tf.keras.callbacks.Callback):
         print("End epoch {} of training; got log keys: {}".format(epoch, keys))
 
 
-#This is an example from tensorflow
+#This is an example from tensorflow not currently used
 #TODO
 def make_or_restore_model(model_outdir,configs,optimizer):
     # Either restore the latest model, or create a fresh one
@@ -179,6 +175,7 @@ def create_model(configs):
     lr_schedule = configs['initial_lr']
     # Learning rate schedule
     if not configs['fixed_lr']:
+        '''
         cb_ReduceLROnPlateau = tf.keras.callbacks.ReduceLROnPlateau(
         monitor='RMSE_F',# energy rmse 
         factor=configs['decay_rate'],
@@ -197,7 +194,6 @@ def create_model(configs):
         decay_rate=configs['decay_rate'],
         staircase=True,
         name='ExponentialDecay')
-        '''
 
     else:
         lr_schedule = configs['initial_lr']
@@ -222,8 +218,8 @@ def create_model(configs):
                                                   update_freq='epoch'),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
                  #CustomCallback()]
-    if not configs['fixed_lr']:
-        callbacks.append(cb_ReduceLROnPlateau)
+    #if not configs['fixed_lr']:
+    #    callbacks.append(cb_ReduceLROnPlateau)
     
 
 
@@ -271,7 +267,6 @@ def create_model(configs):
     
     #checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}-{val_loss:.5f}.keras"
 #    checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}.keras"
-    '''
     if tf.config.list_physical_devices('GPU'):
         strategy = tf.distribute.MirroredStrategy()
         print(f'found {strategy.num_replicas_in_sync} GPUs!')
@@ -280,9 +275,8 @@ def create_model(configs):
     
     global_batch_size = (configs['batch_size'] *
                      strategy.num_replicas_in_sync)
-    '''
-    global_batch_size = configs['batch_size']
-# Data preparation
+    #global_batch_size = configs['batch_size']
+    # Data preparation
     print('Preparing data...')
     if configs['include_vdw']:
         rc = np.max([configs['rc_rad'], configs['rmax_d']])
@@ -322,8 +316,8 @@ def create_model(configs):
                                                           delete_checkpoint=False)
     #    callbacks.append(backupandrestore)
 
-    #with strategy.scope():
-    model = get_compiled_model(configs,
+    with strategy.scope():
+        model = get_compiled_model(configs,
                                    opt(configs, lr_schedule),list(train_data)[0])
     model.save_weights(checkpoint_path.format(epoch=0))
     #model.save(checkpoint_path.format(epoch=0))
