@@ -48,7 +48,7 @@ def get_energy_json(file, species):
         energy *= (Ry2eV * 2)
     return [nspec, in_spec, energy]
 
-def get_energy_ase(atom, species):
+def get_energy_ase(atom, species,energy_key):
     Ry2eV = 13.6057039763
     symbols = list(atom.symbols)
 
@@ -60,7 +60,10 @@ def get_energy_ase(atom, species):
             in_spec.append(sp)
 
         nspec.append(Nsp)
-    energy = atom.get_potential_energy()
+    try:
+        energy = atom.get_potential_energy()
+    except:
+        energy = atom.info[energy_key]
 #    print(energy)
     return [nspec, in_spec, energy]
 
@@ -169,7 +172,7 @@ def input_function(x, shuffle=True, batch_size=32): # inner function that will b
 #    dataset = dataset.batch(batch_size).repeat(num_epochs) # split dataset into batch_size batches and repeat process for num_epochs
 #    return dataset
 
-def process_ase(atoms, evaluate_test,species,atomic_energy,C6_spec):
+def process_ase(atoms, evaluate_test,species,atomic_energy,C6_spec,energy_key,force_key):
         # Ensure a nonzero box
         if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
             atoms.set_cell(np.eye(3) * 100)
@@ -181,8 +184,12 @@ def process_ase(atoms, evaluate_test,species,atomic_energy,C6_spec):
         )
 
         if evaluate_test >= 0:
-            energy = atoms.get_potential_energy() - E0
-            forces = atoms.get_forces()
+            try:
+                energy = atoms.get_potential_energy() - E0
+                forces = atoms.get_forces()
+            except:
+                energy = atoms.info[energy_key]
+                forces = atoms.get_array(force_key)
         else:
             energy = 0.0
             forces = np.zeros((len(atoms.positions), 3))
@@ -210,7 +217,7 @@ def _process_file(args):
         forces = atoms.get_array(force_key)
     else:
         atoms = file
-        atoms, energy, forces = process_ase(atoms, evaluate_test, species,atomic_energy,C6_spec)
+        atoms, energy, forces = process_ase(atoms, evaluate_test, species,atomic_energy,C6_spec, energy_key, force_key)
 
     gaussian_width = np.array([covalent_radii[x] for x in atoms.get_chemical_symbols()])
     
@@ -243,11 +250,21 @@ def load_structure_data_parallel(files, data_format, species, atomic_energy,
     Parallel version of load_structure_data.
     """
     covalent_radii = {x:element(x).covalent_radius*0.01 for x in species}
+    if evaluate_test < 0: # this is inference basically with ASE
+
+        args = (files[0], data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii)
+        data = _process_file(args)
+        _data = {k:[] for k in data.keys()}
+        for k, v in data.items():
+            _data[k].append(v)
+        return _data
+
+    #print(files, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii)
     args_iter = (
         (f, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii)
         for f in files
     )
-
+    #print(_process_file(args_iter[0]))
     results = []
     with ProcessPoolExecutor(max_workers=max_workers) as exe:
         futures = [exe.submit(_process_file, args) for args in args_iter]
@@ -400,7 +417,11 @@ def prepare_and_split_atoms(files, species, data_format,
             to_eV = 27.211324570273 * 0.529177**6
             C6 = np.asarray([C6_spec[ss] for ss in symbols])
             atoms.new_array('C6', C6)
-            atoms.info = {'energy':atoms.get_potential_energy()-E0}
+            try:
+                energy = atoms.get_potential_energy()
+            except:
+                energy = atoms.info[energy_key]
+            atoms.info = {'energy':energy-E0}
 
         all_atoms.append(atoms)
 
@@ -457,7 +478,7 @@ def data_preparation(data_dir, species, data_format,
             if data_format == 'panna_json':
                 Nspec, spec, ene = get_energy_json(file,species)
             else:
-                Nspec, spec, ene =  get_energy_ase(file,species)
+                Nspec, spec, ene =  get_energy_ase(file,species,energy_key)
 
           
             mat_A.append(Nspec)

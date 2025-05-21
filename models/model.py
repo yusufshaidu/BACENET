@@ -14,6 +14,7 @@ from functions.ewald import ewald
 
 import warnings
 import logging
+constant_e = 1.602176634e-19
 
 
 class mBP_model(tf.keras.Model):
@@ -24,6 +25,7 @@ class mBP_model(tf.keras.Model):
         
         #self._training_state = {}    # allow Keras to populate counters here
         self._training_state = None  # mutable mapping
+        self.is_training = configs['is_training']
 
     
         self.species_layer_sizes = configs['species_layer_sizes']
@@ -80,6 +82,7 @@ class mBP_model(tf.keras.Model):
         # the number of elements in the periodic table
         self.nelement = configs['nelement']
         self.coulumb = configs['coulumb']
+        self.efield = configs['efield']
         self.accuracy = configs['accuracy']
         self.pbc = configs['pbc']
         self.total_charge = configs['total_charge']
@@ -96,7 +99,8 @@ class mBP_model(tf.keras.Model):
         #self.radial_funct_net = radial_funct_net
 
        # create a species embedding network with 1 hidden layer Nembedding x Nspecies
-        species_activations = ['sigmoid' for x in self.species_layer_sizes[:-1]]
+        #species_activations = ['silu' for x in self.species_layer_sizes[:-1]]
+        species_activations = ['silu' for x in self.species_layer_sizes[:-1]]
         species_activations.append('linear')
 
         self.species_nets = Networks(self.nelement, 
@@ -112,11 +116,12 @@ class mBP_model(tf.keras.Model):
             self.number_radial_components = (2 * self.nzeta + 1)
 
         _radial_layer_sizes.append(self.number_radial_components * self.Nrad)
-        radial_activations = ['sigmoid' for s in _radial_layer_sizes]
+        radial_activations = ['silu' for s in _radial_layer_sizes[:-1]]
+        radial_activations.append('linear')
         self.radial_funct_net = Networks(self.Nrad, _radial_layer_sizes, 
                                          radial_activations, 
-                                         l1=self.l1, l2=self.l2,
-                                 bias_initializer='zeros',
+                                         #l1=self.l1, l2=self.l2
+                                 #bias_initializer='zeros',
                                  prefix='radial-functions')
         # Add a non‐trainable counter:
         '''
@@ -128,9 +133,15 @@ class mBP_model(tf.keras.Model):
             initializer="zeros"
         )
         '''
-    
 
     @tf.function
+    def parallel_map_fn_factorial(self, n):
+        return tf.map_fn(help_fn.factorial, n,
+                          fn_output_signature=tf.float32)
+#                          parallel_iterations=self.nzeta)
+    @tf.function(input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                ])
     def compute_cosine_terms(self, n):
         lxlylz = tf.map_fn(help_fn.find_three_non_negative_integers, n,
                                    fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32),
@@ -139,15 +150,17 @@ class mBP_model(tf.keras.Model):
         lxlylz_sum = tf.reduce_sum(lxlylz, axis=-1) # the value of n for each lx, ly and lz
 
         #compute normalizations n! / lx!/ly!/lz!
-        nfact = tf.map_fn(help_fn.factorial, lxlylz_sum,
-                          fn_output_signature=tf.float32,
-                          parallel_iterations=self.nzeta) #computed for all n_lxlylz
+        nfact = self.parallel_map_fn_factorial(lxlylz_sum)
+        #nfact = tf.map_fn(help_fn.factorial, lxlylz_sum,
+        #                  fn_output_signature=tf.float32,
+        #                  parallel_iterations=self.nzeta) #computed for all n_lxlylz
 
         #lx!ly!lz!
-        fact_lxlylz = tf.reshape(tf.map_fn(help_fn.factorial, tf.reshape(lxlylz, [-1]),
-                                           fn_output_signature=tf.float32,
-                                           parallel_iterations=self.nzeta), [-1,3],
-                                 )
+        fact_lxlylz = tf.reshape(self.parallel_map_fn_factorial(tf.reshape(lxlylz,[-1])), [-1,3])
+        #fact_lxlylz = tf.reshape(tf.map_fn(help_fn.factorial, tf.reshape(lxlylz, [-1]),
+        #                                   fn_output_signature=tf.float32,
+        #                                   parallel_iterations=self.nzeta), [-1,3],
+        #                         )
         fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
         return lxlylz, lxlylz_sum, nfact, fact_lxlylz
 
@@ -218,10 +231,11 @@ class mBP_model(tf.keras.Model):
         #compute zeta! / (zeta-n)! / n!
 
         zeta_fact = help_fn.factorial(z)
-        zeta_fact_n = tf.map_fn(help_fn.factorial, z-lxlylz_sum,
-                                fn_output_signature=tf.float32,
-                                parallel_iterations=self.nzeta
-                                )
+        zeta_fact_n = self.parallel_map_fn_factorial(z-lxlylz_sum)
+        #zeta_fact_n = tf.map_fn(help_fn.factorial, z-lxlylz_sum,
+        #                        fn_output_signature=tf.float32,
+        #                        parallel_iterations=self.nzeta
+        #                        )
         z_float = tf.cast(z, tf.float32)
         zetan_fact = zeta_fact / (zeta_fact_n * nfact)
         fact_norm = nfact_lxlylz * zetan_fact
@@ -230,112 +244,6 @@ class mBP_model(tf.keras.Model):
 
         return g_ij_lxlylz, lxlylz_sum
 
-    """
-    @tf.function(jit_compile=False,
-                input_signature=[(
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32))]
-                 )
-    #def _to_three_body_terms(self,z, r_idx, rij_unit, radial_ij, first_atom_idx, nat):
-    def _to_three_body_terms(self, x):
-        '''
-        compute vectorize three-body computation
-
-        '''
-        z = x[0][0]
-        r_idx = x[1][0]
-        rij_unit = x[2]
-        radial_ij = x[3]
-        first_atom_idx = x[4]
-        nat = x[5][0]
-        g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, rij_unit)
-        g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
-        #_radial_ij = radial_ij[:,:,r_idx]
-        #g_ilxlylz = _radial_ij[:,:,None] * g_ij_lxlylz[:,None,:] #shape=(npair,nrad*species,n_lxlylz)
-        g2_ilxlylz = g_ilxlylz * g_ilxlylz
-        #Example: sum of pairwise quantities per atom
-        gi3p = tf.math.unsorted_segment_sum(data=g2_ilxlylz,
-                                            segment_ids=first_atom_idx,
-                                            num_segments=nat) # nat x nrad*nspec, n_lxlylz
-        gi3p = tf.reduce_sum(gi3p, axis=-1)
-        norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
-        _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
-        #_lambda_minus = (-1.0) ** tf.cast(lxlylz_sum,tf.float32)
-
-        gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
-        #gi3n = tf.reduce_sum(g2_ilxlylz * _lambda_minus[None,None,:], axis=-1) #npairs,nrad*nspec
-        gi3n = tf.math.unsorted_segment_sum(data=gi3n,
-                                            segment_ids=first_atom_idx,
-                                            num_segments=nat) # nat x nrad*nspec
-        #j==k term should be removed, lambda=-1 contribute nothing
-        #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
-        #G_jk = 2 * R_j_equal_k 
-        return [gi3p * norm, gi3n * norm]
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32)]
-                 )
-    def _to_four_body_terms(self,z, r_idx, rij_unit, radial_ij, first_atom_idx, nat):
-        '''
-        compute  up to four-body computation
-
-        '''
-        g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, r_idx, rij_unit)
-        g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
-        g2_ilxlylz = g_ilxlylz * g_ilxlylz
-        #Example: sum of pairwise quantities per atom
-        gi3p = tf.math.unsorted_segment_sum(data=g2_ilxlylz,
-                                            segment_ids=first_atom_idx,
-                                            num_segments=nat) # nat x nrad*nspec
-        gi3p = tf.reduce_sum(gi3p, axis=-1)
-        norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
-        _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
-        gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
-        gi3n = tf.math.unsorted_segment_sum(data=gi3n,
-                                            segment_ids=first_atom_idx,
-                                            num_segments=nat) # nat x nrad*nspec
-        #j==k term should be removed, lambda=-1 contribute nothing
-        #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
-        #G_jk = 2 * R_j_equal_k 
-        # here we have four possible combination of lambda [(1,1), (1,-1), (-1,1), (-1,-1)] but only three of them are unique
-        #contribution after summing over k and l
-        g4_ij_lxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,self.nzeta+r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
-        g4_i_lxlylz = tf.math.unsorted_segment_sum(data=g4_ij_lxlylz,
-                                        segment_ids=first_atom_idx,
-                                        num_segments=nat) # nat x nrad*nspec*n_lxlylz
-
-        g4_i_lxlylz = tf.reshape(g4_i_lxlylz, [nat,self.Nrad*self.spec_size, -1])
-
-        _lambda_plus = tf.ones_like(_lambda_minus)
-        lambda_pm = tf.einsum('i,j->ij',_lambda_minus, _lambda_plus)
-        lambda_mm = tf.einsum('i,j->ij',_lambda_minus, _lambda_minus)
-        g_i_ll_kl = tf.einsum('ijk, ijl->ijkl',g4_i_lxlylz,g4_i_lxlylz)
-
-        g_ij_ll = tf.einsum('ij,ik->ijk',g_ij_lxlylz, g_ij_lxlylz)
-        #contribution after summing over j
-        g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij[:,:,self.nzeta+r_idx], g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
-        g_i_ll_j = tf.math.unsorted_segment_sum(data=g_i_ll_j,
-                                        segment_ids=first_atom_idx,
-                                        num_segments=nat)
-        #sum over the last two axes
-        # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
-        _norm = norm * norm * 0.5
-        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl
-        gi4pp = tf.reduce_sum(g_i_ll_ijk, axis=(2,3)) * _norm #nat,nrad*nspec
-        gi4np = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_pm) * _norm
-        gi4nn = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_mm) * _norm
-        return [gi3p * norm, gi3n * norm, gi4pp, gi4np, gi4nn]
-    """
     @tf.function
     def compute_charges(self, Vij, E1, E2):
         '''comput charges through the solution of linear system'''
@@ -357,7 +265,7 @@ class mBP_model(tf.keras.Model):
         '''
         q = charges
         q2 = q * q
-        q_outer = tf.expand_dims(q, axis=1) * tf.expand_dime(q, axis=0)
+        q_outer = tf.expand_dims(q, axis=1) * tf.expand_dims(q, axis=0)
         E = E1 * q + 0.5 * (E2 * q2 + tf.reduce_sum(Vij * q_outer, axis=-1))
         return tf.reduce_sum(E)
 
@@ -381,7 +289,7 @@ class mBP_model(tf.keras.Model):
         ''' 
         x = (batch_species_encoder,positions,
                     nmax_diff, batch_nats,cells,C6,
-                first_atom_idx,second_atom_idx,shift_vectors,num_neigh)
+                first_atom_idx,second_atom_idx,shift_vectors,num_pairs)
         '''
         rc = tf.constant(self.rcut,dtype=tf.float32)
         Nrad = tf.constant(self.Nrad, dtype=tf.int32)
@@ -399,311 +307,287 @@ class mBP_model(tf.keras.Model):
         cell = tf.reshape(x[4], [3,3])
         evdw = 0.0
         C6 = x[5][:nat]
-        num_neigh = x[9]
-        first_atom_idx = x[6][:num_neigh]
-        second_atom_idx = x[7][:num_neigh]
-        shift_vector = tf.cast(tf.reshape(x[8][:num_neigh*3], 
-                                          [num_neigh,3]), tf.float32)
+        num_pairs = x[9]
+        first_atom_idx = x[6][:num_pairs]
+        second_atom_idx = x[7][:num_pairs]
+        shift_vector = tf.cast(tf.reshape(x[8][:num_pairs*3], 
+                                          [num_pairs,3]), tf.float32)
         gaussian_width = x[10][:nat]
         #positions = tf.Variable(positions)
         #cell = tf.Variable(cell)
-        with tf.GradientTape(persistent=True) as g:
-            #'''
-            g.watch(positions)
-            g.watch(cell)
-            #based on ase 
-            #npairs x 3
-            all_rij = tf.gather(positions,second_atom_idx) - \
-                     tf.gather(positions,first_atom_idx) + \
-                    tf.tensordot(shift_vector,cell,axes=1)
-
-            all_rij_norm = tf.linalg.norm(all_rij, axis=-1) #npair
-            reg = 1e-12
-            #all_rij_norm = tf.sqrt(tf.reduce_sum(all_rij * all_rij , axis=-1) + reg) #npair
-
-            if self.species_correlation=='tensor':
-                species_encoder_extended = tf.einsum('ik,il->ikl',
-                                                 tf.gather(species_encoder,first_atom_idx),
-                                                 tf.gather(species_encoder,second_atom_idx)
-                                                 )
-            else:
-                species_encoder_extended = tf.einsum('ik,ik->ik',
-                                                 tf.gather(species_encoder,first_atom_idx),
-                                                 tf.gather(species_encoder,second_atom_idx)
-                                                 )
-
-
-            species_encoder_ij = tf.reshape(species_encoder_extended, 
-                                                  [-1, self.spec_size]
-                                                   ) #npairs,spec_size
-
-            #since fcut =0 for rij > rc, there is no need for any special treatment
-            #species_encoder Nneigh and reshaped to nat x Nneigh x embedding
-            #fcuts is nat x Nneigh and reshaped to nat x Nneigh
-            #_Nneigh = tf.shape(all_rij_norm)
-            #neigh = _Nneigh[1]
-            kn_rad = tf.ones(Nrad,dtype=tf.float32)
-            bf_radial = help_fn.bessel_function(all_rij_norm,
-                                            rc,kn_rad,
-                                            self.Nrad) #
-
-            bf_radial = tf.reshape(bf_radial, [-1,self.Nrad])
-            bf_radial = self.radial_funct_net(bf_radial)
-            bf_radial = tf.reshape(bf_radial, [num_neigh, self.Nrad, self.number_radial_components])
-            radial_ij = tf.einsum('ijk,il->ijkl',bf_radial, species_encoder_ij) # npairs x Nrad x nembeddingxzeta (l=zeta)
-            radial_ij = tf.reshape(radial_ij, [num_neigh, self.Nrad*self.spec_size,self.number_radial_components])
-            atomic_descriptors = tf.math.unsorted_segment_sum(data=radial_ij[:,:,0],
-                                                              segment_ids=first_atom_idx, 
-                                                              num_segments=nat)
-
-            #implement angular part: compute vect_rij dot vect_rik / rij / rik
-            rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm + reg)) #npair,3
-            #rij_unit = tf.zeros_like(all_rij)
-            #rij_unit = all_rij / (all_rij_norm[:,None] + reg)
-            @tf.function
-            def _to_three_body_terms(x):
-                '''
-                compute vectorize three-body computation
-
-                '''
-                z = x[0][0]
-                r_idx = x[1][0]
-                g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, rij_unit)
-                g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
-                #sum over neighbors
-                g_ilxlylz = tf.math.unsorted_segment_sum(data=g_ilxlylz,
-                                                    segment_ids=first_atom_idx,
-                                                    num_segments=nat) # nat x nrad*nspec, n_lxlylz
-                g2_ilxlylz = g_ilxlylz * g_ilxlylz
-                #sum over z
-                gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
-
-
-                norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
-                _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
-                gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
-                #j==k term should be removed, lambda=-1 contribute nothing
-                #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
-                #G_jk = 2 * R_j_equal_k 
-                return [gi3p * norm, gi3n * norm]
-
-            @tf.function
-            def _to_four_body_terms(x):
-                '''
-                compute  up to four-body computation
-
-                '''
-                z = x[0][0]
-                r_idx = x[1][0]
-                g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, r_idx, rij_unit)
-                g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
-                g_ilxlylz = tf.math.unsorted_segment_sum(data=g_ilxlylz,
-                                                    segment_ids=first_atom_idx,
-                                                    num_segments=nat) # nat x nrad*nspec, n_lxlylz
-                g2_ilxlylz = g_ilxlylz * g_ilxlylz
-                #Example: sum of pairwise quantities per atom
-                gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
-                norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
-                _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
-                gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
-                #j==k term should be removed, lambda=-1 contribute nothing
-                #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
-                #G_jk = 2 * R_j_equal_k 
-                # here we have four possible combination of lambda [(1,1), (1,-1), (-1,1), (-1,-1)] but only three of them are unique
-                #contribution after summing over k and l
-                g4_ij_lxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,self.nzeta+r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
-                g4_i_lxlylz = tf.math.unsorted_segment_sum(data=g4_ij_lxlylz,
-                                                segment_ids=first_atom_idx,
-                                                num_segments=nat) # nat x nrad*nspec*n_lxlylz
-
-                g4_i_lxlylz = tf.reshape(g4_i_lxlylz, [nat,self.Nrad*self.spec_size, -1])
-
-                _lambda_plus = tf.ones_like(_lambda_minus)
-                lambda_pm = tf.einsum('i,j->ij',_lambda_minus, _lambda_plus)
-                lambda_mm = tf.einsum('i,j->ij',_lambda_minus, _lambda_minus)
-                g_i_ll_kl = tf.einsum('ijk, ijl->ijkl',g4_i_lxlylz,g4_i_lxlylz)
-
-                g_ij_ll = tf.einsum('ij,ik->ijk',g_ij_lxlylz, g_ij_lxlylz)
-                #contribution after summing over j
-                g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij[:,:,self.nzeta+r_idx], g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
-                g_i_ll_j = tf.math.unsorted_segment_sum(data=g_i_ll_j,
-                                                segment_ids=first_atom_idx,
-                                                num_segments=nat)
-                #sum over the last two axes
-                # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
-                _norm = norm * norm * 0.5
-                g_i_ll_ijk = g_i_ll_j * g_i_ll_kl
-                gi4pp = tf.reduce_sum(g_i_ll_ijk, axis=(2,3)) * _norm #nat,nrad*nspec
-                gi4np = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_pm) * _norm
-                gi4nn = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_mm) * _norm
-                return [gi3p * norm, gi3n * norm, gi4pp, gi4np, gi4nn]
-
-            if self.body_order == 3:
-
-                #Gp, Gn = G3
-                # this is require for proper backward propagation
-                zeta = tf.expand_dims(self.zeta, axis=1)
-                r_idx = tf.expand_dims(tf.range(1,self.nzeta+1), axis=1)
-                #r_idx = tf.range(1,self.nzeta+1)
-                #rij_unit_batch = tf.tile(tf.expand_dims(rij_unit, axis=0), [self.nzeta,1,1])
-                #radial_ij_batch = [radial_ij[:,:,i] for i in range(1,self.nzeta+1)]
-                #first_atom_idx_batch = tf.tile(tf.expand_dims(first_atom_idx, axis=0), [self.nzeta,1])
-                #nat_batch = tf.tile(tf.expand_dims([nat],axis=1), [self.nzeta,1])
-
-                #elements = (zeta, r_idx, rij_unit_batch, radial_ij_batch, first_atom_idx_batch, nat_batch)
-                elements = (zeta, r_idx)
-                '''
-                r_idx = 1
-                z = self.zeta[0]
-                gp,gn = self._to_three_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, nat)
-                Gp = [gp]
-                Gn = [gn]
-                r_idx = 2
-                zeta = tf.constant(self.zeta)
-                for i in tf.range(1,self.nzeta+1):
-                    r_idx = i+1
-                    z = zeta[i]
-                    gp,gn = self._to_three_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, nat)
-                    Gp.append(gp)
-                    Gn.append(gn)
-                '''
-                Gp,Gn = tf.map_fn(_to_three_body_terms,
-                                  elements,
-                              fn_output_signature=[tf.float32,tf.float32],
-                              parallel_iterations=self.nzeta)
-
-                #for lambda in [-1,1]; for z in range(1, zeta+1)
-                Gi3 = tf.stack([Gp, Gn], axis=-1)
-                body_descriptor_3 = tf.reshape(Gi3, [nat, -1])
-                atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_3], axis=1)
-
-            elif self.body_order == 4:
-                '''
-                r_idx = 1
-                z = self.zeta[0]
-                gp,gn,g4pp,g4np,g4nn = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, nat)
-                Gn = [gn]
-                Gp = [gp]
-                G4pp = [g4pp]
-                G4nn = [g4np]
-                G4np  = [g4nn]
-                r_idx = 2
-                #for z in self.zeta[1:]:
-                zeta = tf.constant(self.zeta)
-                for i in tf.range(1,self.nzeta+1):
-                    r_idx = i+1
-                    z = zeta[i]
-                    gp,gn,g4pp,g4np,g4nn = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, nat)
-                    Gp.append(gp)
-                    Gn.append(gn)
-                    G4pp.append(g4pp)
-                    G4np.append(g4np)
-                    G4nn.append(g4nn)
-
-                    r_idx += 1
-                '''
-                zeta = tf.expand_dims(self.zeta, axis=1)
-                r_idx = tf.expand_dims(tf.range(1,self.nzeta+1), axis=1)
-                elements = (zeta, r_idx)
-
-                G3p,G3n,G4pp,G4np,G4nn = tf.map_fn(_to_four_body_terms,
-                                  elements,
-                              fn_output_signature=[tf.float32,tf.float32,tf.float32,tf.float32,tf.float32],
-                              parallel_iterations=self.nzeta)
-
-                Gi4 = tf.stack([G3p,G3n,G4pp,G4np,G4nn], axis=-1)
-                #this is equivalent to
-                #for lambda in [-1,1]; for z in range(1, zeta+1)
+        if self.efield is not None:
+            _efield = tf.constant(self.efield)
+        else:
+            _efield = tf.constant([0.,0.,0.])
+        with tf.GradientTape(persistent=True) as tape1:
+            #the computation of Zstar is a second derivative and require additional gradient tape recording when computing the forces
+            tape1.watch(_efield)
+            with tf.GradientTape(persistent=True) as tape0:
                 #'''
-                body_descriptor_4 = tf.reshape(Gi4, [nat,-1])
-                atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_4], axis=1)
+                tape0.watch(positions)
+                tape0.watch(cell)
 
-            #the descriptors can be scaled
-            atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
-            #feature_size = Nrad * nembedding + Nrad, 2*zeta+1, nembedding
-            
-            atomic_features = tf.reshape(atomic_descriptors, [-1])
-            #if self.features:
-            #    return atomic_features
-            #compute the mean as std for each component of the descriptor in this configuration
-            #mean_descriptors = tf.math.reduce_mean(atomic_descriptors, axis=0)
-            #std_descriptors = tf.math.reduce_std(atomic_descriptors, axis=0)
+                #based on ase 
+                #npairs x 3
+                all_rij = tf.gather(positions,second_atom_idx) - \
+                         tf.gather(positions,first_atom_idx) + \
+                        tf.tensordot(shift_vector,cell,axes=1)
 
-            #atomic_descriptors -= mean_descriptors
-            #atomic_descriptors /= (std_descriptors + 1e-8)
+                all_rij_norm = tf.linalg.norm(all_rij, axis=-1) #npair
+                reg = 1e-12
+                #all_rij_norm = tf.sqrt(tf.reduce_sum(all_rij * all_rij , axis=-1) + reg) #npair
 
-            #predict energy and forces
-            _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
-            if self.include_vdw:
-                # C6 has a shape of nat
-                C6 = tf.nn.relu(_atomic_energies[:,1])
-                atomic_energies = _atomic_energies[:,0]
-                C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx) # npair,
-                #na from C6_extended in 1xNeigh and C6 in nat
-                C6_ij = tf.sqrt(C6_ij + 1e-16)
-                evdw = help_fn.vdw_contribution((all_rij_norm, C6_ij,
-                                                 self.rmin_u,
-                                                 self.rmax_u,
-                                                 self.rmin_d,
-                                                 self.rmax_d))[0]
+                if self.species_correlation=='tensor':
+                    species_encoder_extended = tf.einsum('ik,il->ikl',
+                                                     tf.gather(species_encoder,first_atom_idx),
+                                                     tf.gather(species_encoder,second_atom_idx)
+                                                     )
+                else:
+                    species_encoder_extended = tf.einsum('ik,ik->ik',
+                                                     tf.gather(species_encoder,first_atom_idx),
+                                                     tf.gather(species_encoder,second_atom_idx)
+                                                     )
 
-            if self.coulumb:
-                E1 = _atomic_energies[:,-2]
-                E2 = tf.nn.relu(_atomic_energies[:,-1])
-                _ewald = ewald(positions, cell, nat,
-                        gaussian_width,self.accuracy, None, self.pbc)
-                Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
-                charges = self.compute_charges(Vij, E1, E2)
-                ecoul = self.compute_coulumb_energy(charges, E1, E2, Vij)
-                atomic_energies = _atomic_energies[:,0]
-            if not self.coulumb and not self.include_vdw:
-                atomic_energies = _atomic_energies
 
-            total_energy = tf.reduce_sum(atomic_energies)
+                species_encoder_ij = tf.reshape(species_encoder_extended, 
+                                                      [-1, self.spec_size]
+                                                       ) #npairs,spec_size
 
-            if self.include_vdw:
-                total_energy += evdw
-            if self.coulumb:
-                total_energy += ecoul
+                #since fcut =0 for rij > rc, there is no need for any special treatment
+                #species_encoder Nneigh and reshaped to nat x Nneigh x embedding
+                #fcuts is nat x Nneigh and reshaped to nat x Nneigh
+                #_Nneigh = tf.shape(all_rij_norm)
+                #neigh = _Nneigh[1]
+                kn_rad = tf.ones(Nrad,dtype=tf.float32)
+                bf_radial = help_fn.bessel_function(all_rij_norm,
+                                                rc,kn_rad,
+                                                self.Nrad) #
 
-            #forces = g.jacobian(total_energy, positions)
-        forces = g.gradient(total_energy, positions)
-        forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
+                bf_radial = tf.reshape(bf_radial, [-1,self.Nrad])
+                bf_radial = self.radial_funct_net(bf_radial)
+                bf_radial = tf.reshape(bf_radial, [num_pairs, self.Nrad, self.number_radial_components])
+                radial_ij = tf.einsum('ijl,ik->ijkl',bf_radial, species_encoder_ij) # npairs x Nrad x nembeddingxzeta (l=zeta)
+                radial_ij = tf.reshape(radial_ij, [num_pairs, self.Nrad*self.spec_size,self.number_radial_components])
+                atomic_descriptors = tf.math.segment_sum(data=radial_ij[:,:,0],
+                                                                  segment_ids=first_atom_idx) 
 
-        dE_dh = g.gradient(total_energy, cell)
-        #V = tf.abs(tf.linalg.det(cell))
-        V = tf.abs(tf.tensordot(cell[0], tf.linalg.cross(cell[1], cell[2]),axes=1))
+                #implement angular part: compute vect_rij dot vect_rik / rij / rik
+                rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm + reg)) #npair,3
+                #rij_unit = all_rij / (all_rij_norm[:,None] + reg)
+                @tf.function
+                def _to_three_body_terms(x):
+                    '''
+                    compute vectorize three-body computation
+
+                    '''
+                    z = x[0][0]
+                    r_idx = x[1][0]
+                    g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, rij_unit)
+                    g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
+                    #sum over neighbors
+                    g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
+                                                        segment_ids=first_atom_idx)
+                    # nat x nrad*nspec, n_lxlylz
+                    g2_ilxlylz = g_ilxlylz * g_ilxlylz
+                    #sum over z
+                    gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
+
+
+                    norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
+                    _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
+                    gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
+                    #j==k term should be removed, lambda=-1 contribute nothing
+                    #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
+                    #G_jk = 2 * R_j_equal_k 
+                    return [gi3p * norm, gi3n * norm]
+
+                @tf.function
+                def _to_four_body_terms(x):
+                    '''
+                    compute  up to four-body computation
+
+                    '''
+                    z = x[0][0]
+                    r_idx = x[1][0]
+                    g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, r_idx, rij_unit)
+                    g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
+                    g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
+                                                        segment_ids=first_atom_idx)# nat x nrad*nspec, n_lxlylz
+                    g2_ilxlylz = g_ilxlylz * g_ilxlylz
+                    #Example: sum of pairwise quantities per atom
+                    gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
+                    norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
+                    _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
+                    gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
+                    #j==k term should be removed, lambda=-1 contribute nothing
+                    #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
+                    #G_jk = 2 * R_j_equal_k 
+                    # here we have four possible combination of lambda [(1,1), (1,-1), (-1,1), (-1,-1)] but only three of them are unique
+                    #contribution after summing over k and l
+                    g4_ij_lxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,self.nzeta+r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
+                    g4_i_lxlylz = tf.math.segment_sum(data=g4_ij_lxlylz,
+                                                    segment_ids=first_atom_idx)
+                                                    # nat x nrad*nspec*n_lxlylz
+
+                    g4_i_lxlylz = tf.reshape(g4_i_lxlylz, [nat,self.Nrad*self.spec_size, -1])
+
+                    _lambda_plus = tf.ones_like(_lambda_minus)
+                    lambda_pm = tf.einsum('i,j->ij',_lambda_minus, _lambda_plus)
+                    lambda_mm = tf.einsum('i,j->ij',_lambda_minus, _lambda_minus)
+                    g_i_ll_kl = tf.einsum('ijk, ijl->ijkl',g4_i_lxlylz,g4_i_lxlylz)
+
+                    g_ij_ll = tf.einsum('ij,ik->ijk',g_ij_lxlylz, g_ij_lxlylz)
+                    #contribution after summing over j
+                    g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij[:,:,self.nzeta+r_idx], g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
+                    g_i_ll_j = tf.math.segment_sum(data=g_i_ll_j,
+                                                    segment_ids=first_atom_idx)
+                    #sum over the last two axes
+                    # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
+                    _norm = norm * norm * 0.5
+                    g_i_ll_ijk = g_i_ll_j * g_i_ll_kl
+                    gi4pp = tf.reduce_sum(g_i_ll_ijk, axis=(2,3)) * _norm #nat,nrad*nspec
+                    gi4np = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_pm) * _norm
+                    gi4nn = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_mm) * _norm
+                    return [gi3p * norm, gi3n * norm, gi4pp, gi4np, gi4nn]
+
+                if self.body_order == 3:
+
+                    #Gp, Gn = G3
+                    # this is require for proper backward propagation
+                    zeta = tf.expand_dims(self.zeta, axis=1)
+                    r_idx = tf.expand_dims(tf.range(1,self.nzeta+1), axis=1)
+                    #r_idx = tf.range(1,self.nzeta+1)
+                    #rij_unit_batch = tf.tile(tf.expand_dims(rij_unit, axis=0), [self.nzeta,1,1])
+                    #radial_ij_batch = [radial_ij[:,:,i] for i in range(1,self.nzeta+1)]
+                    #first_atom_idx_batch = tf.tile(tf.expand_dims(first_atom_idx, axis=0), [self.nzeta,1])
+                    #nat_batch = tf.tile(tf.expand_dims([nat],axis=1), [self.nzeta,1])
+
+                    #elements = (zeta, r_idx, rij_unit_batch, radial_ij_batch, first_atom_idx_batch, nat_batch)
+                    elements = (zeta, r_idx)
+                    Gp,Gn = tf.map_fn(_to_three_body_terms,
+                                      elements,
+                                  fn_output_signature=[tf.float32,tf.float32],
+                                  parallel_iterations=self.nzeta)
+
+                    #for lambda in [-1,1]; for z in range(1, zeta+1)
+                    Gi3 = tf.stack([Gp, Gn], axis=-1)
+                    body_descriptor_3 = tf.reshape(Gi3, [nat, -1])
+                    atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_3], axis=1)
+
+                elif self.body_order == 4:
+                    zeta = tf.expand_dims(self.zeta, axis=1)
+                    r_idx = tf.expand_dims(tf.range(1,self.nzeta+1), axis=1)
+                    elements = (zeta, r_idx)
+
+                    G3p,G3n,G4pp,G4np,G4nn = tf.map_fn(_to_four_body_terms,
+                                      elements,
+                                  fn_output_signature=[tf.float32,tf.float32,tf.float32,tf.float32,tf.float32],
+                                  parallel_iterations=self.nzeta)
+
+                    Gi4 = tf.stack([G3p,G3n,G4pp,G4np,G4nn], axis=-1)
+                    #this is equivalent to
+                    #for lambda in [-1,1]; for z in range(1, zeta+1)
+                    #'''
+                    body_descriptor_4 = tf.reshape(Gi4, [nat,-1])
+                    atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_4], axis=1)
+
+                #the descriptors can be scaled
+                atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
+                #feature_size = Nrad * nembedding + Nrad, 2*zeta+1, nembedding
+                
+         #       atomic_features = tf.reshape(atomic_descriptors, [-1])
+                #if self.features:
+                #    return atomic_features
+                #compute the mean as std for each component of the descriptor in this configuration
+                #mean_descriptors = tf.math.reduce_mean(atomic_descriptors, axis=0)
+                #std_descriptors = tf.math.reduce_std(atomic_descriptors, axis=0)
+
+                #atomic_descriptors -= mean_descriptors
+                #atomic_descriptors /= (std_descriptors + 1e-8)
+
+                #predict energy and forces
+                _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
+                if self.include_vdw:
+                    # C6 has a shape of nat
+                    C6 = tf.nn.relu(_atomic_energies[:,1])
+                    atomic_energies = _atomic_energies[:,0]
+                    C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx) # npair,
+                    #na from C6_extended in 1xNeigh and C6 in nat
+                    C6_ij = tf.sqrt(C6_ij + 1e-16)
+                    evdw = help_fn.vdw_contribution((all_rij_norm, C6_ij,
+                                                     self.rmin_u,
+                                                     self.rmax_u,
+                                                     self.rmin_d,
+                                                     self.rmax_d))[0]
+
+                if self.coulumb:
+                    E1 = _atomic_energies[:,-2]
+                    _b = tf.identity(E1)
+                    E2 = tf.nn.relu(_atomic_energies[:,-1])
+                    _ewald = ewald(positions, cell, nat,
+                            gaussian_width,self.accuracy, None, self.pbc, _efield)
+                    Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
+                    if self.efield is not None:
+                        field_kernel = _ewald.sawtooth_PE()
+                        _b += field_kernel
+                    charges = self.compute_charges(Vij, _b, E2)
+                    efield_energy = tf.reduce_sum(charges * field_kernel)
+                    ecoul = self.compute_coulumb_energy(charges, E1, E2, Vij)
+                    ecoul += efield_energy
+                    atomic_energies = _atomic_energies[:,0]
+                if not self.coulumb and not self.include_vdw:
+                    atomic_energies = _atomic_energies
+
+                total_energy = tf.reduce_sum(atomic_energies)
+
+                if self.include_vdw:
+                    total_energy += evdw
+                if self.coulumb:
+                    total_energy += ecoul
+
+            #differentiating a scalar w.r.t tensors
+            forces = tape0.gradient(total_energy, positions)
+             
+        #only need g to be persistent
+        dE_dh = tape0.gradient(total_energy, cell)
+
+        V = tf.abs(tf.linalg.det(cell))
+        #V = tf.abs(tf.tensordot(cell[0], tf.linalg.cross(cell[1], cell[2]),axes=1))
         # Stress: stress_{ij} = (1/V) \sum_k dE/dh_{ik} * h_{jk}
         stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / V
+        #born effective charges
+        if self.efield is not None and not self.is_training:
+            @tf.function
+            def compute_jac():
+
+                Zstar = tf.squeeze(tape1.jacobian(forces,_efield, experimental_use_pfor=False)) #This is in unit of electron charges
+                Zstar = tf.reshape(Zstar, [nat,9])
+                Zstar = tf.pad(-Zstar, paddings=[[0,nmax_diff],[0,0]])
+                return Zstar
+            Zstar = compute_jac()
+            #Zstar = tf.reshape(Zstar, [-1])
+        else:
+            Zstar = tf.zeros((nat+nmax_diff,9))
+
         C6 = tf.pad(C6,[[0,nmax_diff]])
         if self.coulumb:
             charges = tf.pad(charges,[[0,nmax_diff]])
         else:
             charges = tf.zeros_like(C6)
-        return [total_energy, forces, atomic_features,C6, charges,stress]
+        forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
+        return [total_energy, forces,C6, charges,stress,Zstar]
 
-    @tf.function
-    def batch_predict(self, elements_batch):
-        results = [self.tf_predict_energy_forces(e) for e in elements_batch]
-        energies, forces, atomic_features, C6, charges, stress = zip(*results)
-        return (
-        tf.stack(energies),
-        tf.stack(forces),
-        tf.stack(atomic_features),
-        tf.stack(C6),
-        tf.stack(charges),
-        tf.stack(stress),
-        )
  
     @tf.function
     def map_fn_parallel(self, elements):
         out_signature = [
             tf.float32,  # energies
             tf.float32,  # forces
-            tf.float32,  # atomic_features
+#            tf.float32,  # atomic_features
             tf.float32,  # C6
             tf.float32,  # charges
             tf.float32,  # stress
+            tf.float32  # zstar
         ]
 
 
@@ -757,7 +641,6 @@ class mBP_model(tf.keras.Model):
         batch_species_encoder = tf.reshape(batch_species_encoder, [-1,self.nspec_embedding*nmax])
 
         '''
-
         # Build lookup table
         # Create a -1 mapping first (everything invalid maps to -1)
         mapping_array = -tf.ones([self.nelement], dtype=tf.int32)
@@ -792,8 +675,8 @@ class mBP_model(tf.keras.Model):
         #cells = inputs[3]
 
         #first_atom_idx = tf.cast(inputs[6].to_tensor(shape=(self.batch_size, -1)), tf.int32)
-        num_neigh = tf.cast(tf.reshape(inputs[8], [-1]), tf.int32)
-        neigh_max = tf.reduce_max(num_neigh)
+        num_pairs = tf.cast(tf.reshape(inputs[8], [-1]), tf.int32)
+        neigh_max = tf.reduce_max(num_pairs)
         first_atom_idx = tf.cast(inputs[5], tf.int32)
         second_atom_idx = tf.cast(inputs[6], tf.int32)
         #shift_vectors = tf.reshape(tf.cast(inputs[7][:,:neigh_max*3],tf.int32), (-1, neigh_max*3))
@@ -801,46 +684,33 @@ class mBP_model(tf.keras.Model):
         gaussian_width = tf.cast(inputs[9], tf.float32)
         elements = (batch_species_encoder,positions, 
                     nmax_diff, batch_nats,cells,C6, 
-                first_atom_idx,second_atom_idx,shift_vectors,num_neigh, gaussian_width)
+                first_atom_idx,second_atom_idx,shift_vectors,num_pairs, gaussian_width)
 
-        #if self.features:
-        #    features = tf.map_fn(self.tf_predict_energy_forces, elements, 
-        #                             fn_output_signature=tf.float32,
-        #                             parallel_iterations=self.batch_size)
-            #energies, forces, atomic_features = self.func_map(elements)
-
-        #    return features, self.feature_size
         # energies, forces, atomic_features, C6, charges, stress
-        out_signature = [
-            tf.float32,  # energies
-            tf.float32,  # forces
-            tf.float32,  # atomic_features
-            tf.float32,  # C6
-            tf.float32,  # charges
-            tf.float32,  # stress
-        ]
-        #energies, forces, atomic_features, C6, charges,stress = tf.map_fn(self.tf_predict_energy_forces, elements,
-        #                             fn_output_signature=out_signature,
-        #                             parallel_iterations=self.batch_size)
-        energies, forces, atomic_features, C6, charges, stress = self.map_fn_parallel(elements)
-        #energies, forces, atomic_features, C6, charges,stress = self.batch_predict(elements)
-        #energies, forces, atomic_features, C6, charges,stress = tf.vectorized_map(self.tf_predict_energy_forces, elements)
+        energies, forces, C6, charges, stress, Zstar = self.map_fn_parallel(elements)
 
-        outs = [energies, forces, atomic_features]
-        if self.include_vdw:
-            outs.append(C6)
-        if self.coulumb:
-            outs.append(charges)
-        outs.append(stress)
-        return tuple(outs)
-    
+        #outs = [energies, forces, atomic_features]
+        outs = {'energy':energies,
+                'forces':forces,
+                #'features':atomic_features,
+                'C6': C6,
+                'charges': charges,
+                'stress': stress,
+                'Zstar':Zstar}
+        #if self.include_vdw:
+        #    outs.append(C6)
+        #if self.coulumb:
+        #    outs.append(charges)
+        #outs.append(stress)
+        #outs.append(Zstar)
+        return outs
+
     def compile(self, optimizer, loss, loss_f=None):
         super().compile()
         self.optimizer = optimizer
         self.loss_e = loss
         if loss_f:
             self.loss_f = loss_f
-    #@tf.function(jit_compile=False)
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
@@ -860,18 +730,16 @@ class mBP_model(tf.keras.Model):
             #outs = self(inputs_target[:10], training=True)
             outs = self(inputs_target[:10], training=True)
             #outs = self(data, training=True)
-            e_pred = outs[0]
-            forces = outs[1]
-            stress = outs[-1]
-            features = outs[2]
-            idx = 3
+            e_pred = outs['energy']
+            forces = outs['forces']
+            stress = outs['stress']
+            Zstar = outs['Zstar']
+            #features = outs['features']
             C6 = charges = None
             if self.include_vdw:
-                C6 = outs[idx]
-                idx += 1
+                C6 = outs['C6']
             if self.coulumb:
-                charges = outs[idx]
-                idx += 1
+                charges = outs['charges']
 
             target = tf.reshape(inputs_target[10], [-1])
             target_f = inputs_target[11][:,:nmax*3]
@@ -942,6 +810,9 @@ class mBP_model(tf.keras.Model):
                 tf.summary.histogram(f'4. C6 parameters',C6, self._train_counter)
             if self.coulumb:
                 tf.summary.histogram(f'5. charges',charges, self._train_counter)
+            if self.efield is not None:
+                tf.summary.histogram(f'6. Born charges',Zstar, self._train_counter)
+
         #'''
         return {key: metrics[key] for key in metrics.keys()}
 
@@ -957,21 +828,17 @@ class mBP_model(tf.keras.Model):
         #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
         outs = self(inputs_target[:10], training=True)
         #outs = self(data, training=True)
-        e_pred = outs[0]
-        forces = outs[1]
-        stress = outs[-1]
-        features = outs[2]
-        idx = 3
+        e_pred = outs['energy']
+        forces = outs['forces']
+        stress = outs['stress']
+        Zstar = outs['Zstar']
+        #features = outs['features']
         C6 = charges = None
         if self.include_vdw:
-            C6 = outs[idx]
-            idx += 1
+            C6 = outs['C6']
         if self.coulumb:
-            charges = outs[idx]
-            idx += 1
-
+            charges = outs['charges']
         target = tf.cast(tf.reshape(inputs_target[10], [-1]), tf.float32)
-        
         target_f = tf.reshape(inputs_target[11][:,:nmax*3], [-1, 3*nmax])
 
         #e_pred, forces, _ = self(inputs_target[:9], training=True)  # Forward pass
@@ -1019,18 +886,16 @@ class mBP_model(tf.keras.Model):
        # target_f = tf.reshape(inputs_target[10][:,:nmax*3], [-1, 3*nmax])
         outs = self(inputs_target[:10], training=False)
         #outs = self(data, training=False)
-        e_pred = outs[0]
-        forces = outs[1]
-        stress = outs[-1]
-        features = outs[2]
-        idx = 3
+        e_pred = outs['energy']
+        forces = outs['forces']
+        stress = outs['stress']
+        Zstar = outs['Zstar']
+        #features = outs['features']
         C6 = charges = None
         if self.include_vdw:
-            C6 = outs[idx]
-            idx += 1
+            C6 = outs['C6']
         if self.coulumb:
-            charges = outs[idx]
-            idx += 1
+            charges = outs['charges']
 
         target = tf.cast(tf.reshape(inputs_target[10], [-1]), tf.float32)
         target_f = tf.reshape(inputs_target[11][:,:nmax*3], [-1, 3*nmax])

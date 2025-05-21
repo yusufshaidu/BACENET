@@ -4,14 +4,17 @@ import scipy.constants as constants
 import math
 #pi = tf.constant(math.pi)
 pi = 3.141592653589793
-CONV_FACT = 1e10 * constants.e / (4 * pi * constants.epsilon_0)
+
+constant_e = 1.602176634e-19
+constant_eps = 8.8541878128e-12
+CONV_FACT = 1e10 * constant_e / (4 * pi * constant_eps)
 
 class ewald:
     '''
     A pyth on class to implement ewasld sum with gaussian charge distribution
     '''
     def __init__(self, positions, cell, n_atoms, gaussian_width,
-                 accuracy, gmax,pbc): 
+                 accuracy, gmax,pbc=False,efield=None): 
         '''
            positions: atomic positions in Angstrom
            cell: cell dimension
@@ -35,8 +38,13 @@ class ewald:
         if self.pbc:
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
             gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(gaussian_width))
-            self._gmax = gmax if gmax else 2.* gamma_max * tf.sqrt(-tf.log(accuracy))
-        
+            self._gmax = gmax if gmax else 2.* gamma_max * tf.sqrt(-tf.math.log(accuracy))
+        if efield is not None:
+            self.efield = tf.squeeze(efield)
+            self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
+        else:
+            self.efield = [0.,0.,0.]
+
     def real_space_term(self):
         '''
         calculates the self interaction contribution to the electrostatic energy
@@ -108,9 +116,12 @@ class ewald:
 
         # Build integer index grid for k-vectors
         # Estimate index ranges for each dimension
-        b1_norm, b2_norm, b3_norm = tf.linalg.norm(self.reciprocal_cell, axis=-1)
+        b_norm = tf.linalg.norm(self.reciprocal_cell, axis=-1)
+        b1_norm = b_norm[0]
+        b2_norm = b_norm[1]
+        b3_norm = b_norm[2]
         nmax1 = tf.cast(tf.math.floor(self._gmax / b1_norm), tf.int32)
-        nmax2 = tf.cast(tf.math.floor(self._gmax/ b2_norm), tf.int32)
+        nmax2 = tf.cast(tf.math.floor(self._gmax / b2_norm), tf.int32)
         nmax3 = tf.cast(tf.math.floor(self._gmax / b3_norm), tf.int32)
         
         n1 = tf.range(-nmax1, nmax1 + 1, dtype=tf.int32)
@@ -129,7 +140,9 @@ class ewald:
         nonzero = ~tf.reduce_all(tf.equal(replicas, 0), axis=1)
         mask = tf.logical_and(g_norm <= self._gmax, nonzero)
         g_vecs = tf.boolean_mask(g_all, mask)  # [K,3]
+        g_norm = tf.boolean_mask(g_norm, mask) #[K,
         g_sq = g_norm*g_norm  # [K]
+        
 
         # Prepare factors for summation
         # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
@@ -146,6 +159,15 @@ class ewald:
         Vij = tf.reduce_sum(exp_ij_by_g_sq * cos_term, axis=-1)  # [N,N]
 
         # Multiply by prefactor (charges, 4π/V, Coulomb constant e²/4πε0 in eV·Å units) so that E = 1/2 \sum_ij Vij
-        Vij *= CONV_FACT * (4.* np.pi / volume)
+        Vij *= CONV_FACT * (4.* np.pi / self.volume)
         
         return Vij 
+    def sawtooth_PE(self):
+        #k = n1 b1 + n2 b2 + n3 b3. We will set n1 = n2 = n3
+        g = tf.reduce_sum(self.reciprocal_cell, axis=0)
+        positions = self._positions
+        gr = tf.math.sin(tf.einsum('ij,j->ij', positions, g))
+        kernel = tf.einsum('ij,j,j->i', gr, self.efield, 1.0 / (g + 1e-12))
+        return kernel
+
+        

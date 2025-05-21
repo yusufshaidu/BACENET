@@ -72,7 +72,9 @@ def default_config():
         'accuracy': 1e-6,
         'total_charge': 0.0,
         'features': False,
-        'normalize': False
+        'normalize': False,
+        'efield': None,
+        'is_training': True
     }
 def get_compiled_model(configs,optimizer,example_input):
     
@@ -80,13 +82,13 @@ def get_compiled_model(configs,optimizer,example_input):
     #We should do something for tensorflow > 2.15.0
     #fake call to build the model
     # This will “dry run” through call() and allocate weights:
-    example_input = unpack_data(example_input)
-    outs = _model(example_input, training=False)
+    #example_input = unpack_data(example_input)
+    #outs = _model(example_input, training=False)
     _model.compile(optimizer=optimizer,
                   loss=help_fn.quad_loss,
                   loss_f = help_fn.force_loss)
 
-    print(_model.summary())
+#    print(_model.summary())
     return _model
 
 class CustomCallback(tf.keras.callbacks.Callback):
@@ -225,8 +227,11 @@ def create_model(configs):
 
     if os.path.exists(model_outdir+"/tmp_backup"):
         print(f"Restoring from checkpoint {model_outdir}+'/tmp_backup'")
-        epochs = np.loadtxt(model_outdir+"/metrics.dat",skiprows=1, usecols=0)
-        last_epoch = int(epochs[-1])
+        epochs = np.loadtxt(model_outdir+"/metrics.dat",skiprows=1, usecols=0).tolist()
+        if type(epochs) is list: 
+            last_epoch = int(epochs[-1])
+        else:
+            last_epoch = int(epochs)
     else:
         last_epoch = 0
 
@@ -267,6 +272,7 @@ def create_model(configs):
     
     #checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}-{val_loss:.5f}.keras"
 #    checkpoint_path = model_outdir+"/models/ckpts-{epoch:04d}.keras"
+    '''
     if tf.config.list_physical_devices('GPU'):
         strategy = tf.distribute.MirroredStrategy()
         print(f'found {strategy.num_replicas_in_sync} GPUs!')
@@ -275,7 +281,8 @@ def create_model(configs):
     
     global_batch_size = (configs['batch_size'] *
                      strategy.num_replicas_in_sync)
-    #global_batch_size = configs['batch_size']
+    '''
+    global_batch_size = configs['batch_size']
     # Data preparation
     print('Preparing data...')
     if configs['include_vdw']:
@@ -316,8 +323,8 @@ def create_model(configs):
                                                           delete_checkpoint=False)
     #    callbacks.append(backupandrestore)
 
-    with strategy.scope():
-        model = get_compiled_model(configs,
+    #with strategy.scope():
+    model = get_compiled_model(configs,
                                    opt(configs, lr_schedule),list(train_data)[0])
     model.save_weights(checkpoint_path.format(epoch=0))
     #model.save(checkpoint_path.format(epoch=0))

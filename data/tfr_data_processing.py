@@ -98,7 +98,7 @@ def load_tfrs(filenames,batch_size):
     ignore_order.experimental_deterministic = False  # disable order, increase speed
     dataset = tf.data.TFRecordDataset(
         filenames,
-#        buffer_size=batch_size,
+        #buffer_size=,
         num_parallel_reads=AUTOTUNE
     )  # automatically interleaves reads from multiple files
     dataset = dataset.with_options(
@@ -111,19 +111,16 @@ def load_tfrs(filenames,batch_size):
     #                      num_parallel_calls=AUTOTUNE)
 
     # returns a dataset
-    dataset.cache()
+    #dataset.cache()
     return dataset
 
 def get_tfrs(filenames, batch_size,repeat_count=None):
     AUTOTUNE = tf.data.AUTOTUNE
     dataset = load_tfrs(filenames,batch_size)
     dataset = dataset.shuffle(buffer_size=1024)
-    dataset = dataset.prefetch(buffer_size=AUTOTUNE)
     dataset = dataset.batch(batch_size,
                             num_parallel_calls=AUTOTUNE,
                             deterministic=False)
-    #if repeat_count is None:
-    #    repeat_count = batch_size
-    #dataset = dataset.repeat(count=repeat_count)
+    dataset = dataset.prefetch(buffer_size=AUTOTUNE)
     return dataset
 
