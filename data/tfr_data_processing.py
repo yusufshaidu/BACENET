@@ -98,7 +98,7 @@ def load_tfrs(filenames,batch_size):
     ignore_order.experimental_deterministic = False  # disable order, increase speed
     dataset = tf.data.TFRecordDataset(
         filenames,
-        #buffer_size=,
+        buffer_size=64,
         num_parallel_reads=AUTOTUNE
     )  # automatically interleaves reads from multiple files
     dataset = dataset.with_options(

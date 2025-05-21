@@ -531,9 +531,10 @@ class mBP_model(tf.keras.Model):
                         field_kernel = _ewald.sawtooth_PE()
                         _b += field_kernel
                     charges = self.compute_charges(Vij, _b, E2)
-                    efield_energy = tf.reduce_sum(charges * field_kernel)
                     ecoul = self.compute_coulumb_energy(charges, E1, E2, Vij)
-                    ecoul += efield_energy
+                    if self.efield is not None:
+                        efield_energy = tf.reduce_sum(charges * field_kernel)
+                        ecoul += efield_energy
                     atomic_energies = _atomic_energies[:,0]
                 if not self.coulumb and not self.include_vdw:
                     atomic_energies = _atomic_energies

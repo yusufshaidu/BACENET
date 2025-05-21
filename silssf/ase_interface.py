@@ -17,7 +17,7 @@ from pathlib import Path
 import os
 
 class wBP_Calculator(Calculator):
-    implemented_properties = ['energy', 'forces', 'stress','charges']
+    implemented_properties = ['energy', 'forces', 'stress','charges', 'zstar']
     #implemented_properties = ['energy', 'forces']
 #    ignored_changes = {'pbc'}
 #    discard_results_on_any_change = True
@@ -132,6 +132,7 @@ class wBP_Calculator(Calculator):
         stress = tf.squeeze(outs['stress']).numpy()
         charges = tf.squeeze(outs['charges']).numpy()
         zstar = tf.squeeze(outs['Zstar']).numpy()
+        atoms.set_array('zstar',zstar)
 
         '''
         configs['species_identity'] = species_identity
@@ -149,5 +150,5 @@ class wBP_Calculator(Calculator):
             "forces":forces,
             "stress":stress,
             "charges":charges,
-            "zstar":zstar} 
+            "zstar":zstar}
 
