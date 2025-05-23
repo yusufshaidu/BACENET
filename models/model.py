@@ -16,6 +16,9 @@ import warnings
 import logging
 constant_e = 1.602176634e-19
 
+#tf.config.run_functions_eagerly(
+#    True
+#)
 
 class mBP_model(tf.keras.Model):
    
@@ -359,13 +362,13 @@ class mBP_model(tf.keras.Model):
                 #_Nneigh = tf.shape(all_rij_norm)
                 #neigh = _Nneigh[1]
                 kn_rad = tf.ones(Nrad,dtype=tf.float32)
-                bf_radial = help_fn.bessel_function(all_rij_norm,
+                bf_radial0 = help_fn.bessel_function(all_rij_norm,
                                                 rc,kn_rad,
                                                 self.Nrad) #
 
-                bf_radial = tf.reshape(bf_radial, [-1,self.Nrad])
-                bf_radial = self.radial_funct_net(bf_radial)
-                bf_radial = tf.reshape(bf_radial, [num_pairs, self.Nrad, self.number_radial_components])
+                bf_radial1 = tf.reshape(bf_radial0, [-1,self.Nrad])
+                bf_radial2 = self.radial_funct_net(bf_radial1)
+                bf_radial = tf.reshape(bf_radial2, [num_pairs, self.Nrad, self.number_radial_components])
                 radial_ij = tf.einsum('ijl,ik->ijkl',bf_radial, species_encoder_ij) # npairs x Nrad x nembeddingxzeta (l=zeta)
                 radial_ij = tf.reshape(radial_ij, [num_pairs, self.Nrad*self.spec_size,self.number_radial_components])
                 atomic_descriptors = tf.math.segment_sum(data=radial_ij[:,:,0],
@@ -373,8 +376,12 @@ class mBP_model(tf.keras.Model):
 
                 #implement angular part: compute vect_rij dot vect_rik / rij / rik
                 rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm + reg)) #npair,3
-                #rij_unit = all_rij / (all_rij_norm[:,None] + reg)
-                @tf.function
+                #rij_u`nit = all_rij / (all_rij_norm[:,None] + reg)
+                @tf.function(jit_compile=False,
+                        input_signature=[(
+                    tf.TensorSpec(shape=(1,), dtype=tf.int32),
+                    tf.TensorSpec(shape=(1,), dtype=tf.int32))]
+                     )
                 def _to_three_body_terms(x):
                     '''
                     compute vectorize three-body computation
@@ -401,7 +408,16 @@ class mBP_model(tf.keras.Model):
                     #G_jk = 2 * R_j_equal_k 
                     return [gi3p * norm, gi3n * norm]
 
-                @tf.function
+                #@tf.function(jit_compile=False,
+                #        input_signature=[(
+                #    tf.TensorSpec(shape=(), dtype=tf.int32),
+                #    tf.TensorSpec(shape=(), dtype=tf.int32))]
+                #     )
+                @tf.function(jit_compile=False,
+                        input_signature=[(
+                    tf.TensorSpec(shape=(1,), dtype=tf.int32),
+                    tf.TensorSpec(shape=(1,), dtype=tf.int32))]
+                     )
                 def _to_four_body_terms(x):
                     '''
                     compute  up to four-body computation

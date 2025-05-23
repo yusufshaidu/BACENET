@@ -137,7 +137,7 @@ class ewald:
         g_all = tf.matmul(replicas, self.reciprocal_cell)  # [M,3] = n · recip_cell (each row n * recip_cell)
         # Mask: exclude (0,0,0) and enforce |k|<=kmax
         g_norm = tf.linalg.norm(g_all, axis=1)
-        nonzero = ~tf.reduce_all(tf.equal(replicas, 0), axis=1)
+        nonzero = tf.reduce_all(tf.not_equal(replicas, 0), axis=1)
         mask = tf.logical_and(g_norm <= self._gmax, nonzero)
         g_vecs = tf.boolean_mask(g_all, mask)  # [K,3]
         g_norm = tf.boolean_mask(g_norm, mask) #[K,
@@ -149,7 +149,7 @@ class ewald:
         # shape [K, N]
         g2_gamma2 = tf.einsum('ij,l->ijl', gamma_ij2/2.0, g_sq) # [N,N,K]
         exp_ij = tf.exp(-g2_gamma2)
-        exp_ij_by_g_sq = exp_ij / g_sq[None,None,:]
+        exp_ij_by_g_sq = exp_ij / (g_sq[None,None,:] + 1e-12)
 
         # The cosine term: shape [N,N,K]
         cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
