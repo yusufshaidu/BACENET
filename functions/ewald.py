@@ -39,8 +39,9 @@ class ewald:
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
             gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(gaussian_width))
             self._gmax = gmax if gmax else 2.* gamma_max * tf.sqrt(-tf.math.log(accuracy))
+            #self._gmax *= 1.10
         if efield is not None:
-            self.efield = tf.squeeze(efield)
+            self.efield = tf.cast(tf.squeeze(efield), dtype=tf.float32)
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
         else:
             self.efield = [0.,0.,0.]
@@ -90,8 +91,16 @@ class ewald:
             return [V, CONV_FACT*force, rij, gamma_all]
         '''
         return Vij
-
-
+    @tf.function
+    def estimate_gmax(self,sigma_min):
+        gmax = 1.0
+        result = 1e2
+        c = lambda gmax, result: tf.greater(result, self._accuracy)
+        b = lambda gmax, result: (gmax + 0.1, 
+                                  tf.exp(-gmax**2*sigma_min**2/2.)/gmax**2*2.*pi/self.volume)
+        return tf.while_loop(c, b, [gmax, result])[0]
+    
+    @tf.function
     def recip_space_term(self): 
         '''
         calculates the interaction contribution to the electrostatic energy
@@ -102,27 +111,21 @@ class ewald:
         # the force on k due to atoms j is
         # rk-ri
         rij = self._positions[:,None,:] - self._positions[None,:,:]
-        gamma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width**2
+        sigma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width**2
+        
 
-        # refine kmax
-        #gamma_max = tf.reduce_max(gamma_ij)
-        #err = np.exp(-self.kmax**2/(4*gamma_max**2))
-       # while err > acc_factor:
-       #     kmax += 0.1
-       #     err = np.exp(-kmax**2/(4*gamma_max**
-
-       #         2))
-       # kmax *= 1.00001
+        gmax = self.estimate_gmax(tf.reduce_min(self._gaussian_width))
 
         # Build integer index grid for k-vectors
         # Estimate index ranges for each dimension
+        #b1_norm,b2_norm,b3_norm = tf.linalg.norm(self.reciprocal_cell, axis=-1)
         b_norm = tf.linalg.norm(self.reciprocal_cell, axis=-1)
         b1_norm = b_norm[0]
         b2_norm = b_norm[1]
         b3_norm = b_norm[2]
-        nmax1 = tf.cast(tf.math.floor(self._gmax / b1_norm), tf.int32)
-        nmax2 = tf.cast(tf.math.floor(self._gmax / b2_norm), tf.int32)
-        nmax3 = tf.cast(tf.math.floor(self._gmax / b3_norm), tf.int32)
+        nmax1 = tf.cast(tf.math.floor(gmax / b1_norm), tf.int32)
+        nmax2 = tf.cast(tf.math.floor(gmax / b2_norm), tf.int32)
+        nmax3 = tf.cast(tf.math.floor(gmax / b3_norm), tf.int32)
         
         n1 = tf.range(-nmax1, nmax1 + 1, dtype=tf.int32)
         n2 = tf.range(-nmax2, nmax2 + 1, dtype=tf.int32)
@@ -135,11 +138,14 @@ class ewald:
                             tf.reshape(n3g, [-1])], axis=1)  # [M,3]
         replicas = tf.cast(replicas, tf.float32)
         g_all = tf.matmul(replicas, self.reciprocal_cell)  # [M,3] = n · recip_cell (each row n * recip_cell)
-        # Mask: exclude (0,0,0) and enforce |k|<=kmax
-        g_norm = tf.linalg.norm(g_all, axis=1)
         nonzero = tf.reduce_all(tf.not_equal(replicas, 0), axis=1)
-        mask = tf.logical_and(g_norm <= self._gmax, nonzero)
-        g_vecs = tf.boolean_mask(g_all, mask)  # [K,3]
+        # Mask: exclude (0,0,0) and enforce |k|<=kmax
+        g_vecs = tf.boolean_mask(g_all, nonzero)
+        g_norm = tf.linalg.norm(g_vecs, axis=1)
+        
+        #mask = tf.logical_and(g_norm <= gmax, nonzero)
+        mask = g_norm <= gmax
+        g_vecs = tf.boolean_mask(g_vecs, mask)  # [K,3]
         g_norm = tf.boolean_mask(g_norm, mask) #[K,
         g_sq = g_norm*g_norm  # [K]
         
@@ -147,7 +153,7 @@ class ewald:
         # Prepare factors for summation
         # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
         # shape [K, N]
-        g2_gamma2 = tf.einsum('ij,l->ijl', gamma_ij2/2.0, g_sq) # [N,N,K]
+        g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/2.0, g_sq) # [N,N,K]
         exp_ij = tf.exp(-g2_gamma2)
         exp_ij_by_g_sq = exp_ij / (g_sq[None,None,:] + 1e-12)
 
@@ -159,14 +165,14 @@ class ewald:
         Vij = tf.reduce_sum(exp_ij_by_g_sq * cos_term, axis=-1)  # [N,N]
 
         # Multiply by prefactor (charges, 4π/V, Coulomb constant e²/4πε0 in eV·Å units) so that E = 1/2 \sum_ij Vij
-        Vij *= CONV_FACT * (4.* np.pi / self.volume)
+        Vij *= CONV_FACT * (4.* pi / self.volume)
         
         return Vij 
     def sawtooth_PE(self):
         #k = n1 b1 + n2 b2 + n3 b3. We will set n1 = n2 = n3
         g = tf.reduce_sum(self.reciprocal_cell, axis=0)
         positions = self._positions
-        gr = tf.math.sin(tf.einsum('ij,j->ij', positions, g))
+        gr = tf.math.sin(positions * g[None,:])
         kernel = tf.einsum('ij,j,j->i', gr, self.efield, 1.0 / (g + 1e-12))
         return kernel
 

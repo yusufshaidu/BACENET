@@ -16,6 +16,7 @@ from data.unpack_tfr_data import unpack_data
 from networks.networks import Networks
 import functions.helping_functions as help_fn
 
+from mendeleev import element
 import argparse
 from data.data_processing import data_preparation
 from models import model
@@ -74,8 +75,20 @@ def default_config():
         'features': False,
         'normalize': False,
         'efield': None,
+        'oxidation_states': None,
         'is_training': True
     }
+
+def estimate_species_chi0_J0(species):
+    IE = tf.constant([element(sym).ionenergies[1]
+        for sym in species], dtype=tf.float32)
+    EA = tf.constant([0.0 if not element(sym).electron_affinity else
+        element(sym).electron_affinity for sym in species], dtype=tf.float32)
+
+    species_hardness = IE - EA
+    species_electronegativity = 0.5 * (IE + EA)
+    return (species_electronegativity, species_hardness)
+
 def get_compiled_model(configs,optimizer,example_input):
     
     _model = model.mBP_model(configs=configs)
@@ -170,6 +183,10 @@ def create_model(configs):
     for key in _configs:
         if key not in configs.keys():
             configs[key] = _configs[key]
+    species_chi0, species_J0 = estimate_species_chi0_J0(configs['species'])
+    configs['species_chi0'] = species_chi0
+    configs['species_J0'] = species_J0
+
     model_outdir = configs['outdir']
     if not os.path.exists(model_outdir):
         os.mkdir(model_outdir)

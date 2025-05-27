@@ -48,11 +48,14 @@ class wBP_Calculator(Calculator):
         for key in _configs:
             if key not in configs.keys():
                 configs[key] = _configs[key]
+        species_chi0, species_J0 = train.estimate_species_chi0_J0(configs['species'])
+        configs['species_chi0'] = species_chi0
+        configs['species_J0'] = species_J0
         
         if efield is not None:
             print('applying electric field of: ',efield)
             self.efield = efield
-            configs['efield'] = efield
+            configs['efield'] = tf.cast(efield, tf.float32)
 
         if configs['include_vdw']:
             rc = np.max([configs['rc_rad'],configs['rmax_d']])
@@ -65,7 +68,7 @@ class wBP_Calculator(Calculator):
             with open (os.path.join(configs['model_outdir'],'atomic_energy.json')) as df:
                 self.atomic_energy_dic = json.load(df)
 
-        print(atomic_energy)
+        #print(atomic_energy)
         self.atomic_energy = np.array([self.atomic_energy_dic[key] for key in configs['species']])
         self.species_identity = np.array([atomic_number(key) for key in configs['species']])
         configs['batch_size'] = 1
@@ -124,15 +127,16 @@ class wBP_Calculator(Calculator):
                                  max_workers=1)
         #print(self.ckpt)
         
-        inputs = unpack_data(list(data)[0])
+        #inputs = unpack_data(list(data)[0])
+        inputs = list(data)[0]
         outs = self.model(inputs)
         e0 = np.sum([self.atomic_energy_dic[s] for s in atoms.get_chemical_symbols()])
         energy = outs['energy'].numpy()[0] + e0
         forces = tf.squeeze(outs['forces']).numpy()
         stress = tf.squeeze(outs['stress']).numpy()
         charges = tf.squeeze(outs['charges']).numpy()
-        zstar = tf.squeeze(outs['Zstar']).numpy()
-        atoms.set_array('zstar',zstar)
+        #zstar = tf.squeeze(outs['Zstar']).numpy()
+        #atoms.set_array('zstar',zstar)
 
         '''
         configs['species_identity'] = species_identity
@@ -149,6 +153,4 @@ class wBP_Calculator(Calculator):
             "energy":energy,
             "forces":forces,
             "stress":stress,
-            "charges":charges,
-            "zstar":zstar}
-
+            "charges":charges}
