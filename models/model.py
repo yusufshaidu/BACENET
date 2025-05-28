@@ -45,13 +45,14 @@ class mBP_model(tf.keras.Model):
         self.zeta = configs['zeta'] if type(configs['zeta'])==list \
                 else list(range(1,int(configs['zeta'])+1))
         self.nzeta = len(self.zeta)
+        self.n_lambda = configs['n_lambda']
         #print(f'we are sampling zeta as: {self.zeta} with count {self.nzeta}')
         self.body_order = configs['body_order']
-        base_size = self.Nrad * (2 * self.nzeta)
+        base_size = self.Nrad * (self.n_lambda * self.nzeta)
         self.feature_size = self.Nrad + base_size
         if self.body_order == 4:
             #self.feature_size += self.Nrad * (2*self.nzeta * (self.nzeta+1)) #4 * nzeta * (nzeta+1)/2
-            self.feature_size += self.Nrad * 3 * self.nzeta
+            self.feature_size += self.Nrad * self.n_lambda * self.nzeta
             #self.feature_size += self.Nrad
         self.species_correlation = configs['species_correlation']
         self.species_identity = configs['species_identity'] # atomic number
@@ -136,28 +137,24 @@ class mBP_model(tf.keras.Model):
                                          #l1=self.l1, l2=self.l2
                                  #bias_initializer='zeros',
                                  prefix='radial-functions')
-        # Add a non‐trainable counter:
+        # Add a trainable weights for the weights of cos_theta_ijk:
+        self._lambda_weights_nets = Networks(1, [self.n_lambda],
+                                         ['tanh'],
+                                 prefix='lambda_weights')
+        #inputs = tf.constant([1.0], dtype=tf.float32)[:,None]
+        #self._lambda_weights = tf.reshape(self._lambda_weights_nets(inputs), [-1]) # produce n_lambda weights
         '''
-        self._train_counter = self.add_weight(
-            name="train_counter",
-            shape=(),
-            dtype=tf.int64,
-            trainable=False,
-            initializer="zeros"
+        self._lambda_weights = self.add_weight(
+            name="lambda_weights",
+            shape=(self.n_lambda,),
+            dtype=tf.float32,
+            trainable=True,
+            initializer="glorot_uniform",
         )
+        #restrict to +/- 1
+        self._lambda_weights = tf.nn.tanh(self._lambda_weights)
         '''
-    '''
-    @tf.function
-    def estimate_species_chi0_J0(self):
-        IE = tf.constant([element(sym).ionenergies[1]
-            for sym in self.species], dtype=tf.float32)
-        EA = tf.constant([0.0 if not element(sym).electron_affinity else
-            element(sym).electron_affinity for sym in self.species], dtype=tf.float32)
-
-        species_hardness = IE - EA
-        species_electronegativity = 0.5 * (IE + EA)
-        return (species_electronegativity, species_hardness)
-    '''
+        
     @tf.function(jit_compile=False,
                  input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
@@ -167,6 +164,7 @@ class mBP_model(tf.keras.Model):
                           fn_output_signature=tf.float32,
                           parallel_iterations=self.nzeta)
 
+    '''
     @tf.function(input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 ])
@@ -237,7 +235,7 @@ class mBP_model(tf.keras.Model):
         )
 
         return lxlylz, lxlylz_sum, nfact, fact_lxlylz
-    '''
+    
     @tf.function(jit_compile=False,
                 input_signature=[
                 tf.TensorSpec(shape=(), dtype=tf.int32),
@@ -260,12 +258,24 @@ class mBP_model(tf.keras.Model):
 
         #compute zeta! / (zeta-n)! / n!
 
-        zeta_fact = help_fn.factorial(z)
-        zeta_fact_n = self.parallel_map_fn_factorial(z-lxlylz_sum)
-        #zeta_fact_n = tf.map_fn(help_fn.factorial, z-lxlylz_sum,
-        #                        fn_output_signature=tf.float32,
-        #                        parallel_iterations=self.nzeta
-        #                        )
+        #zeta_fact = help_fn.factorial(z)
+        zeta_fact = tf.reduce_prod(tf.cast(n[1:], tf.float32)) #product of elements of n excluding zero
+
+#        '''
+        z_minus_n = z - lxlylz_sum #lxlylz_sum goes fro 0  to z
+        #max_fact = tf.reduce_max(z_minus_n)
+        max_fact = z
+        factorials = tf.concat([[1.0],
+                                    tf.cast(tf.math.cumprod(tf.range(1, max_fact + 1)), tf.float32)],
+                                   axis=0)
+        zeta_fact_n = tf.gather(factorials, z_minus_n)
+        '''
+        #zeta_fact_n = self.parallel_map_fn_factorial(z-lxlylz_sum)
+        zeta_fact_n = tf.map_fn(help_fn.factorial, z-lxlylz_sum,
+                                fn_output_signature=tf.float32,
+                                parallel_iterations=self.nzeta
+                                )
+        '''
         z_float = tf.cast(z, tf.float32)
         zetan_fact = zeta_fact / (zeta_fact_n * nfact)
         fact_norm = nfact_lxlylz * zetan_fact
@@ -279,10 +289,10 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32)]
+                tf.TensorSpec(shape=(None,), dtype=tf.float32)]
                  )
     def _to_three_body_terms(self,z, r_idx, rij_unit, 
-                             radial_ij, first_atom_idx, nat):
+                             radial_ij, first_atom_idx, lambda_weights):
     #def _to_three_body_terms(self, x):
         '''
         compute vectorize three-body computation
@@ -302,13 +312,14 @@ class mBP_model(tf.keras.Model):
         # nat x nrad*nspec, n_lxlylz
         g2_ilxlylz = g_ilxlylz * g_ilxlylz
         #sum over z
-        gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
+        #lambda_comp = tf.constant([1.0,-1.0])
+        lambda_comp = lambda_weights
+        lambda_comp_lxlylz = lambda_comp[:,None]**tf.cast(lxlylz_sum,tf.float32)[None,:] #n_lambda_comp, nlxlylz
+        gi3 = tf.einsum('ijk,lk->ijl', g2_ilxlylz, lambda_comp_lxlylz)
 
         norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
-        _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
-        gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
 
-        return [gi3p * norm, gi3n * norm]
+        return gi3 * norm
 
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -317,53 +328,48 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32)]
+                tf.TensorSpec(shape=(None,), dtype=tf.float32)]
                  )
-    def _to_four_body_terms(self,z, r_idx, rij_unit, radial_ij, first_atom_idx, nat):
+    def _to_four_body_terms(self,z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights):
         '''
         compute  up to four-body computation
 
         '''
-        g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, r_idx, rij_unit)
+        g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, rij_unit)
         g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
+        #sum over neighbors
         g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
-                                            segment_ids=first_atom_idx)# nat x nrad*nspec, n_lxlylz
+                                            segment_ids=first_atom_idx)
+        # nat x nrad*nspec, n_lxlylz
         g2_ilxlylz = g_ilxlylz * g_ilxlylz
-        #Example: sum of pairwise quantities per atom
-        gi3p = tf.reduce_sum(g2_ilxlylz, axis=-1)
+        #sum over z
+        #lambda_comp = tf.constant([1.0,-1.0])
+        lambda_comp = lambda_weights
+        lambda_comp_lxlylz = lambda_comp[:,None]**tf.cast(lxlylz_sum,tf.float32)[None,:] #n_lambda_comp, nlxlylz
+        gi3 = tf.einsum('ijk,lk->ijl', g2_ilxlylz, lambda_comp_lxlylz)
+
         norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
-        _lambda_minus = tf.pow(-1.0, tf.cast(lxlylz_sum,tf.float32))
-        gi3n = tf.einsum('ijk,k->ij',g2_ilxlylz,_lambda_minus) #npairs,nrad*nspec
-        #j==k term should be removed, lambda=-1 contribute nothing
-        #R_j_equal_k = tf.reduce_sum(radial_ij[:,:,:,:,z] * radial_ij[:,:,:,:,z], axis=1) #nat, nrad, nspec
-        #G_jk = 2 * R_j_equal_k
-        # here we have four possible combination of lambda [(1,1), (1,-1), (-1,1), (-1,-1)] but only three of them are unique
-        #contribution after summing over k and l
+        gi3 *= norm 
+
         g4_ij_lxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,self.nzeta+r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
         g4_i_lxlylz = tf.math.segment_sum(data=g4_ij_lxlylz,
                                         segment_ids=first_atom_idx)
                                         # nat x nrad*nspec*n_lxlylz
-
-        g4_i_lxlylz = tf.reshape(g4_i_lxlylz, [nat,self.Nrad*self.spec_size, -1])
-
-        _lambda_plus = tf.ones_like(_lambda_minus)
-        lambda_pm = tf.einsum('i,j->ij',_lambda_minus, _lambda_plus)
-        lambda_mm = tf.einsum('i,j->ij',_lambda_minus, _lambda_minus)
-        g_i_ll_kl = tf.einsum('ijk, ijl->ijkl',g4_i_lxlylz,g4_i_lxlylz)
-
+        g_i_ll_kl = g4_i_lxlylz[:,:,:,None] * g4_i_lxlylz[:,:,None,:] #nat x nrad*nspec*n_lxlylz,n_lxlylz
+        lambda_weights_zxz = lambda_comp_lxlylz[:,:,None] * lambda_comp_lxlylz[:,None,:] #n_lambda_comp, nlxlylz,n_lxlylz
+            
         g_ij_ll = tf.einsum('ij,ik->ijk',g_ij_lxlylz, g_ij_lxlylz)
         #contribution after summing over j
         g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij[:,:,self.nzeta+r_idx], g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
         g_i_ll_j = tf.math.segment_sum(data=g_i_ll_j,
-                                        segment_ids=first_atom_idx)
+                                        segment_ids=first_atom_idx)#nat x nrad*nspec*n_lxlylz
         #sum over the last two axes
         # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
         _norm = norm * norm * 0.5
-        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl
-        gi4pp = tf.reduce_sum(g_i_ll_ijk, axis=(2,3)) * _norm #nat,nrad*nspec
-        gi4np = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_pm) * _norm
-        gi4nn = tf.einsum('ijkl, kl->ij',g_i_ll_ijk, lambda_mm) * _norm
-        return [gi3p * norm, gi3n * norm, gi4pp, gi4np, gi4nn]
+        
+        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl # nat x nrad*nspec*n_lxlylz
+        gi4 = tf.einsum('ijkl, nkl->ijn',g_i_ll_ijk, lambda_weights_zxz) * _norm
+        return [gi3,gi4]
 
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -447,6 +453,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32)
                 )])
 
@@ -481,6 +488,7 @@ class mBP_model(tf.keras.Model):
         chi0 = x[11][:nat]
         J0 = x[12][:nat]
         atomic_q0 = x[13][:nat]
+        lambda_weights = x[14]
         #positions = tf.Variable(positions)
         #cell = tf.Variable(cell)
         if self.efield is not None:
@@ -549,16 +557,16 @@ class mBP_model(tf.keras.Model):
                 r_idx = 1
                 zeta = tf.constant(self.zeta)
                 z = zeta[0]
-                gp,gn = self._to_three_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, nat)
-                Gi3 = [gp]
-                Gi3.append(gn)
+                g3p = self._to_three_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                Gi3 = [g3p]
+                #Gi3.append(gn)
                 # we should tf range with Tensorarray
                 for i in range(1,self.nzeta):
                     #r_idx += 1
                     z = zeta[i]
-                    gp,gn = self._to_three_body_terms(z, i+1, rij_unit, radial_ij, first_atom_idx, nat)
-                    Gi3.append(gp)
-                    Gi3.append(gn)
+                    g3p = self._to_three_body_terms(z, i+1, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                    Gi3.append(g3p)
+                    #Gi3.append(gn)
 
 
                 #elements = (zeta, r_idx, rij_unit_batch, radial_ij_batch, first_atom_idx_batch, nat_batch)
@@ -578,27 +586,24 @@ class mBP_model(tf.keras.Model):
                 r_idx = 1
                 zeta = tf.constant(self.zeta)
                 z = zeta[0]
-                gp,gn,gpp, gnp, gnn = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, nat)
-                G3p = [gp]
-                G3n = [gn]
-                G4pp = [gpp]
-                G4np = [gnp]
-                G4nn = [gnn]
+                gi3,gi4 = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                Gi3 = [gi3]
+                Gi4 = [gi4]
                 for i in range(1,self.nzeta):
                     r_idx = i+1
                     z = zeta[i]
-                    gp,gn,gpp,gnp,gnn = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, nat)
-                    G3p.append(gp)
-                    G3n.append(gn)
-                    G4pp.append(gpp)
-                    G4np.append(gnp)
-                    G4nn.append(gnn)
-
-                Gi4 = tf.stack([G3p,G3n,G4pp,G4np,G4nn], axis=-1)
+                    gi3,gi4 = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                    Gi3.append(gi3)
+                    Gi4.append(gi4)
+                #Gi3 has a shape of (nzeta, nat, nrad*nspec, n_lambda). Thus stack along axis 1 grouped the descriptors by atoms
+                #then we can reshape to give (nat,ndescriptors)
+                Gi3 = tf.reshape(tf.stack(Gi3, axis=1), [nat, -1]) #stack along 
+                Gi4 = tf.reshape(tf.stack(Gi4, axis=1), [nat, -1])
+                Gi = tf.stack([Gi3,Gi4], axis=1)
                 #this is equivalent to
                 #for lambda in [-1,1]; for z in range(1, zeta+1)
                 #'''
-                body_descriptor_4 = tf.reshape(Gi4, [nat,-1])
+                body_descriptor_4 = tf.reshape(Gi, [nat,-1])
                 atomic_descriptors = tf.concat([atomic_descriptors, body_descriptor_4], axis=1)
 
             #the descriptors can be scaled
@@ -675,7 +680,6 @@ class mBP_model(tf.keras.Model):
         forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
         return [total_energy, forces,C6, charges,stress]
 
-    ''' 
     @tf.function
     def map_fn_parallel(self, elements):
         out_signature = [
@@ -685,7 +689,7 @@ class mBP_model(tf.keras.Model):
             tf.float32,  # C6
             tf.float32,  # charges
             tf.float32,  # stress
-            tf.float32  # zstar
+    #        tf.float32  # zstar
         ]
 
 
@@ -693,7 +697,6 @@ class mBP_model(tf.keras.Model):
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
 
-    '''
     def call(self, data, training=False):
         # may be just call the energy prediction here which will be needed in the train and test steps
         # input contains the following information. Data unpacking are done at the train/test/predict function
@@ -768,13 +771,19 @@ class mBP_model(tf.keras.Model):
         #shift_vectors = tf.reshape(tf.cast(inputs[7][:,:neigh_max*3],tf.int32), (-1, neigh_max*3))
         shift_vectors = tf.cast(data['S'][:,:neigh_max*3],tf.int32)
         gaussian_width = tf.cast(data['gaussian_width'], tf.float32)
+
+        inputs = tf.constant([1.0], dtype=tf.float32)[:,None]
+        self._lambda_weights = tf.reshape(self._lambda_weights_nets(inputs), [-1]) # produce n_lambda weights
+        lambda_batch = tf.tile(self._lambda_weights[None,:], [batch_size,1])
+
         elements = (batch_species_encoder,positions, 
                     nmax_diff, batch_nats,cells,C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_pairs, gaussian_width,
-                    batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0)
+                    batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0,lambda_batch)
 
         # energies, forces, atomic_features, C6, charges, stress
-        #energies, forces, C6, charges, stress, Zstar = self.map_fn_parallel(elements)
+        energies, forces, C6, charges, stress = self.map_fn_parallel(elements)
+        '''
         out_signature = [
             tf.float32,  # energies
             tf.float32,  # forces
@@ -789,7 +798,7 @@ class mBP_model(tf.keras.Model):
         energies, forces, C6, charges, stress = tf.map_fn(self.tf_predict_energy_forces, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
-
+        '''
         #outs = [energies, forces, atomic_features]
         outs = {'energy':energies,
                 'forces':forces,
@@ -898,16 +907,13 @@ class mBP_model(tf.keras.Model):
             tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter)
             tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter)
             tf.summary.scalar('2. Metrics/4. MAE_F',mae_f,self._train_counter)
-            #tf.summary.histogram(f'4. angular terms: lambda 1',lambda1,self._train_counter)
-            #tf.summary.histogram(f'4. angular terms: lambda 2',lambda2,self._train_counter)
+            #tf.summary.histogram(f'3. angular terms: lambda',self._lambda_weights,self._train_counter)
             for idx, spec in enumerate(self.species_identity):
                 tf.summary.histogram(f'3. encoding /{spec}',self.trainable_species_encoder[idx],self._train_counter)
             if self.include_vdw:
                 tf.summary.histogram(f'4. C6 parameters',C6, self._train_counter)
             if self.coulumb:
                 tf.summary.histogram(f'5. charges',charges, self._train_counter)
-            if self.efield is not None:
-                tf.summary.histogram(f'6. Born charges',Zstar, self._train_counter)
 
         #'''
         return {key: metrics[key] for key in metrics.keys()}

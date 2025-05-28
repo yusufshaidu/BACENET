@@ -76,7 +76,8 @@ def default_config():
         'normalize': False,
         'efield': None,
         'oxidation_states': None,
-        'is_training': True
+        'is_training': True,
+        'n_lambda': 4
     }
 
 def estimate_species_chi0_J0(species):
@@ -96,12 +97,11 @@ def get_compiled_model(configs,optimizer,example_input):
     #fake call to build the model
     # This will “dry run” through call() and allocate weights:
     #example_input = unpack_data(example_input)
-    #outs = _model(example_input, training=False)
+    outs = _model(example_input, training=False)
     _model.compile(optimizer=optimizer,
                   loss=help_fn.quad_loss,
                   loss_f = help_fn.force_loss)
-
-#    print(_model.summary())
+    print(_model.summary())
     return _model
 
 class CustomCallback(tf.keras.callbacks.Callback):

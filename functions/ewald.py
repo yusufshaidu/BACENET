@@ -101,6 +101,25 @@ class ewald:
         return tf.while_loop(c, b, [gmax, result])[0]
     
     @tf.function
+    def generate_g_vectors(self, gmax, nmax1, nmax2, nmax3):
+        g_vecs = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
+        g_norm = tf.TensorArray(tf.float32, size=0, dynamic_size=True)
+        index = 0
+        for i in tf.range(-nmax1, nmax1 + 1):
+            for j in tf.range(-nmax2, nmax2 + 1):
+                for k in tf.range(-nmax3, nmax3 + 1):
+                    if i == 0 and j == 0 and k == 0:
+                        continue
+                    n = tf.cast([i, j, k], tf.float32)
+                    g = tf.linalg.matvec(self.reciprocal_cell, n)  # [3]
+                    _g_norm = tf.linalg.norm(g)
+                    if _g_norm <= gmax:
+                        g_vecs = g_vecs.write(index, g)
+                        g_norm = g_norm.write(index, _g_norm)
+                        index += 1
+        return [g_vecs.stack(), g_norm.stack()]  # [K, 3], [K]
+
+    @tf.function
     def recip_space_term(self): 
         '''
         calculates the interaction contribution to the electrostatic energy
@@ -126,7 +145,7 @@ class ewald:
         nmax1 = tf.cast(tf.math.floor(gmax / b1_norm), tf.int32)
         nmax2 = tf.cast(tf.math.floor(gmax / b2_norm), tf.int32)
         nmax3 = tf.cast(tf.math.floor(gmax / b3_norm), tf.int32)
-        
+        #'''
         n1 = tf.range(-nmax1, nmax1 + 1, dtype=tf.int32)
         n2 = tf.range(-nmax2, nmax2 + 1, dtype=tf.int32)
         n3 = tf.range(-nmax3, nmax3 + 1, dtype=tf.int32)
@@ -138,7 +157,7 @@ class ewald:
                             tf.reshape(n3g, [-1])], axis=1)  # [M,3]
         replicas = tf.cast(replicas, tf.float32)
         g_all = tf.matmul(replicas, self.reciprocal_cell)  # [M,3] = n · recip_cell (each row n * recip_cell)
-        nonzero = tf.reduce_all(tf.not_equal(replicas, 0), axis=1)
+        nonzero = tf.reduce_any(tf.not_equal(replicas, 0), axis=1)
         # Mask: exclude (0,0,0) and enforce |k|<=kmax
         g_vecs = tf.boolean_mask(g_all, nonzero)
         g_norm = tf.linalg.norm(g_vecs, axis=1)
@@ -146,7 +165,9 @@ class ewald:
         #mask = tf.logical_and(g_norm <= gmax, nonzero)
         mask = g_norm <= gmax
         g_vecs = tf.boolean_mask(g_vecs, mask)  # [K,3]
-        g_norm = tf.boolean_mask(g_norm, mask) #[K,
+        g_norm = tf.boolean_mask(g_norm, mask) #[K,]
+        #'''
+        #g_vecs, g_norm = self.generate_g_vectors(gmax, nmax1, nmax2, nmax3)
         g_sq = g_norm*g_norm  # [K]
         
 
@@ -155,7 +176,7 @@ class ewald:
         # shape [K, N]
         g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/2.0, g_sq) # [N,N,K]
         exp_ij = tf.exp(-g2_gamma2)
-        exp_ij_by_g_sq = exp_ij / (g_sq[None,None,:] + 1e-12)
+        exp_ij_by_g_sq = tf.einsum('ijk,k->ijk',exp_ij, 1.0 / (g_sq + 1e-12))
 
         # The cosine term: shape [N,N,K]
         cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))

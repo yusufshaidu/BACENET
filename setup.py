@@ -6,7 +6,7 @@ setup(
     description="species independent linear Scaling Symmetry Functions",
     author="Yusuf Shaidu",
     author_email="yusufshaidu@gmail.com",
-    url="https://gitlab.com/yusufshaidu/ml-potentials",  # your repo URL
+    url="https://github.com/yusufshaidu/silBP.git",  # your repo URL
     packages=find_packages(exclude=["tools*", "examples*"]),
     python_requires=">=3.7, <4",
     install_requires=[
