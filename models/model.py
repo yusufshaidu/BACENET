@@ -396,9 +396,8 @@ class mBP_model(tf.keras.Model):
         Aij = tf.tensor_scatter_nd_update(Aij, index, new_values)
         '''
         E1 = tf.pad(-E1, [[0,1]], constant_values=self.total_charge)
-        #atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
-        charges = tf.linalg.solve(Aij, E1[:,None])
-        '''
+        atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
+        #charges = tf.linalg.solve(Aij, E1[:,None])
         lin_op_A = tf.linalg.LinearOperatorFullMatrix(
             Aij,
             is_self_adjoint=True,
@@ -416,7 +415,6 @@ class mBP_model(tf.keras.Model):
             )
         #outs[0]= max_iter, outs[2]=residual,outs[3]=basis vectors, outs[4]=preconditioner 
         charges = outs[1]
-        '''
         return tf.reshape(charges, [-1])[:-1]
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -456,7 +454,6 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32)
                 )])
-
     def tf_predict_energy_forces(self,x):
         ''' 
         x = (batch_species_encoder,positions,
@@ -680,7 +677,24 @@ class mBP_model(tf.keras.Model):
         forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
         return [total_energy, forces,C6, charges,stress]
 
-    @tf.function
+    @tf.function(jit_compile=False,
+                input_signature=[(
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32)
+                )])
     def map_fn_parallel(self, elements):
         out_signature = [
             tf.float32,  # energies
