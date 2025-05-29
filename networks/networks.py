@@ -13,7 +13,8 @@ def Networks(input_size, layer_sizes,
             bias_constraint=None,
             prefix='main',
             l1=0.0,l2=0.0,
-            normalize=False):
+            normalize=False,
+            use_bias=True):
 
     model = tf.keras.Sequential(name=f'{prefix}_net')
     model.add(tf.keras.Input(shape=(input_size,)))
@@ -31,6 +32,7 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         trainable=True,
+                                        use_bias=use_bias,
                                         dtype = mixed_precision.set_global_policy('float32'),
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activation}'
                                         ))
@@ -50,6 +52,7 @@ def Networks(input_size, layer_sizes,
                                         kernel_constraint=kernel_constraint,
                                         bias_constraint=bias_constraint,
                                         dtype = mixed_precision.set_global_policy('float32'),
+                                        use_bias=use_bias,
                                         trainable=True,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
@@ -68,6 +71,7 @@ def Networks(input_size, layer_sizes,
                                         bias_constraint=bias_constraint,
                                         dtype = mixed_precision.set_global_policy('float32'),
                                         trainable=True,
+                                        use_bias=use_bias,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activations[-1]}'
                                         ))
 

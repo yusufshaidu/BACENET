@@ -3,6 +3,7 @@ from data.data_processing import data_preparation
 from models.model import mBP_model
 
 import os, sys, yaml,argparse, json
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 import numpy as np
 import silssf.train as train
 from pathlib import Path
@@ -138,6 +139,7 @@ def create_model(configs):
 
         #model = tf.keras.models.load_model(_ck)
         model.load_weights(_ck).expect_partial()
+        #model.load_weights(_ck)
         #print(_ck)
         #print(_ck)
         #model.load_weights(_ck, skip_mismatch=True)
@@ -148,11 +150,11 @@ def create_model(configs):
 
 #        print(weights[0])
 
-        if configs['coulumb']:
-            e_ref, e_pred, metrics, force_ref, force_pred,nat,_charges,stress = model.predict(test_data)
-            charges = []
-        else:
-            e_ref, e_pred, metrics, force_ref, force_pred,nat,stress = model.predict(test_data)
+        #if configs['coulumb']:
+        e_ref, e_pred, force_ref, force_pred,nat,_charges,stress = model.predict(test_data)
+        #    charges = []
+        #else:
+        #    e_ref, e_pred, metrics, force_ref, force_pred,nat,stress = model.predict(test_data)
         
         
 
@@ -168,18 +170,20 @@ def create_model(configs):
             if configs['coulumb']:
                 charges = np.append(charges, _charges[i][:j])
             idx = np.append(idx, np.arange(1,j+1).tolist())
-            diff = force_ref[i][:j] - force_pred[i][:j]
-            fmaes.append(tf.reduce_mean(tf.abs(diff)))
-            frmses.append(tf.sqrt(tf.reduce_mean(tf.square(diff))))
+            #diff = force_ref[i][:j] - force_pred[i][:j]
+            #fmaes.append(tf.reduce_mean(tf.abs(diff)))
+            #frmses.append(tf.sqrt(tf.reduce_mean(tf.square(diff))))
 
         #force_ref = [tf.reshape(force_ref[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
         force_ref = tf.reshape(_f_ref, [-1,3])
         #force_pred = [tf.reshape(_f_pred[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
         force_pred = tf.reshape(_f_pred, [-1,3])
+        diff_f = force_ref - force_pred
+
         mae = tf.reduce_mean(tf.abs(e_ref-e_pred)).numpy()
         rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2)).numpy()
-        fmae = tf.reduce_mean(np.array(fmaes)).numpy()
-        frmse = tf.sqrt(tf.reduce_mean(np.array(frmses)**2)).numpy()
+        fmae = tf.reduce_mean(tf.abs(diff_f)).numpy()
+        frmse = tf.sqrt(tf.reduce_mean(diff_f**2)).numpy()
         errors.append([_epoch,rmse*1000,mae*1000,frmse*1000,fmae*1000])
         #print(errors)
 
@@ -191,6 +195,9 @@ def create_model(configs):
         if configs['coulumb']:
             np.savetxt(os.path.join(configs['test_outdir'], f'charges_{_epoch}.dat'), np.stack([idx, charges]).T)
     #print(errors)
+
+    #weights = model.get_weights()
+    #print(weights)
     np.savetxt(error_file, np.array(errors), header='E_rmse E_mae F_rmse F_mae', fmt='%10.3f')
     
 #if __name__ == '__main__':

@@ -117,7 +117,7 @@ def load_tfrs(filenames,batch_size):
 def get_tfrs(filenames, batch_size,repeat_count=None):
     AUTOTUNE = tf.data.AUTOTUNE
     dataset = load_tfrs(filenames,batch_size)
-    dataset = dataset.shuffle(buffer_size=1024)
+    dataset = dataset.shuffle(buffer_size=128)
     dataset = dataset.batch(batch_size,
                             num_parallel_calls=AUTOTUNE,
                             deterministic=False)

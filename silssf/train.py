@@ -296,8 +296,8 @@ def create_model(configs):
     else:  # Use the Default Strategy
         strategy = tf.distribute.get_strategy()
     
-    global_batch_size = (configs['batch_size'] *
-                     strategy.num_replicas_in_sync)
+    #global_batch_size = (configs['batch_size'] *
+    #                 strategy.num_replicas_in_sync)
     '''
     global_batch_size = configs['batch_size']
     # Data preparation

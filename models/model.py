@@ -138,149 +138,31 @@ class mBP_model(tf.keras.Model):
                                  #bias_initializer='zeros',
                                  prefix='radial-functions')
         # Add a trainable weights for the weights of cos_theta_ijk:
+        #self._lambda_weights_nets = tf.keras.layers.Dense(units=1,activation='linear', 
+        #                                                  use_bias=True,name='lambda_weights')
         self._lambda_weights_nets = Networks(1, [self.n_lambda],
-                                         ['tanh'],
+                                         ['linear'],
+                                        use_bias=False,
                                  prefix='lambda_weights')
-        #inputs = tf.constant([1.0], dtype=tf.float32)[:,None]
-        #self._lambda_weights = tf.reshape(self._lambda_weights_nets(inputs), [-1]) # produce n_lambda weights
-        '''
-        self._lambda_weights = self.add_weight(
-            name="lambda_weights",
-            shape=(self.n_lambda,),
-            dtype=tf.float32,
-            trainable=True,
-            initializer="glorot_uniform",
-        )
-        #restrict to +/- 1
-        self._lambda_weights = tf.nn.tanh(self._lambda_weights)
-        '''
-        
-    @tf.function(jit_compile=False,
-                 input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                ])
-    def parallel_map_fn_factorial(self, n):
-        return tf.map_fn(help_fn.factorial, n,
-                          fn_output_signature=tf.float32,
-                          parallel_iterations=self.nzeta)
 
-    '''
-    @tf.function(input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                ])
-    def compute_cosine_terms(self, n):
-        lxlylz = tf.map_fn(help_fn.find_three_non_negative_integers, n,
-                                   fn_output_signature=tf.RaggedTensorSpec(shape=(None,),dtype=tf.int32),
-                                   parallel_iterations=self.nzeta)
-        lxlylz = tf.reshape(lxlylz, [-1,3])
-        lxlylz_sum = tf.reduce_sum(lxlylz, axis=-1) # the value of n for each lx, ly and lz
-
-        #compute normalizations n! / lx!/ly!/lz!
-        nfact = self.parallel_map_fn_factorial(lxlylz_sum)
-        #nfact = tf.map_fn(help_fn.factorial, lxlylz_sum,
-        #                  fn_output_signature=tf.float32,
-        #                  parallel_iterations=self.nzeta) #computed for all n_lxlylz
-
-        #lx!ly!lz!
-        fact_lxlylz = tf.reshape(self.parallel_map_fn_factorial(tf.reshape(lxlylz,[-1])), [-1,3])
-        #fact_lxlylz = tf.reshape(tf.map_fn(help_fn.factorial, tf.reshape(lxlylz, [-1]),
-        #                                   fn_output_signature=tf.float32,
-        #                                   parallel_iterations=self.nzeta), [-1,3],
-        #                         )
-        fact_lxlylz = tf.reduce_prod(fact_lxlylz, axis=-1)
-        return lxlylz, lxlylz_sum, nfact, fact_lxlylz
-
-    '''
-    @tf.function(jit_compile=False,
-                 input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                ])
-    def compute_cosine_terms(self,n_values):
-        # Expand all possible (lx, ly, lz) for n from 0 to max_n
-        max_n = tf.reduce_max(n_values)
-        #n_values is a range up to a max
-        #max_n = n_values[-1]
-
-        # Generate all (lx, ly, lz) such that lx + ly + lz <= max_n
-        lx = tf.range(max_n + 1)
-        ly = tf.range(max_n + 1)
-        lz = tf.range(max_n + 1)
-        lx, ly, lz = tf.meshgrid(lx, ly, lz, indexing='ij')
-
-        lx = tf.reshape(lx, [-1])
-        ly = tf.reshape(ly, [-1])
-        lz = tf.reshape(lz, [-1])
-        lxlylz = tf.stack([lx, ly, lz], axis=1)  # (N, 3)
-
-        lxlylz_sum = tf.reduce_sum(lxlylz, axis=1)  # Total l = lx + ly + lz
-
-        # Filter only those with lx + ly + lz == n for any n in n_values
-        #n_values = tf.convert_to_tensor(n_values)
-        n_values = n_values
-        valid_mask = tf.reduce_any(tf.equal(tf.expand_dims(lxlylz_sum, 1), n_values), axis=1)
-        lxlylz = tf.boolean_mask(lxlylz, valid_mask)
-        lxlylz_sum = tf.boolean_mask(lxlylz_sum, valid_mask)
-
-        # Compute factorials up to max_n and cache them
-        factorials = tf.concat([[1.0], tf.cast(tf.math.cumprod(tf.range(1, max_n + 1)), tf.float32)], axis=0)
-
-        # n! = (lx + ly + lz)!
-        nfact = tf.gather(factorials, lxlylz_sum)
-
-        # lx! * ly! * lz!
-        fact_lxlylz = (
-            tf.gather(factorials, lxlylz[:, 0]) *
-            tf.gather(factorials, lxlylz[:, 1]) *
-            tf.gather(factorials, lxlylz[:, 2])
-        )
-
-        return lxlylz, lxlylz_sum, nfact, fact_lxlylz
-    
     @tf.function(jit_compile=False,
                 input_signature=[
                 tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32)]
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
                  )
-    def _angular_terms(self,z, rij_unit):
+    def _angular_terms(self,z, rij_unit,lxlylz, fact_norm):
         '''
         compute vectorize three-body computation
 
         '''
-        n = tf.range(z+1, dtype=tf.int32)
-        lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.compute_cosine_terms(n)
-
-        #rx^lx * ry^ly * rz^lz
-        #this need to be regularized to avoid undefined derivatives
-        rij_lxlylz = (rij_unit[:,None,:] + 1e-12)**tf.cast(lxlylz, tf.float32)[None,:,:]
+        rij_lxlylz = rij_unit[:,None,:]**tf.cast(lxlylz, tf.float32)[None,:,:]
         g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1) #npairs x n_lxlylz
-        ###################
-        nfact_lxlylz = nfact / fact_lxlylz # n_lxlylz
-
-        #compute zeta! / (zeta-n)! / n!
-
-        #zeta_fact = help_fn.factorial(z)
-        zeta_fact = tf.reduce_prod(tf.cast(n[1:], tf.float32)) #product of elements of n excluding zero
-
-#        '''
-        z_minus_n = z - lxlylz_sum #lxlylz_sum goes fro 0  to z
-        #max_fact = tf.reduce_max(z_minus_n)
-        max_fact = z
-        factorials = tf.concat([[1.0],
-                                    tf.cast(tf.math.cumprod(tf.range(1, max_fact + 1)), tf.float32)],
-                                   axis=0)
-        zeta_fact_n = tf.gather(factorials, z_minus_n)
-        '''
-        #zeta_fact_n = self.parallel_map_fn_factorial(z-lxlylz_sum)
-        zeta_fact_n = tf.map_fn(help_fn.factorial, z-lxlylz_sum,
-                                fn_output_signature=tf.float32,
-                                parallel_iterations=self.nzeta
-                                )
-        '''
         z_float = tf.cast(z, tf.float32)
-        zetan_fact = zeta_fact / (zeta_fact_n * nfact)
-        fact_norm = nfact_lxlylz * zetan_fact
         g_ij_lxlylz = tf.einsum('ij,j->ij',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
-        return g_ij_lxlylz, lxlylz_sum
+        return g_ij_lxlylz
 
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -289,22 +171,21 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32)]
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
                  )
     def _to_three_body_terms(self,z, r_idx, rij_unit, 
-                             radial_ij, first_atom_idx, lambda_weights):
+                             radial_ij, first_atom_idx, lambda_weights,
+                             lxlylz, lxlylz_sum, fact_norm):
     #def _to_three_body_terms(self, x):
         '''
         compute vectorize three-body computation
 
         '''
-        #z = x[0][0]
-        #r_idx = x[1][0]
-        #rij_unit = x[2]
-        #radial_ij = x[3]
-        #first_atom_idx = x[4]
-        #nat = x[5][0]
-        g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, rij_unit)
+        g_ij_lxlylz = self._angular_terms(z, rij_unit,lxlylz, fact_norm)
         g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
         #sum over neighbors
         g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
@@ -328,14 +209,19 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32)]
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
                  )
-    def _to_four_body_terms(self,z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights):
+    def _to_four_body_terms(self,z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights,
+                            lxlylz, lxlylz_sum, fact_norm):
         '''
         compute  up to four-body computation
 
         '''
-        g_ij_lxlylz, lxlylz_sum = self._angular_terms(z, rij_unit)
+        g_ij_lxlylz = self._angular_terms(z, rij_unit,lxlylz, fact_norm)
         g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
         #sum over neighbors
         g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
@@ -545,25 +431,35 @@ class mBP_model(tf.keras.Model):
                                                               segment_ids=first_atom_idx) 
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik
-            rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm + reg)) #npair,3
+            rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / all_rij_norm) #npair,3
             #rij_unit = all_rij / (all_rij_norm[:,None] + reg)
 
             if self.body_order == 3:
 
                 # this is require for proper backward propagation
                 r_idx = 1
+                idx = 0
                 zeta = tf.constant(self.zeta)
                 z = zeta[0]
-                g3p = self._to_three_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                #lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.lxlylz_quantities[f'{self.zeta[idx]}']
+                #lxlylz, lxlylz_sum, nfact, fact_lxlylz = help_fn.compute_cosine_terms_handcoded(self.zeta[0])
+                lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta[0])
+                g3p = self._to_three_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights,
+                                                lxlylz, lxlylz_sum, fact_norm)
                 Gi3 = [g3p]
                 #Gi3.append(gn)
                 # we should tf range with Tensorarray
+                idx += 1
                 for i in range(1,self.nzeta):
                     #r_idx += 1
+                    #lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.lxlylz_quantities[f'{self.zeta[idx]}']
+                    #lxlylz, lxlylz_sum, nfact, fact_lxlylz = help_fn.compute_cosine_terms_handcoded(self.zeta[idx])
+                    lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta[idx])
                     z = zeta[i]
-                    g3p = self._to_three_body_terms(z, i+1, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                    g3p = self._to_three_body_terms(z, i+1, rij_unit, radial_ij, first_atom_idx, lambda_weights,
+                                                    lxlylz, lxlylz_sum, fact_norm)
                     Gi3.append(g3p)
-                    #Gi3.append(gn)
+                    idx += 1
 
 
                 #elements = (zeta, r_idx, rij_unit_batch, radial_ij_batch, first_atom_idx_batch, nat_batch)
@@ -583,15 +479,25 @@ class mBP_model(tf.keras.Model):
                 r_idx = 1
                 zeta = tf.constant(self.zeta)
                 z = zeta[0]
-                gi3,gi4 = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                idx = 0
+                #lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.lxlylz_quantities[f'{self.zeta[idx]}']
+
+                lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta[idx])
+                gi3,gi4 = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights,
+                                                   lxlylz, lxlylz_sum, fact_norm)
                 Gi3 = [gi3]
                 Gi4 = [gi4]
+                idx += 1
                 for i in range(1,self.nzeta):
                     r_idx = i+1
                     z = zeta[i]
-                    gi3,gi4 = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights)
+                    #lxlylz, lxlylz_sum, nfact, fact_lxlylz = self.lxlylz_quantities[f'{self.zeta[idx]}']
+                    lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta[idx])
+                    gi3,gi4 = self._to_four_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights,
+                                                       lxlylz, lxlylz_sum, fact_norm)
                     Gi3.append(gi3)
                     Gi4.append(gi4)
+                    idx += 1
                 #Gi3 has a shape of (nzeta, nat, nrad*nspec, n_lambda). Thus stack along axis 1 grouped the descriptors by atoms
                 #then we can reshape to give (nat,ndescriptors)
                 Gi3 = tf.reshape(tf.stack(Gi3, axis=1), [nat, -1]) #stack along 
@@ -949,11 +855,11 @@ class mBP_model(tf.keras.Model):
         stress = outs['stress']
         #Zstar = outs['Zstar']
         #features = outs['features']
-        C6 = charges = None
-        if self.include_vdw:
-            C6 = outs['C6']
-        if self.coulumb:
-            charges = outs['charges']
+        #C6 = charges = None
+        #if self.include_vdw:
+        C6 = outs['C6']
+        #if self.coulumb:
+        charges = outs['charges']
         target = tf.cast(tf.reshape(data['energy'], [-1]), tf.float32)
         target_f = tf.reshape(data['forces'][:,:nmax*3], [-1, 3*nmax])
 
@@ -1007,11 +913,8 @@ class mBP_model(tf.keras.Model):
         stress = outs['stress']
         #Zstar = outs['Zstar']
         #features = outs['features']
-        C6 = charges = None
-        if self.include_vdw:
-            C6 = outs['C6']
-        if self.coulumb:
-            charges = outs['charges']
+        C6 = outs['C6']
+        charges = outs['charges']
 
         #target = tf.cast(tf.reshape(inputs_target[10], [-1]), tf.float32)
         #target_f = tf.reshape(inputs_target[11][:,:nmax*3], [-1, 3*nmax])
@@ -1024,6 +927,7 @@ class mBP_model(tf.keras.Model):
 
         ediff = (e_pred - target)
 
+        '''
 
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
@@ -1035,16 +939,17 @@ class mBP_model(tf.keras.Model):
         mae_f = tf.reduce_mean(mae_f)
 
         rmse_f = tf.sqrt(fmse)
-
         metrics = {}
 
         metrics.update({'MAE': mae})
         metrics.update({'RMSE': rmse})
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
+        '''
         forces_ref = tf.reshape(target_f, [-1, nmax, 3])
         forces_pred = tf.reshape(forces, [-1, nmax, 3])
-        if self.coulumb:
-            charges = tf.reshape(charges, [-1,nmax])
-            return [target, e_pred, metrics, forces_ref, forces_pred, batch_nats, charges,stress]
-        return [target, e_pred, metrics, forces_ref, forces_pred, batch_nats,stress]
+
+        #if self.coulumb:
+        charges = tf.reshape(charges, [-1,nmax])
+        return [target, e_pred, forces_ref, forces_pred, batch_nats, charges,stress]
+        #return [target, e_pred, metrics, forces_ref, forces_pred, batch_nats,stress]

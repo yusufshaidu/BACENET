@@ -8,6 +8,7 @@ from models.model import mBP_model
 from data.data_processing import data_preparation, atomic_number
 
 import os, sys, yaml,argparse, json
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
 import numpy as np
 import silssf.train as train
 from pathlib import Path

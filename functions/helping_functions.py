@@ -1,115 +1,99 @@
 import numpy as np
 import tensorflow as tf
 import math 
+pi = 3.141592653589793
 
-def find_three_non_negative_integers_handcoded(n):
-    # Create a tensor of integers from 0 to n
-    if n == 0:
-        return [[0, 0, 0]]
-    if n == 1:
-        return [[0, 0, 1],[0, 1, 0],[1, 0, 0]]
-    if n == 2:
-        return [[0, 0, 2],
-        [0, 1, 1],
-        [0, 2, 0],
-        [1, 0, 1],
-        [1, 1, 0],
-        [2, 0, 0]]
-    if n == 3:
-        return [[0, 0, 3],
-        [0, 1, 2],
-        [0, 2, 1],
-        [0, 3, 0],
-        [1, 0, 2],
-        [1, 1, 1],
-        [1, 2, 0],
-        [2, 0, 1],
-        [2, 1, 0],
-        [3, 0, 0]]
-    if n == 4:
-        return [[0, 0, 4],
-        [0, 1, 3],
-        [0, 2, 2],
-        [0, 3, 1],
-        [0, 4, 0],
-        [1, 0, 3],
-        [1, 1, 2],
-        [1, 2, 1],
-        [1, 3, 0],
-        [2, 0, 2],
-        [2, 1, 1],
-        [2, 2, 0],
-        [3, 0, 1],
-        [3, 1, 0],
-        [4, 0, 0]]
-    if n == 5:
-        return [[0, 0, 5],
-        [0, 1, 4],
-        [0, 2, 3],
-        [0, 3, 2],
-        [0, 4, 1],
-        [0, 5, 0],
-        [1, 0, 4],
-        [1, 1, 3],
-        [1, 2, 2],
-        [1, 3, 1],
-        [1, 4, 0],
-        [2, 0, 3],
-        [2, 1, 2],
-        [2, 2, 1],
-        [2, 3, 0],
-        [3, 0, 2],
-        [3, 1, 1],
-        [3, 2, 0],
-        [4, 0, 1],
-        [4, 1, 0],
-        [5, 0, 0]]
-    if n == 6:
-        return [[0, 0, 6],
-        [0, 1, 5],
-        [0, 2, 4],
-        [0, 3, 3],
-        [0, 4, 2],
-        [0, 5, 1],
-        [0, 6, 0],
-        [1, 0, 5],
-        [1, 1, 4],
-        [1, 2, 3],
-        [1, 3, 2],
-        [1, 4, 1],
-        [1, 5, 0],
-        [2, 0, 4],
-        [2, 1, 3],
-        [2, 2, 2],
-        [2, 3, 1],
-        [2, 4, 0],
-        [3, 0, 3],
-        [3, 1, 2],
-        [3, 2, 1],
-        [3, 3, 0],
-        [4, 0, 2],
-        [4, 1, 1],
-        [4, 2, 0],
-        [5, 0, 1],
-        [5, 1, 0],
-        [6, 0, 0]]
-def compute_n_comb_lxlylz(n):
-    #compute n!/(lx!ly!lz!), lx+ly+lz=n
-    if n == 0:
-        return [1.0] # 0!/(0!*0!*0!)
-    if n == 1:
-        #[[0, 0, 1],[0, 1, 0],[1, 0, 0]]
-        return [1.0,1.0,1.0]
-    if n == 2:
-        #[[0, 0, 2],[0, 1, 1],[0, 2, 0],[1, 0, 1],[1, 1, 0],[2, 0, 0]]
-        return [1.0, 2.0, 1.0, 2.0, 2.0, 1.0]
-    if n == 3:
-        #[[0, 0, 3],[0, 1, 2],[0, 2, 1],[0, 3, 0],[1, 0, 2],[1, 1, 1],[1, 2, 0],[2, 0, 1],[2, 1, 0],[3, 0, 0]]
-        return [1.0,3.0,3.0,1.0,3.0,6.0,3.0,3.0,3.0,1.0]
-    if n == 4:
-        #[[0, 0, 4],[0, 1, 3],[0, 2, 2],[0, 3, 1],[0, 4, 0],[1, 0, 3],[1, 1, 2],[1, 2, 1],
-        #[1, 3, 0],[2, 0, 2],[2, 1, 1],[2, 2, 0],[3, 0, 1],[3, 1, 0],[4, 0, 0]]
-        return [1.0,4.0,6.0,4.0,1.0,4.0,12.0,12.0,4.0,6.0,12.0,6.0,4.0,4.0,1.0]
+def precompute_fact_norm_lxlylz(z):
+    """
+    lxlylz, lxlylz_sum, fact_norm = z!/(z-n)!/n! * n!/lx!/ly!/lz!
+    I can add higher zterms if needed using the function _compute_cosine_terms
+    """
+    terms = {1: ([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0]], [0, 1, 1, 1], [1.0, 1.0, 1.0, 1.0]), 
+             2: ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 1, 0], [0, 1, 1], [0, 2, 0], [1, 0, 0], [1, 0, 1], [1, 1, 0], [2, 0, 0]], 
+                 [0, 1, 2, 1, 2, 2, 1, 2, 2, 2], [1.0, 2.0, 1.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 1.0]), 
+             3: ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 1, 0], [0, 1, 1], [0, 1, 2], [0, 2, 0], [0, 2, 1], [0, 3, 0], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 1, 0], [1, 1, 1], [1, 2, 0], [2, 0, 0], [2, 0, 1], [2, 1, 0], [3, 0, 0]], 
+                 [0, 1, 2, 3, 1, 2, 3, 2, 3, 3, 1, 2, 3, 2, 3, 3, 2, 3, 3, 3], 
+                 [1.0, 3.0, 3.0, 1.0, 3.0, 6.0, 3.0, 3.0, 3.0, 1.0, 3.0, 6.0, 3.0, 6.0, 6.0, 3.0, 3.0, 3.0, 3.0, 1.0]), 
+             4: ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 0, 4], [0, 1, 0], [0, 1, 1], [0, 1, 2], [0, 1, 3], [0, 2, 0], [0, 2, 1], [0, 2, 2], [0, 3, 0], [0, 3, 1], [0, 4, 0], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 0, 3], [1, 1, 0], [1, 1, 1], [1, 1, 2], [1, 2, 0], [1, 2, 1], [1, 3, 0], [2, 0, 0], [2, 0, 1], [2, 0, 2], [2, 1, 0], [2, 1, 1], [2, 2, 0], [3, 0, 0], [3, 0, 1], [3, 1, 0], [4, 0, 0]], 
+                 [0, 1, 2, 3, 4, 1, 2, 3, 4, 2, 3, 4, 3, 4, 4, 1, 2, 3, 4, 2, 3, 4, 3, 4, 4, 2, 3, 4, 3, 4, 4, 3, 4, 4, 4], 
+                 [1.0, 4.0, 6.0, 4.0, 1.0, 4.0, 12.0, 12.0, 4.0, 6.0, 12.0, 6.0, 4.0, 4.0, 1.0, 4.0, 12.0, 12.0, 4.0, 12.0, 24.0, 12.0, 12.0, 12.0, 4.0, 6.0, 12.0, 6.0, 12.0, 12.0, 6.0, 4.0, 4.0, 4.0, 1.0])
+             }
+    return terms[z]
+
+def _compute_cosine_terms(z):
+    # Expand all possible (lx, ly, lz) for n from 0 to max_n
+    n_values = tf.range(z+1, dtype=tf.int32)
+    
+    max_n = tf.reduce_max(n_values)
+    
+    # Generate all (lx, ly, lz) such that lx + ly + lz <= max_n
+    lx = tf.range(max_n + 1)
+    ly = tf.range(max_n + 1)
+    lz = tf.range(max_n + 1)
+    lx, ly, lz = tf.meshgrid(lx, ly, lz, indexing='ij')
+
+    lx = tf.reshape(lx, [-1])
+    ly = tf.reshape(ly, [-1])
+    lz = tf.reshape(lz, [-1])
+    lxlylz = tf.stack([lx, ly, lz], axis=1)  # (N, 3)
+
+    lxlylz_sum = tf.reduce_sum(lxlylz, axis=1)  # Total l = lx + ly + lz
+
+    # Filter only those with lx + ly + lz == n for any n in n_values
+    n_values = tf.convert_to_tensor(n_values)
+    valid_mask = tf.reduce_any(tf.equal(tf.expand_dims(lxlylz_sum, 1), n_values), axis=1)
+    lxlylz = tf.boolean_mask(lxlylz, valid_mask)
+    lxlylz_sum = tf.boolean_mask(lxlylz_sum, valid_mask)
+
+    # Compute factorials up to max_n and cache them
+    factorials = tf.concat([[1.0], tf.cast(tf.math.cumprod(tf.range(1, max_n + 1)), tf.float32)], axis=0)
+
+    # n! = (lx + ly + lz)!
+    nfact = tf.gather(factorials, lxlylz_sum)
+
+    # lx! * ly! * lz!
+    fact_lxlylz = (
+        tf.gather(factorials, lxlylz[:, 0]) *
+        tf.gather(factorials, lxlylz[:, 1]) *
+        tf.gather(factorials, lxlylz[:, 2])
+    )
+    ##################################33
+    nfact_lxlylz = nfact / fact_lxlylz # n_lxlylz
+
+    #compute zeta! / (zeta-n)! / n!
+
+    #zeta_fact = help_fn.factorial(z)
+    zeta_fact = tf.reduce_prod(tf.cast(n_values[1:], tf.float32)) #product of elements of n excluding zero
+
+#        '''
+    z_minus_n = z - lxlylz_sum #lxlylz_sum goes fro 0  to z
+    max_fact = tf.reduce_max(z_minus_n)
+    #max_fact = z
+    factorials = tf.concat([[1.0],
+                                tf.cast(tf.math.cumprod(tf.range(1, max_fact + 1)), tf.float32)],
+                               axis=0)
+    zeta_fact_n = tf.gather(factorials, z_minus_n)
+    
+    z_float = tf.cast(z, tf.float32)
+    zetan_fact = zeta_fact / (zeta_fact_n * nfact)
+    fact_norm = nfact_lxlylz * zetan_fact
+
+    return lxlylz, lxlylz_sum, fact_norm
+
+def compute_cosine_terms_handcoded(z):
+    lxlylz_terms = {1: ([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0]], [0, 1, 1, 1], [1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0]), 
+            2: ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 1, 0], [0, 1, 1], [0, 2, 0], [1, 0, 0], [1, 0, 1], [1, 1, 0], [2, 0, 0]], 
+                [0, 1, 2, 1, 2, 2, 1, 2, 2, 2], [1.0, 1.0, 2.0, 1.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0], 
+                [1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 2.0]), 
+            3: ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 1, 0], [0, 1, 1], [0, 1, 2], [0, 2, 0], [0, 2, 1], [0, 3, 0], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 1, 0], [1, 1, 1], [1, 2, 0], [2, 0, 0], [2, 0, 1], [2, 1, 0], [3, 0, 0]], 
+                [0, 1, 2, 3, 1, 2, 3, 2, 3, 3, 1, 2, 3, 2, 3, 3, 2, 3, 3, 3], 
+                [1.0, 1.0, 2.0, 6.0, 1.0, 2.0, 6.0, 2.0, 6.0, 6.0, 1.0, 2.0, 6.0, 2.0, 6.0, 6.0, 2.0, 6.0, 6.0, 6.0], 
+                [1.0, 1.0, 2.0, 6.0, 1.0, 1.0, 2.0, 2.0, 2.0, 6.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 6.0]), 
+            4: ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 0, 4], [0, 1, 0], [0, 1, 1], [0, 1, 2], [0, 1, 3], [0, 2, 0], [0, 2, 1], [0, 2, 2], [0, 3, 0], [0, 3, 1], [0, 4, 0], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 0, 3], [1, 1, 0], [1, 1, 1], [1, 1, 2], [1, 2, 0], [1, 2, 1], [1, 3, 0], [2, 0, 0], [2, 0, 1], [2, 0, 2], [2, 1, 0], [2, 1, 1], [2, 2, 0], [3, 0, 0], [3, 0, 1], [3, 1, 0], [4, 0, 0]], 
+                [0, 1, 2, 3, 4, 1, 2, 3, 4, 2, 3, 4, 3, 4, 4, 1, 2, 3, 4, 2, 3, 4, 3, 4, 4, 2, 3, 4, 3, 4, 4, 3, 4, 4, 4], 
+                [1.0, 1.0, 2.0, 6.0, 24.0, 1.0, 2.0, 6.0, 24.0, 2.0, 6.0, 24.0, 6.0, 24.0, 24.0, 1.0, 2.0, 6.0, 24.0, 2.0, 6.0, 24.0, 6.0, 24.0, 24.0, 2.0, 6.0, 24.0, 6.0, 24.0, 24.0, 6.0, 24.0, 24.0, 24.0], 
+                [1.0, 1.0, 2.0, 6.0, 24.0, 1.0, 1.0, 2.0, 6.0, 2.0, 2.0, 4.0, 6.0, 6.0, 24.0, 1.0, 1.0, 2.0, 6.0, 1.0, 1.0, 2.0, 2.0, 2.0, 6.0, 2.0, 2.0, 4.0, 2.0, 2.0, 4.0, 6.0, 6.0, 6.0, 24.0])}
+    return lxlylz_terms[z]
 def compute_number_of_terms_lxlylz(n):
     number_of_triplets = {0: 1, 1: 3, 2: 6, 3: 10, 4: 15, 
                           5: 21, 6: 28, 7: 36, 8: 45, 9: 55, 
@@ -119,6 +103,51 @@ def compute_number_of_terms_lxlylz(n):
     for i in range(n+1):
         total += number_of_triplets[i]
     return total
+
+@tf.function(jit_compile=False,
+                 input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                ])
+def compute_cosine_terms(n_values):
+    # Expand all possible (lx, ly, lz) for n from 0 to max_n
+    max_n = tf.reduce_max(n_values)
+    #n_values is a range up to a max
+    #max_n = n_values[-1]
+
+    # Generate all (lx, ly, lz) such that lx + ly + lz <= max_n
+    lx = tf.range(max_n + 1)
+    ly = tf.range(max_n + 1)
+    lz = tf.range(max_n + 1)
+    lx, ly, lz = tf.meshgrid(lx, ly, lz, indexing='ij')
+
+    lx = tf.reshape(lx, [-1])
+    ly = tf.reshape(ly, [-1])
+    lz = tf.reshape(lz, [-1])
+    lxlylz = tf.stack([lx, ly, lz], axis=1)  # (N, 3)
+
+    lxlylz_sum = tf.reduce_sum(lxlylz, axis=1)  # Total l = lx + ly + lz
+
+    # Filter only those with lx + ly + lz == n for any n in n_values
+    #n_values = tf.convert_to_tensor(n_values)
+    #n_values = n_values
+    valid_mask = tf.reduce_any(tf.equal(tf.expand_dims(lxlylz_sum, 1), n_values), axis=1)
+    lxlylz = tf.boolean_mask(lxlylz, valid_mask)
+    lxlylz_sum = tf.boolean_mask(lxlylz_sum, valid_mask)
+
+    # Compute factorials up to max_n and cache them
+    factorials = tf.concat([[1.0], tf.cast(tf.math.cumprod(tf.range(1, max_n + 1)), tf.float32)], axis=0)
+
+    # n! = (lx + ly + lz)!
+    nfact = tf.gather(factorials, lxlylz_sum)
+
+    # lx! * ly! * lz!
+    fact_lxlylz = (
+        tf.gather(factorials, lxlylz[:, 0]) *
+        tf.gather(factorials, lxlylz[:, 1]) *
+        tf.gather(factorials, lxlylz[:, 2])
+    )
+
+    return lxlylz, lxlylz_sum, nfact, fact_lxlylz
 
 @tf.function(input_signature=[tf.TensorSpec(shape=(), dtype=tf.int32),])
 def find_three_non_negative_integers(n):
@@ -309,7 +338,7 @@ def vdw_contribution(x):
                              tf.TensorSpec(shape=(), dtype=tf.float32)])
 def tf_fcut(r,rc):
     dim = tf.shape(r)
-    pi = tf.constant(math.pi, dtype=tf.float32)
+    #pi = tf.constant(math.pi, dtype=tf.float32)
     return tf.where(r<=rc, 0.5*(1.0 + tf.cos(pi*r/rc)), tf.zeros(dim, dtype=tf.float32))
 @tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
                              tf.TensorSpec(shape=(), dtype=tf.float32)])
@@ -320,14 +349,17 @@ def _tf_fcut(r,rc):
     return tf.where(r<=rc, x*x*x, tf.zeros(dim, dtype=tf.float32))
 
 @tf.function(input_signature=[tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                             tf.TensorSpec(shape=(), dtype=tf.float32)],jit_compile=False)
+                             tf.TensorSpec(shape=(), dtype=tf.float32)],
+             jit_compile=False)
 def tf_fcut_rbf(r,rc):
-    p = tf.constant(6, dtype=tf.float32)
+    p = tf.cast(6, dtype=tf.float32)
     x = r / rc
-    x2 = x*x
+    x2 = x * x
     xp = x2 * x2 * x2
-    xp1 = x2 * x2 * x2 * x
-    xp2 = x2 * x2 * x2 * x2
+    #xp1 = x2 * x2 * x2 * x
+    #xp2 = x2 * x2 * x2 * x2
+    xp1 = xp * x
+    xp2 = xp1 * x
     shape = tf.shape(x)
     
     fc = tf.where(x <= 1.0, 1.0 - 
@@ -357,12 +389,12 @@ def tf_app_gaussian(x):
                               ], jit_compile=False)
 def bessel_function(r,rc,kn,n):
     
-    pi = tf.constant(math.pi, dtype=tf.float32)
+    #pi = tf.constant(math.pi, dtype=tf.float32)
     nkn_rad = tf.range(1, n+1, dtype=tf.float32) * kn
     rn = pi / rc * tf.einsum('j,i->ij',nkn_rad, r)
 
-    dim = tf.shape(r)
-    p = 6
+    #dim = tf.shape(r)
+    #p = 6
     fc_over_r = tf_fcut_rbf(r,rc) / (r + 1e-12)
 
     return tf.sqrt(2.0/rc)*tf.einsum('ij,i->ij',tf.sin(rn),fc_over_r) # nat, nneigh,nrad
