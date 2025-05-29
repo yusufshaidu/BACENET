@@ -141,9 +141,15 @@ class mBP_model(tf.keras.Model):
         #self._lambda_weights_nets = tf.keras.layers.Dense(units=1,activation='linear', 
         #                                                  use_bias=True,name='lambda_weights')
         self._lambda_weights_nets = Networks(1, [self.n_lambda],
-                                         ['linear'],
+                                         [configs['lambda_act']],
                                         use_bias=False,
                                  prefix='lambda_weights')
+    @tf.function
+    def custom_segment_sum(self, data, segment_ids, num_segments):
+        result_shape = tf.concat([[num_segments], tf.shape(data)[1:]], axis=0)
+        zeros = tf.zeros(result_shape, dtype=data.dtype)
+        indices = tf.expand_dims(segment_ids, axis=-1)  # shape (N, 1)
+        return tf.tensor_scatter_nd_add(zeros, indices, data)
 
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -175,11 +181,12 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,3), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
                 ]
                  )
     def _to_three_body_terms(self,z, r_idx, rij_unit, 
                              radial_ij, first_atom_idx, lambda_weights,
-                             lxlylz, lxlylz_sum, fact_norm):
+                             lxlylz, lxlylz_sum, fact_norm,nat):
     #def _to_three_body_terms(self, x):
         '''
         compute vectorize three-body computation
@@ -190,6 +197,8 @@ class mBP_model(tf.keras.Model):
         #sum over neighbors
         g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
                                             segment_ids=first_atom_idx)
+        #g_ilxlylz = self.custom_segment_sum(data=g_ilxlylz, 
+        #                                    segment_ids=first_atom_idx, num_segments=nat)
         # nat x nrad*nspec, n_lxlylz
         g2_ilxlylz = g_ilxlylz * g_ilxlylz
         #sum over z
@@ -445,7 +454,7 @@ class mBP_model(tf.keras.Model):
                 #lxlylz, lxlylz_sum, nfact, fact_lxlylz = help_fn.compute_cosine_terms_handcoded(self.zeta[0])
                 lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta[0])
                 g3p = self._to_three_body_terms(z, r_idx, rij_unit, radial_ij, first_atom_idx, lambda_weights,
-                                                lxlylz, lxlylz_sum, fact_norm)
+                                                lxlylz, lxlylz_sum, fact_norm,nat)
                 Gi3 = [g3p]
                 #Gi3.append(gn)
                 # we should tf range with Tensorarray
@@ -457,7 +466,7 @@ class mBP_model(tf.keras.Model):
                     lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta[idx])
                     z = zeta[i]
                     g3p = self._to_three_body_terms(z, i+1, rij_unit, radial_ij, first_atom_idx, lambda_weights,
-                                                    lxlylz, lxlylz_sum, fact_norm)
+                                                    lxlylz, lxlylz_sum, fact_norm,nat)
                     Gi3.append(g3p)
                     idx += 1
 

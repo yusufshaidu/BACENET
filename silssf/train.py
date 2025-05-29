@@ -77,7 +77,8 @@ def default_config():
         'efield': None,
         'oxidation_states': None,
         'is_training': True,
-        'n_lambda': 4
+        'n_lambda': 4,
+        'lambda_act': 'linear'
     }
 
 def estimate_species_chi0_J0(species):
