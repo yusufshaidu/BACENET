@@ -11,13 +11,14 @@ All weights are learn from data. Neighborlist are computed with ASE and stored a
  To encode species information rather than creating NNP for each species channels, we start from one-hot encoder which creates a long vector of zeros with only the possible corresponding to the atomic number of species takes a value of 1. This one-hot encoder is then pass through a fully trainable user-defined feedforward NNs that returns a fixed vector $S_i$ that represent the species $i$. The species information is then multiplied by the radial function in two possible ways: a tensor product $S(s_1,s_2)=S_{s_1} \otimes S_{s_2}$ or a dot product $S(s_1,s_2)=S_{s_2} . S_{s_1}$.
 
 The species resolved radial functions are then give by:
- $$R_n(r,s_1,s_2) = \sqrt{\frac{2}{r_c}} \frac{{\rm sin}(\frac{n\pi}{r_c}k_n r)}{r} f_c(r,r_c) S(s_1,s_2) $$ 
+ $$R_n(r,s_1,s_2) = \sqrt{\frac{2}{r_c}} \frac{{\rm sin}(\frac{n\pi}{r_c}k_n r)}{r} f_c(r,r_c) S(s_1,s_2)$$ 
+
+ # Angular descriptors
+ In this work, we start with the Behler-Parrinello descriptors give by
+ $$G_i^{(3)}(s) = 2^{1-\zeta}\sum_{jk} (1+\lambda_s {\rm cos}(\theta_{ijk}))^\zeta R_{ijs} R_{iks}$$
 
 ## todolist
-- (priority 1) implement ASE interface
-- (priority) implement van der Waals and long range electrostatics!!
 - implement a lammps interface for production runs
-- Implement input normalization
 - start from known species embedding rather than a one-hot-encoding [https://github.com/WMD-group/ElementEmbeddings] 
 
 
