@@ -175,6 +175,15 @@ def opt(configs, lr_schedule):
 
 def create_model(configs):
 
+    # Set memory growth before any GPU work is done
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print("Failed to set memory growth:", e)
+
 
     #Read in model parameters
     #I am parsing yaml files with all the parameters
