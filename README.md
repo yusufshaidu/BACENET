@@ -21,7 +21,7 @@ The species resolved radial functions are then give by:
  
  $$G_i^{(3)}(s) = 2^{1-\zeta}\sum_{jk} (1+\lambda_s {\rm cos}(\theta_{ijk}))^\zeta R_{ijs} R_{iks}$$
 
-where $R_{ijs} = R_n(r,s_1,s_2) fc(r)$
+where $R_{ijs} = R_n(r_{ij},s_1,s_2) fc(r_{ij, r_c})$
 ## todolist
 - implement a lammps interface for production runs
 - start from known species embedding rather than a one-hot-encoding [https://github.com/WMD-group/ElementEmbeddings] 
