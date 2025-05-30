@@ -140,9 +140,18 @@ class mBP_model(tf.keras.Model):
         # Add a trainable weights for the weights of cos_theta_ijk:
         #self._lambda_weights_nets = tf.keras.layers.Dense(units=1,activation='linear', 
         #                                                  use_bias=True,name='lambda_weights')
+        #initializer for lambda
+        def myinitializer(shape, dtype=None):
+            initializer = []
+
+            for i in range(shape[1]):
+                initializer.append([-1.0 + 2 * i / (shape[1]-1 + 1e-8)])
+            return tf.constant(tf.reshape(initializer,shape), dtype=dtype)
+
         self._lambda_weights_nets = Networks(1, [self.n_lambda],
                                          [configs['lambda_act']],
                                         use_bias=False,
+                                        weight_initializer=myinitializer,
                                  prefix='lambda_weights')
     @tf.function
     def custom_segment_sum(self, data, segment_ids, num_segments):
