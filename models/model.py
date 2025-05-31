@@ -173,7 +173,7 @@ class mBP_model(tf.keras.Model):
         compute vectorize three-body computation
 
         '''
-        rij_lxlylz = rij_unit[:,None,:]**tf.cast(lxlylz, tf.float32)[None,:,:]
+        rij_lxlylz = (rij_unit[:,None,:] + 1e-12)**tf.cast(lxlylz, tf.float32)[None,:,:]
         g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1) #npairs x n_lxlylz
         z_float = tf.cast(z, tf.float32)
         g_ij_lxlylz = tf.einsum('ij,j->ij',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
@@ -301,7 +301,8 @@ class mBP_model(tf.keras.Model):
         '''
         E1 = tf.pad(-E1, [[0,1]], constant_values=self.total_charge)
         atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
-        #charges = tf.linalg.solve(Aij, E1[:,None])
+        charges = tf.linalg.solve(Aij, E1[:,None])
+        '''
         lin_op_A = tf.linalg.LinearOperatorFullMatrix(
             Aij,
             is_self_adjoint=True,
@@ -319,6 +320,7 @@ class mBP_model(tf.keras.Model):
             )
         #outs[0]= max_iter, outs[2]=residual,outs[3]=basis vectors, outs[4]=preconditioner 
         charges = outs[1]
+        '''
         return tf.reshape(charges, [-1])[:-1]
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -449,7 +451,7 @@ class mBP_model(tf.keras.Model):
                                                               segment_ids=first_atom_idx) 
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik
-            rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / all_rij_norm) #npair,3
+            rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm+reg)) #npair,3
             #rij_unit = all_rij / (all_rij_norm[:,None] + reg)
 
             if self.body_order == 3:

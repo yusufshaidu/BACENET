@@ -29,7 +29,7 @@ class ewald:
         self._gaussian_width = tf.convert_to_tensor(gaussian_width,dtype=tf.float32) # this should be learnable, maybe!
         self._sqrt_pi = tf.sqrt(pi)
 
-        self.volume = tf.reduce_sum(cell[0] * tf.linalg.cross(cell[1], cell[2]))
+        self.volume = tf.abs(tf.linalg.det(cell))
 
         #structure properties
         self.cell_length = tf.linalg.norm(cell,axis=1)
@@ -39,7 +39,7 @@ class ewald:
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
             gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(gaussian_width))
             self._gmax = gmax if gmax else 2.* gamma_max * tf.sqrt(-tf.math.log(accuracy))
-            #self._gmax *= 1.10
+            self._gmax *= 1.001
         if efield is not None:
             self.efield = tf.cast(tf.squeeze(efield), dtype=tf.float32)
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
@@ -134,6 +134,7 @@ class ewald:
         
 
         gmax = self.estimate_gmax(tf.reduce_min(self._gaussian_width))
+        #gmax = self._gmax
 
         # Build integer index grid for k-vectors
         # Estimate index ranges for each dimension
@@ -168,13 +169,13 @@ class ewald:
         g_norm = tf.boolean_mask(g_norm, mask) #[K,]
         #'''
         #g_vecs, g_norm = self.generate_g_vectors(gmax, nmax1, nmax2, nmax3)
-        g_sq = g_norm*g_norm  # [K]
+        g_sq = g_norm * g_norm  # [K]
         
 
         # Prepare factors for summation
         # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
         # shape [K, N]
-        g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/2.0, g_sq) # [N,N,K]
+        g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/4.0, g_sq) # [N,N,K]
         exp_ij = tf.exp(-g2_gamma2)
         exp_ij_by_g_sq = tf.einsum('ijk,k->ijk',exp_ij, 1.0 / (g_sq + 1e-12))
 
