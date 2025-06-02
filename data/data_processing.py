@@ -70,10 +70,17 @@ def get_energy_ase(atom, species,energy_key):
 def convert_json2ASE_atoms(atomic_energy, file, C6_spec, species):
     Ry2eV = 13.6057039763
     data = json.load(open(file))
+    charges = None
     try:
         idx, symbols, positions, forces = zip(*data['atoms'])
     except:
         idx, symbols, positions, forces, charge = zip(*data['atoms'])
+    if charges is None:
+        charges = np.zeros(len(positions))
+    else:
+        charges = np.array(charges)
+    
+    total_charge = np.sum(charges)
 
     try:
         cell = np.asarray(data['lattice_vectors'])
@@ -125,9 +132,10 @@ def convert_json2ASE_atoms(atomic_energy, file, C6_spec, species):
         forces *= (Ry2eV * 2)
 
     atoms.new_array('forces', forces)
+    atoms.new_array('charges', charges)
     atoms.new_array('encoder',_spec_encoder)
     atoms.new_array('C6',C6)
-    atoms.info = {'energy':energy-E0}
+    atoms.info = {'energy':energy-E0, 'total_charge':total_charge}
 
     return atoms
 def atomic_number(species):
@@ -185,24 +193,28 @@ def process_ase(atoms, evaluate_test,species,atomic_energy,C6_spec,energy_key,fo
 
         if evaluate_test >= 0:
             try:
-                energy = atoms.get_potential_energy() - E0
+                energy = atoms.get_potential_energy()
                 forces = atoms.get_forces()
+                charges = atoms.get_charges()
             except:
                 energy = atoms.info[energy_key]
                 forces = atoms.get_array(force_key)
+                charges = atoms.get_charges()
+
+            energy -= E0
         else:
             energy = 0.0
             forces = np.zeros((len(atoms.positions), 3))
-
         # Atomic encodings
         encoder = atoms.get_atomic_numbers()
         atoms.set_array('encoder', encoder)
 
-        # C6 coefficients (converted to eV·Å⁶)
+
+        # C6 coefficients
         C6_vals = np.array([C6_spec[z] for z in atoms.get_chemical_symbols()])
         atoms.set_array('C6', C6_vals)
 
-        return atoms, energy, forces
+        return atoms, energy, forces, np.sum(charges)
 
 def _process_file(args):
     """
@@ -215,9 +227,11 @@ def _process_file(args):
         atoms = convert_json2ASE_atoms(atomic_energy, file, C6_spec, species)
         energy = atoms.info[energy_key]
         forces = atoms.get_array(force_key)
+        charges = atoms.get_array('charges')
+        total_charge =  atoms.info['total_charge']
     else:
         atoms = file
-        atoms, energy, forces = process_ase(atoms, evaluate_test, species,atomic_energy,C6_spec, energy_key, force_key)
+        atoms, energy, forces, total_charge = process_ase(atoms, evaluate_test, species,atomic_energy,C6_spec, energy_key, force_key)
 
     gaussian_width = np.array([covalent_radii[x] for x in atoms.get_chemical_symbols()])
     
@@ -241,6 +255,7 @@ def _process_file(args):
         'j':    j_list,
         'S':    shifts,
         'nneigh':    len(i_list),
+        'total_charge': total_charge
     }
 
 def load_structure_data_parallel(files, data_format, species, atomic_energy,

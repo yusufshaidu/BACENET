@@ -98,7 +98,7 @@ class mBP_model(tf.keras.Model):
         self.efield = configs['efield']
         self.accuracy = configs['accuracy']
         self.pbc = configs['pbc']
-        self.total_charge = configs['total_charge']
+        self.total_charge = configs['total_charge'] # now read from file
         
         #if not self.species_layer_sizes:
         #    self.species_layer_sizes = [self.nspec_embedding]
@@ -294,6 +294,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.float32),
                 ]
                  )
     def compute_charges(self, Vij, E1, E2, atomic_q0):
@@ -323,7 +324,7 @@ class mBP_model(tf.keras.Model):
         index = tf.reshape(shape - 1, (1, 2))
         Aij = tf.tensor_scatter_nd_update(Aij, index, new_values)
         '''
-        E1 = tf.pad(-E1, [[0,1]], constant_values=self.total_charge)
+        E1 = tf.pad(-E1, [[0,1]], constant_values=total_charge)
         #total charge should be read from structures
         E1_padded = tf.concat([E1, [self.total_charge]], axis=0)
         #atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
@@ -387,7 +388,8 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32)
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.float32)
                 )])
     def tf_predict_energy_forces(self,x):
         ''' 
@@ -421,6 +423,7 @@ class mBP_model(tf.keras.Model):
         J0 = x[12][:nat]
         atomic_q0 = x[13][:nat]
         lambda_weights = x[14]
+        total_charge = x[15]
         #positions = tf.Variable(positions)
         #cell = tf.Variable(cell)
         if self.efield is not None:
@@ -586,9 +589,12 @@ class mBP_model(tf.keras.Model):
                                                  self.rmax_d))[0]
                 total_energy += evdw
 
-                C6 = tf.pad(C6,[[0,nmax_diff]])
+                #C6 = tf.pad(C6,[[0,nmax_diff]])
+                pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
+                C6 = tf.concat([C6, pad_rows], axis=0)
             else:
-                C6 = tf.pad(C6,[[0,nmax_diff]])
+                C6 = tf.zeros([nmax_diff+nat], dtype=tf.float32)
+            
             if self.coulumb:
                 E1 = _atomic_energies[:,-2]
                 E1 += chi0
@@ -604,17 +610,18 @@ class mBP_model(tf.keras.Model):
                 if self.efield is not None:
                     field_kernel = _ewald.sawtooth_PE()
                     _b += field_kernel
-                charges = self.compute_charges(Vij, _b, E2, atomic_q0)
+                charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
                 ecoul = self.compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
                 if self.efield is not None:
                     efield_energy = tf.reduce_sum(charges * field_kernel)
                     ecoul += efield_energy
                 total_energy += ecoul
-                charges = tf.pad(charges,[[0,nmax_diff]])
+                #charges = tf.pad(charges,[[0,nmax_diff]])
+                pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
+                charges = tf.concat([charges, pad_rows], axis=0)
             else:
-                charges = tf.pad(tf.zeros(nat, dtype=tf.float32),[[0,nmax_diff]])
-               
-           
+                charges = tf.zeros([nmax_diff+nat], dtype=tf.float32)
+
          #differentiating a scalar w.r.t tensors
         forces = tape0.gradient(total_energy, positions)
         #needs tape to be persistent
@@ -734,10 +741,12 @@ class mBP_model(tf.keras.Model):
             batch_atomic_q0 = tf.where(valid_mask,
                                      batch_atomic_q0,
                                      tf.zeros(shape))
+            batch_total_charge = data['total_charge']
         else:
             batch_atomic_chi0 = tf.zeros_like(species_encoder)
             batch_atomic_J0 = tf.zeros_like(species_encoder)
             batch_atomic_q0 = tf.zeros_like(species_encoder)
+            batch_total_charge = tf.zeros(batch_size, dtype=tf.float32)
 
        #[0-positions,1-species_encoder,2-C6,3-cells,4-natoms,5-i,6-j,7-S,8-neigh, 9-energy,10-forces]
         C6 = data['C6']
@@ -760,7 +769,8 @@ class mBP_model(tf.keras.Model):
         elements = (batch_species_encoder,positions, 
                     nmax_diff, batch_nats,cells,C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_pairs, gaussian_width,
-                    batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0,lambda_batch)
+                    batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0,lambda_batch,
+                    batch_total_charge)
 
         # energies, forces, atomic_features, C6, charges, stress
         energies, forces, C6, charges, stress = self.map_fn_parallel(elements)

@@ -43,7 +43,8 @@ def example(data,nmax, nneigh_max):
                 'nneigh':_int64_feature([data[8]]),
                 'gaussian_width':_float_feature(gaussian_width),
                 'energy':_float_feature([data[10]]),
-                'forces':_float_feature(forces)}
+                'forces':_float_feature(forces),
+                'total_charge':_float_feature([data[12]])}
     return tf.train.Example(features=tf.train.Features(feature=features))
 
 def write_tfr(prefix, data, nmax, nneigh_max, nelement=None, tfr_dir='tfrs',):
@@ -89,7 +90,8 @@ def _parse_function(example_proto):
                 'nneigh':tf.io.FixedLenFeature([], tf.int64),
                 'gaussian_width':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
                 'energy':tf.io.FixedLenFeature([], tf.float32),
-                'forces':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True)}
+                'forces':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
+                'total_charge':tf.io.FixedLenFeature([], tf.float32)}
     return tf.io.parse_single_example(example_proto, feature_description)
 
 def load_tfrs(filenames,batch_size):
@@ -117,7 +119,7 @@ def load_tfrs(filenames,batch_size):
 def get_tfrs(filenames, batch_size,repeat_count=None):
     AUTOTUNE = tf.data.AUTOTUNE
     dataset = load_tfrs(filenames,batch_size)
-    dataset = dataset.shuffle(buffer_size=128)
+    dataset = dataset.shuffle(buffer_size=1024)
     dataset = dataset.batch(batch_size,
                             num_parallel_calls=AUTOTUNE,
                             deterministic=False)
