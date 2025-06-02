@@ -1,3 +1,10 @@
+import os
+'''
+The following command is used to supress the following wied message
+I tensorflow/core/framework/local_rendezvous.cc:421] Local rendezvous recv item cancelled. Key hash:
+'''
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
+
 import numpy as np
 
 from ase.calculators.calculator import FileIOCalculator,Calculator, all_changes
@@ -7,8 +14,7 @@ import tensorflow as tf
 from models.model import mBP_model
 from data.data_processing import data_preparation, atomic_number
 
-import os, sys, yaml,argparse, json
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
+import sys, yaml,argparse, json
 import numpy as np
 import silssf.train as train
 from pathlib import Path
