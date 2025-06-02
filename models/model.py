@@ -162,21 +162,26 @@ class mBP_model(tf.keras.Model):
 
     @tf.function(jit_compile=False,
                 input_signature=[
-                tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,3), dtype=tf.int32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 ]
                  )
-    def _angular_terms(self,z, rij_unit,lxlylz, fact_norm):
+    def _angular_terms(self,rij_unit,lxlylz, fact_norm):
         '''
         compute vectorize three-body computation
 
         '''
-        rij_lxlylz = (rij_unit[:,None,:] + 1e-12)**tf.cast(lxlylz, tf.float32)[None,:,:]
-        g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1) #npairs x n_lxlylz
-        z_float = tf.cast(z, tf.float32)
-        g_ij_lxlylz = tf.einsum('ij,j->ij',g_ij_lxlylz, fact_norm) # shape=(nat, neigh, n_lxlylz)
+        # Compute powers: shape = [npairs, n_lxlylz, 3]
+        rij_lxlylz = (tf.expand_dims(rij_unit, axis=1) + 1e-12) ** tf.expand_dims(lxlylz, axis=0)
+
+        # Multiply x^lx * y^ly * z^lz
+        #g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1)              # [npairs, n_lxlylz]
+        g_ij_lxlylz = rij_lxlylz[:,:,0] * rij_lxlylz[:,:,1] * rij_lxlylz[:,:,2]
+
+        # Apply factorial norm (broadcasted)
+        #fact_norm = tf.reshape(fact_norm, [-1])                        # [n_lxlylz]
+        g_ij_lxlylz = g_ij_lxlylz * fact_norm[None,:]                # [npairs, n_lxlylz]
         return g_ij_lxlylz
 
     @tf.function(jit_compile=False,
@@ -201,11 +206,12 @@ class mBP_model(tf.keras.Model):
         compute vectorize three-body computation
 
         '''
-        g_ij_lxlylz = self._angular_terms(z, rij_unit,lxlylz, fact_norm)
-        g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
+        g_ij_lxlylz = self._angular_terms(rij_unit,lxlylz, fact_norm)
+        g_ilxlylz = tf.expand_dims(radial_ij[:,:,r_idx], axis=2) * tf.expand_dims(g_ij_lxlylz, axis=1) #shape=(npair,nrad*species,n_lxlylz)
         #sum over neighbors
-        g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
-                                            segment_ids=first_atom_idx)
+        g_ilxlylz = tf.math.unsorted_segment_sum(data=g_ilxlylz,
+                                            segment_ids=first_atom_idx,
+                                                num_segments=nat)
         #g_ilxlylz = self.custom_segment_sum(data=g_ilxlylz, 
         #                                    segment_ids=first_atom_idx, num_segments=nat)
         # nat x nrad*nspec, n_lxlylz
@@ -213,7 +219,8 @@ class mBP_model(tf.keras.Model):
         #sum over z
         #lambda_comp = tf.constant([1.0,-1.0])
         lambda_comp = lambda_weights
-        lambda_comp_lxlylz = lambda_comp[:,None]**tf.cast(lxlylz_sum,tf.float32)[None,:] #n_lambda_comp, nlxlylz
+        _lxlylz_sum = tf.cast(lxlylz_sum,tf.float32)
+        lambda_comp_lxlylz = tf.expand_dims(lambda_comp,axis=1)**tf.expand_dims(_lxlylz_sum, axis=0) #n_lambda_comp, nlxlylz
         gi3 = tf.einsum('ijk,lk->ijl', g2_ilxlylz, lambda_comp_lxlylz)
 
         norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
@@ -239,39 +246,45 @@ class mBP_model(tf.keras.Model):
         compute  up to four-body computation
 
         '''
-        g_ij_lxlylz = self._angular_terms(z, rij_unit,lxlylz, fact_norm)
-        g_ilxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
+        g_ij_lxlylz = self._angular_terms(rij_unit,lxlylz, fact_norm)
+        g_ilxlylz = tf.expand_dims(radial_ij[:,:,r_idx], axis=2) * tf.expand_dims(g_ij_lxlylz, axis=1) #shape=(npair,nrad*species,n_lxlylz)
         #sum over neighbors
-        g_ilxlylz = tf.math.segment_sum(data=g_ilxlylz,
-                                            segment_ids=first_atom_idx)
+        g_ilxlylz = tf.math.unsorted_segment_sum(data=g_ilxlylz,
+                                            segment_ids=first_atom_idx,
+                                                num_segments=nat)
+        #g_ilxlylz = self.custom_segment_sum(data=g_ilxlylz, 
+        #                                    segment_ids=first_atom_idx, num_segments=nat)
         # nat x nrad*nspec, n_lxlylz
         g2_ilxlylz = g_ilxlylz * g_ilxlylz
         #sum over z
         #lambda_comp = tf.constant([1.0,-1.0])
         lambda_comp = lambda_weights
-        lambda_comp_lxlylz = lambda_comp[:,None]**tf.cast(lxlylz_sum,tf.float32)[None,:] #n_lambda_comp, nlxlylz
+        _lxlylz_sum = tf.cast(lxlylz_sum,tf.float32)
+        lambda_comp_lxlylz = tf.expand_dims(lambda_comp,axis=1)**tf.expand_dims(_lxlylz_sum, axis=0) #n_lambda_comp, nlxlylz
         gi3 = tf.einsum('ijk,lk->ijl', g2_ilxlylz, lambda_comp_lxlylz)
 
         norm = tf.pow(2.0 , 1. - tf.cast(z, tf.float32))
         gi3 *= norm 
-
-        g4_ij_lxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,self.nzeta+r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
-        g4_i_lxlylz = tf.math.segment_sum(data=g4_ij_lxlylz,
-                                        segment_ids=first_atom_idx)
+        #use the same radial functions for four body interactions: radial functions ar decomposed int z components
+        #g4_ij_lxlylz = tf.einsum('ij,ik->ijk',radial_ij[:,:,self.nzeta+r_idx], g_ij_lxlylz) #shape=(npair,nrad*species,n_lxlylz)
+        #g4_i_lxlylz = tf.math.segment_sum(data=g4_ij_lxlylz,
+        #                                segment_ids=first_atom_idx)
                                         # nat x nrad*nspec*n_lxlylz
-        g_i_ll_kl = g4_i_lxlylz[:,:,:,None] * g4_i_lxlylz[:,:,None,:] #nat x nrad*nspec*n_lxlylz,n_lxlylz
-        lambda_weights_zxz = lambda_comp_lxlylz[:,:,None] * lambda_comp_lxlylz[:,None,:] #n_lambda_comp, nlxlylz,n_lxlylz
+        g_i_ll_kl = tf.expand_dims(g_ilxlylz,axis=3) * tf.expand_dims(g_i_lxlylz,axis=2) #nat , nrad*nspec,n_lxlylz,n_lxlylz
+        lambda_weights_zxz = tf.expand_dims(lambda_comp_lxlylz,axis=2) * tf.expand_dims(lambda_comp_lxlylz,axis=1) #n_lambda_comp, nlxlylz,n_lxlylz
             
-        g_ij_ll = tf.einsum('ij,ik->ijk',g_ij_lxlylz, g_ij_lxlylz)
-        #contribution after summing over j
-        g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij[:,:,self.nzeta+r_idx], g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
-        g_i_ll_j = tf.math.segment_sum(data=g_i_ll_j,
-                                        segment_ids=first_atom_idx)#nat x nrad*nspec*n_lxlylz
+        g_ij_ll = tf.expand_dims(g_ij_lxlylz,axis=2) * tf.expand_dims(g_ij_lxlylz, axis=1) # npairs, n_lxlylz, n_lxlylz
+        
+        g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij[:,:,r_idx], g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
+        #now we sum over neighbors                           
+        g_i_ll_j = tf.math.unsorted_segment_sum(data=g_i_ll_j,
+                                        segment_ids=first_atom_idx,
+                                             num_segments=nat)#nat , nrad*nspec, n_lxlylz, n_lxlylz
         #sum over the last two axes
         # the normalization should be 2**z * 2**z * 2 so that the values are bound by 2 like the 3 body them
+        #norm = 2^(1-z) = 2/z^2
         _norm = norm * norm * 0.5
-        
-        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl # nat x nrad*nspec*n_lxlylz
+        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl # nat , nrad*nspec, n_lxlylz, n_lxlylz
         gi4 = tf.einsum('ijkl, nkl->ijn',g_i_ll_ijk, lambda_weights_zxz) * _norm
         return [gi3,gi4]
 
@@ -288,20 +301,36 @@ class mBP_model(tf.keras.Model):
         
         #this is removed after padding Vij with 1's at the last row and columns
         # Aij has exactly zero at N+1,N+1 elements a needed
+        '''
+        avoid using tf.pad padding altogether for memory efficiency
         E2 = tf.pad(E2, [[0,1]], constant_values=-1.0) 
         Aij = tf.pad(Vij, [[0,1],[0,1]], constant_values = 1.0)
         Aij += tf.linalg.diag(E2)
+        '''
+       
+        N = tf.shape(E2)
+        E2_padded = tf.concat([E2, [-1.0]], axis=0)  # shape [N+1]
+        Aij = tf.concat([Vij, tf.ones(N,tf.float32)[:,None]], 1)
+        Aij = tf.concat([Aij, tf.ones(N+1,tf.float32)[None,:]], 0)
+        Aij += tf.linalg.diag(E2_padded)
+   
         #Aij = 0.5 * (Aij + tf.transpose(Aij))
 
         '''
+        #alternative implementation
         new_values = tf.constant([0.0], dtype=tf.float32)
         shape = tf.shape(Aij)
         index = tf.reshape(shape - 1, (1, 2))
         Aij = tf.tensor_scatter_nd_update(Aij, index, new_values)
         '''
         E1 = tf.pad(-E1, [[0,1]], constant_values=self.total_charge)
-        atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
-        charges = tf.linalg.solve(Aij, E1[:,None])
+        #total charge should be read from structures
+        E1_padded = tf.concat([E1, [self.total_charge]], axis=0)
+        #atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
+        atomic_q0 = tf.concat([atomic_q0, [0.0]], axis=0)
+
+        charges = tf.linalg.solve(Aij, E1_padded[:,None])
+
         '''
         lin_op_A = tf.linalg.LinearOperatorFullMatrix(
             Aij,
@@ -537,11 +566,16 @@ class mBP_model(tf.keras.Model):
             #feature_size = Nrad * nembedding + Nrad, 2*zeta+1, nembedding
 
             #predict energy and forces
+            #predict energy and forces
             _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
+            if self.coulumb or self.include_vdw:
+                total_energy = tr.reduce_sum(_atomic_energies[:,0])
+            else:
+                total_energy = tf.reduce_sum(_atomic_energies)
+
             if self.include_vdw:
                 # C6 has a shape of nat
                 C6 = tf.nn.relu(_atomic_energies[:,1])
-                atomic_energies = _atomic_energies[:,0]
                 C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx) # npair,
                 #na from C6_extended in 1xNeigh and C6 in nat
                 C6_ij = tf.sqrt(C6_ij + 1e-16)
@@ -550,7 +584,11 @@ class mBP_model(tf.keras.Model):
                                                  self.rmax_u,
                                                  self.rmin_d,
                                                  self.rmax_d))[0]
+                total_energy += evdw
 
+                C6 = tf.pad(C6,[[0,nmax_diff]])
+            else:
+                C6 = tf.pad(C6,[[0,nmax_diff]])
             if self.coulumb:
                 E1 = _atomic_energies[:,-2]
                 E1 += chi0
@@ -571,22 +609,23 @@ class mBP_model(tf.keras.Model):
                 if self.efield is not None:
                     efield_energy = tf.reduce_sum(charges * field_kernel)
                     ecoul += efield_energy
-                atomic_energies = _atomic_energies[:,0]
-            if not self.coulumb and not self.include_vdw:
-                atomic_energies = _atomic_energies
-            total_energy = tf.reduce_sum(atomic_energies)
-            if self.include_vdw:
-                total_energy += evdw
-            if self.coulumb:
                 total_energy += ecoul
-        #differentiating a scalar w.r.t tensors
+                charges = tf.pad(charges,[[0,nmax_diff]])
+            else:
+                charges = tf.pad(tf.zeros(nat, dtype=tf.float32),[[0,nmax_diff]])
+               
+           
+         #differentiating a scalar w.r.t tensors
         forces = tape0.gradient(total_energy, positions)
-        #only need g to be persistent
-        dE_dh = tape0.gradient(total_energy, cell)
-        V = tf.abs(tf.linalg.det(cell))
-        #V = tf.abs(tf.tensordot(cell[0], tf.linalg.cross(cell[1], cell[2]),axes=1))
-        # Stress: stress_{ij} = (1/V) \sum_k dE/dh_{ik} * h_{jk}
-        stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / V
+        #needs tape to be persistent
+        if self.pbc:
+            dE_dh = tape0.gradient(total_energy, cell)
+            #V = tf.abs(tf.linalg.det(cell))
+            V = tf.abs(tf.tensordot(cell[0], tf.linalg.cross(cell[1], cell[2]),axes=1))
+            # Stress: stress_{ij} = (1/V) \sum_k dE/dh_{ik} * h_{jk}
+            stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / V
+        else:
+            stress = tf.zeros((3,3), dtype=tf.float32)
         #born effective charges for direct differentiation
         #if self.efield is not None and not self.is_training:
         #    Zstar = tf.squeeze(tape1.jacobian(forces,_efield, experimental_use_pfor=True)) #This is in unit of electron charges
@@ -595,12 +634,10 @@ class mBP_model(tf.keras.Model):
             #Zstar = tf.reshape(Zstar, [-1])
         #else:
         #    Zstar = tf.zeros((nat+nmax_diff,9))
-        C6 = tf.pad(C6,[[0,nmax_diff]])
-        if self.coulumb:
-            charges = tf.pad(charges,[[0,nmax_diff]])
-        else:
-            charges = tf.zeros_like(C6)
-        forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
+        pad_rows = tf.zeros([nmax_diff, 3], dtype=tf.float32)
+        forces = tf.concat([-forces, pad_rows], axis=0)
+
+        #forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
         return [total_energy, forces,C6, charges,stress]
 
     @tf.function(jit_compile=False,
@@ -680,23 +717,27 @@ class mBP_model(tf.keras.Model):
 
         #atomic hardness and electronegativity
         #species_chi0, species_J0 = self.estimate_species_chi0_J0()
-        batch_atomic_chi0 = tf.gather(self.species_chi0, species_indices)
-        shape = tf.shape(batch_atomic_chi0)
-        batch_atomic_chi0 = tf.where(valid_mask,
-                                 batch_atomic_chi0,
-                                 tf.zeros(shape))
+        if self.coulumb:
+            batch_atomic_chi0 = tf.gather(self.species_chi0, species_indices)
+            shape = tf.shape(batch_atomic_chi0)
+            batch_atomic_chi0 = tf.where(valid_mask,
+                                     batch_atomic_chi0,
+                                     tf.zeros(shape))
 
-        batch_atomic_J0 = tf.gather(self.species_J0, species_indices)
-        batch_atomic_J0 = tf.where(valid_mask,
-                                 batch_atomic_J0,
-                                 tf.zeros(shape))
-        #initial charges
-        batch_atomic_q0 = tf.gather(tf.cast(self.oxidation_states,tf.float32), species_indices)
-        shape = tf.shape(batch_atomic_q0)
-        batch_atomic_q0 = tf.where(valid_mask,
-                                 batch_atomic_q0,
-                                 tf.zeros(shape))
-
+            batch_atomic_J0 = tf.gather(self.species_J0, species_indices)
+            batch_atomic_J0 = tf.where(valid_mask,
+                                     batch_atomic_J0,
+                                     tf.zeros(shape))
+            #initial charges
+            batch_atomic_q0 = tf.gather(tf.cast(self.oxidation_states,tf.float32), species_indices)
+            shape = tf.shape(batch_atomic_q0)
+            batch_atomic_q0 = tf.where(valid_mask,
+                                     batch_atomic_q0,
+                                     tf.zeros(shape))
+        else:
+            batch_atomic_chi0 = tf.zeros_like(species_encoder)
+            batch_atomic_J0 = tf.zeros_like(species_encoder)
+            batch_atomic_q0 = tf.zeros_like(species_encoder)
 
        #[0-positions,1-species_encoder,2-C6,3-cells,4-natoms,5-i,6-j,7-S,8-neigh, 9-energy,10-forces]
         C6 = data['C6']
