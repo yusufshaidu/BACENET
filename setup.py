@@ -6,7 +6,7 @@ setup(
     description="BACE-Net: Behler-Parrinello Atomic Cluster Expansion neural Networks",
     author="Yusuf Shaidu",
     author_email="yusufshaidu@gmail.com",
-    url="https://github.com/yusufshaidu/silBP.git",  # your repo URL
+    url="https://github.com/yusufshaidu/BACENET.git",  # your repo URL
     packages=find_packages(exclude=["tools*", "examples*"]),
     python_requires=">=3.7, <4",
     install_requires=[
@@ -24,7 +24,7 @@ setup(
             # with a `main()` function or point it here
             "bacenet-train = bacenet.train:main",
             "bacenet-evaluate = bacenet.evaluate:main",
-            "bacenet-ase = bacenet.ase_interface:wBP_Calculator",
+            "bacenet-ase = bacenet.ase_interface:bacenet_Calculator",
         ],
     },
     classifiers=[

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import os
 
-class wBP_Calculator(Calculator):
+class bacenet_Calculator(Calculator):
     implemented_properties = ['energy', 'forces', 'stress','charges', 'zstar']
     #implemented_properties = ['energy', 'forces']
 #    ignored_changes = {'pbc'}

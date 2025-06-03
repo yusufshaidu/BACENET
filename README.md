@@ -1,4 +1,5 @@
-## (Intro) BACE-Net (Behler–Parrinello Atomic Cluster Expansion neural Networks) is a symmetry-function-based interatomic potential that combines the body-order and linear-scaling benefits of ACE with the expressive power of neural networks and learnable species embeddings.
+## (Intro) BACE-Net (Behler–Parrinello Atomic Cluster Expansion neural Networks):
+ -BACE-Net is a symmetry-function-based interatomic potential that combines the body-order and linear-scaling benefits of ACE with the expressive power of neural networks and learnable species embeddings.
 
 Implements Behler Parrinello symmentry functions with learnable species embedding, linear scaling like ACE with higher body-order descriptors, and radial bessels functions [https://arxiv.org/abs/2003.03123]
 The species embedding starts with a one-hot encoding of species and pass it through a single layer perceptron of size 64 and returns species encoder with user specified dimension.
