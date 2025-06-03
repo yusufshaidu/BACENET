@@ -124,10 +124,10 @@ class mBP_model(tf.keras.Model):
         #radial network
         # each body order learn single component of the radial functions
         #one radial function per components and different one for 3 and 4 body 
-        if self.body_order == 3:
-            self.number_radial_components = (self.nzeta + 1)
-        if self.body_order == 4:
-            self.number_radial_components = (2 * self.nzeta + 1)
+        #if self.body_order == 3:
+        self.number_radial_components = (self.nzeta + 1)
+        #if self.body_order == 4:
+        #    self.number_radial_components = (2 * self.nzeta + 1)
 
         _radial_layer_sizes.append(self.number_radial_components * self.Nrad)
         radial_activations = ['silu' for s in _radial_layer_sizes[:-1]]
@@ -173,6 +173,7 @@ class mBP_model(tf.keras.Model):
 
         '''
         # Compute powers: shape = [npairs, n_lxlylz, 3]
+        lxlylz = tf.cast(lxlylz, tf.float32)
         rij_lxlylz = (tf.expand_dims(rij_unit, axis=1) + 1e-12) ** tf.expand_dims(lxlylz, axis=0)
 
         # Multiply x^lx * y^ly * z^lz
@@ -297,7 +298,7 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(), dtype=tf.float32),
                 ]
                  )
-    def compute_charges(self, Vij, E1, E2, atomic_q0):
+    def compute_charges(self, Vij, E1, E2, atomic_q0,total_charge):
         '''comput charges through the solution of linear system'''
         
         #this is removed after padding Vij with 1's at the last row and columns
@@ -663,7 +664,8 @@ class mBP_model(tf.keras.Model):
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32)
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32)
                 )])
     def map_fn_parallel(self, elements):
         out_signature = [

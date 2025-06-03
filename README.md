@@ -1,4 +1,4 @@
-## ML-Potentials using learnable species embedding and bessels radial functions (Under development)
+## ML-Potentials: The exploring the equivalent of Behler-Parrinello symmetry functions and atomic cluster expansion, an alternative implementation with linear scaling in number of neighbors, learnable species embedding and higher body order terms
 
 Implementing the modified Behler Parrinello symmentry functions with learnable species embedding, radial bessels functions [https://arxiv.org/abs/2003.03123] and the three body angular centers of the descriptors.
 The species embedding starts with a one-hot encoding of species and pass it through a single layer perceptron of size 64 and returns species encoder with user specified dimension.
@@ -24,7 +24,4 @@ The species resolved radial functions are then give by:
 where $R_{ijs} = R_n(r_{ij},s_1,s_2) fc(r_{ij, r_c})$
 ## todolist
 - implement a lammps interface for production runs
-- start from known species embedding rather than a one-hot-encoding [https://github.com/WMD-group/ElementEmbeddings] 
-
-
 
