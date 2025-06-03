@@ -1,6 +1,6 @@
-## ML-Potentials: Exploring the equivalence of Behler-Parrinello symmetry functions and atomic cluster expansion, an alternative implementation with linear scaling in number of neighbors, learnable species embedding and higher body order terms
+## (Intro) BACE-Net (Behler–Parrinello Atomic Cluster Expansion neural Networks) is a symmetry-function-based interatomic potential that combines the body-order and linear-scaling benefits of ACE with the expressive power of neural networks and learnable species embeddings.
 
-Implementing the modified Behler Parrinello symmentry functions with learnable species embedding, radial bessels functions [https://arxiv.org/abs/2003.03123] and the three body angular centers of the descriptors.
+Implements Behler Parrinello symmentry functions with learnable species embedding, linear scaling like ACE with higher body-order descriptors, and radial bessels functions [https://arxiv.org/abs/2003.03123]
 The species embedding starts with a one-hot encoding of species and pass it through a single layer perceptron of size 64 and returns species encoder with user specified dimension.
 All weights are learn from data. Neighborlist are computed with ASE and stored alongside the positions, atomic numbers, C6, nats, cells, first neighbor index(=i), second neighbor inde (=j), the shift vectors (=S), energy and forces.
 
