@@ -7,7 +7,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
 
 import tensorflow as tf
 from data.data_processing import data_preparation
-from models.model import mBP_model
+from models.model import BACENET
 
 import sys, yaml,argparse, json
 import numpy as np
@@ -83,8 +83,8 @@ def create_model(configs):
     test_fraction = configs['test_fraction']
     if test_fraction < 1.0:
         print(f'you are evaluating only on a {test_fraction*100} % of you test dataset')
-        
-    model_call = mBP_model
+    
+    model_call = BACENET
     try:
         error_file = configs['error_file']
     except:

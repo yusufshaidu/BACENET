@@ -11,7 +11,7 @@ from ase.calculators.calculator import FileIOCalculator,Calculator, all_changes
 from ase.io import write
 from data.unpack_tfr_data import unpack_data
 import tensorflow as tf
-from models.model import mBP_model
+from models.model import BACENET
 from data.data_processing import data_preparation, atomic_number
 
 import sys, yaml,argparse, json
@@ -105,7 +105,7 @@ class wBP_Calculator(Calculator):
         #model_call = mBP_model
         configs['species_identity'] = species_identity
 #        print(species_identity, len(species_identity))
-        self.model = mBP_model(configs)
+        self.model = BACENET(configs)
         self.model.load_weights(self.ckpt).expect_partial()
         #weights = self.model.get_weights()
         #print(weights[0])

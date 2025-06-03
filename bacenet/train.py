@@ -93,7 +93,7 @@ def estimate_species_chi0_J0(species):
 
 def get_compiled_model(configs,optimizer,example_input):
     
-    _model = model.mBP_model(configs=configs)
+    _model = model.BACENET(configs=configs)
     #We should do something for tensorflow > 2.15.0
     #fake call to build the model
     # This will “dry run” through call() and allocate weights:

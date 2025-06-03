@@ -21,7 +21,7 @@ constant_e = 1.602176634e-19
 #)
 
 #tf.debugging.enable_check_numerics()
-class mBP_model(tf.keras.Model):
+class BACENET(tf.keras.Model):
    
     def __init__(self, configs):
         #allows to use all the base class of tf.keras Model

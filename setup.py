@@ -1,9 +1,9 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="SILSSF",                        # your project name
+    name="BACENET",                        # your project name
     version="0.1.0",                        # initial version
-    description="species independent linear Scaling Symmetry Functions",
+    description="BACE-Net: Behler-Parrinello Atomic Cluster Expansion neural Networks",
     author="Yusuf Shaidu",
     author_email="yusufshaidu@gmail.com",
     url="https://github.com/yusufshaidu/silBP.git",  # your repo URL
@@ -22,9 +22,9 @@ setup(
         "console_scripts": [
             # replace `train.py`'s `if __name__=='__main__': ...` 
             # with a `main()` function or point it here
-            "wBPlinear-train = silssf.train:main",
-            "wBPlinear-evaluate = silssf.evaluate:main",
-            "wBPlinear-ase = silssf.ase_interface:wBP_Calculator",
+            "bacenet-train = bacenet.train:main",
+            "bacenet-evaluate = bacenet.evaluate:main",
+            "bacenet-ase = bacenet.ase_interface:wBP_Calculator",
         ],
     },
     classifiers=[
