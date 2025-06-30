@@ -12,11 +12,13 @@ from ase.io import write
 from data.unpack_tfr_data import unpack_data
 import tensorflow as tf
 from models.model import BACENET
+from models.model_lchannels import BACENET as BACENET_lc
+
 from data.data_processing import data_preparation, atomic_number
 
 import sys, yaml,argparse, json
 import numpy as np
-import silssf.train as train
+import bacenet.train as train
 from pathlib import Path
 
 
@@ -69,7 +71,10 @@ class bacenet_Calculator(Calculator):
         else:
             rc = configs['rc_rad']
 
-        self.model_call = mBP_model
+        self.model_call = BACENET
+        if configs['model_version'] != 'linear':
+            self.model_call = BACENET_lc
+
         atomic_energy = configs['atomic_energy']
         if len(atomic_energy)==0:
             with open (os.path.join(configs['model_outdir'],'atomic_energy.json')) as df:

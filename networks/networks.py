@@ -37,9 +37,9 @@ def Networks(input_size, layer_sizes,
                                         name=f'{prefix}_{i}_layer_{layer}_activation_{activation}'
                                         ))
         if normalize and i == 0:
-            model.add(tf.keras.layers.BatchNormalization())
-    #        model.add(tf.keras.layers.LayerNormalization())
-            #model.add(tf.keras.layers.Attention())
+            #model.add(tf.keras.layers.BatchNormalization())
+            model.add(tf.keras.layers.LayerNormalization())
+            ##model.add(tf.keras.layers.Attention())
         i += 1
     layer = layer_sizes[-1]
     if activations[-1] == 'linear':

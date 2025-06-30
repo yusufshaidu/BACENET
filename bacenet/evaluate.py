@@ -8,10 +8,11 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
 import tensorflow as tf
 from data.data_processing import data_preparation
 from models.model import BACENET
+from models.model_lchannels import BACENET as BACENET_lc
 
 import sys, yaml,argparse, json
 import numpy as np
-import silssf.train as train
+import bacenet.train as train
 from pathlib import Path
 
 def create_model(configs):
@@ -83,8 +84,10 @@ def create_model(configs):
     test_fraction = configs['test_fraction']
     if test_fraction < 1.0:
         print(f'you are evaluating only on a {test_fraction*100} % of you test dataset')
-    
-    model_call = BACENET
+    if configs['model_version'] == 'linear':
+        model_call = BACENET
+    else:
+        model_call = BACENET_lc
     try:
         error_file = configs['error_file']
     except:

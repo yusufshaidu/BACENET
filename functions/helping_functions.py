@@ -3,6 +3,78 @@ import tensorflow as tf
 import math 
 pi = 3.141592653589793
 
+@tf.function
+def get_basis_terms(z):
+    def case1():
+        return (
+            tf.constant([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0]], dtype=tf.int32),
+            tf.constant([0, 1, 1, 1], dtype=tf.int32),
+            tf.constant([1.0, 1.0, 1.0, 1.0], dtype=tf.float32)
+        )
+
+    def case2():
+        return (
+            tf.constant([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 1, 0], [0, 1, 1],
+                         [0, 2, 0], [1, 0, 0], [1, 0, 1], [1, 1, 0], [2, 0, 0]], dtype=tf.int32),
+            tf.constant([0, 1, 2, 1, 2, 2, 1, 2, 2, 2], dtype=tf.int32),
+            tf.constant([1.0, 2.0, 1.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 1.0], dtype=tf.float32)
+        )
+
+    def case3():
+        return (
+            tf.constant([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 1, 0],
+                         [0, 1, 1], [0, 1, 2], [0, 2, 0], [0, 2, 1], [0, 3, 0],
+                         [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 1, 0], [1, 1, 1],
+                         [1, 2, 0], [2, 0, 0], [2, 0, 1], [2, 1, 0], [3, 0, 0]], dtype=tf.int32),
+            tf.constant([0, 1, 2, 3, 1, 2, 3, 2, 3, 3, 1, 2, 3, 2, 3, 3, 2, 3, 3, 3], dtype=tf.int32),
+            tf.constant([1.0, 3.0, 3.0, 1.0, 3.0, 6.0, 3.0, 3.0, 3.0, 1.0,
+                         3.0, 6.0, 3.0, 6.0, 6.0, 3.0, 3.0, 3.0, 3.0, 1.0], dtype=tf.float32)
+        )
+
+    def case4():
+        return (
+            tf.constant([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 0, 4],
+                         [0, 1, 0], [0, 1, 1], [0, 1, 2], [0, 1, 3], [0, 2, 0],
+                         [0, 2, 1], [0, 2, 2], [0, 3, 0], [0, 3, 1], [0, 4, 0],
+                         [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 0, 3], [1, 1, 0],
+                         [1, 1, 1], [1, 1, 2], [1, 2, 0], [1, 2, 1], [1, 3, 0],
+                         [2, 0, 0], [2, 0, 1], [2, 0, 2], [2, 1, 0], [2, 1, 1],
+                         [2, 2, 0], [3, 0, 0], [3, 0, 1], [3, 1, 0], [4, 0, 0]], dtype=tf.int32),
+            tf.constant([0, 1, 2, 3, 4, 1, 2, 3, 4, 2, 3, 4, 3, 4, 4,
+                         1, 2, 3, 4, 2, 3, 4, 3, 4, 4,
+                         2, 3, 4, 3, 4, 4, 3, 4, 4, 4], dtype=tf.int32),
+            tf.constant([1.0, 4.0, 6.0, 4.0, 1.0, 4.0, 12.0, 12.0, 4.0,
+                         6.0, 12.0, 6.0, 4.0, 4.0, 1.0,
+                         4.0, 12.0, 12.0, 4.0, 12.0, 24.0, 12.0, 12.0, 12.0, 4.0,
+                         6.0, 12.0, 6.0, 12.0, 12.0, 6.0, 4.0, 4.0, 4.0, 1.0], dtype=tf.float32)
+        )
+
+    return tf.switch_case(z - 1, branch_fns={
+        0: case1,
+        1: case2,
+        2: case3,
+        3: case4
+    })
+
+def precompute_fact_norm_lxlylz(z):
+    """
+    lxlylz, lxlylz_sum, fact_norm = z!/(z-n)!/n! * n!/lx!/ly!/lz!
+    I can add higher zterms if needed using the function _compute_cosine_terms
+    """
+    z = tf.cast(z, tf.int32)
+    terms = (
+            ([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0]], [0, 1, 1, 1], [1.0, 1.0, 1.0, 1.0]),
+            ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 1, 0], [0, 1, 1], [0, 2, 0], [1, 0, 0], [1, 0, 1], [1, 1, 0], [2, 0, 0]],
+                 [0, 1, 2, 1, 2, 2, 1, 2, 2, 2], [1.0, 2.0, 1.0, 2.0, 2.0, 1.0, 2.0, 2.0, 2.0, 1.0]),
+            ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 1, 0], [0, 1, 1], [0, 1, 2], [0, 2, 0], [0, 2, 1], [0, 3, 0], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 1, 0], [1, 1, 1], [1, 2, 0], [2, 0, 0], [2, 0, 1], [2, 1, 0], [3, 0, 0]],
+                 [0, 1, 2, 3, 1, 2, 3, 2, 3, 3, 1, 2, 3, 2, 3, 3, 2, 3, 3, 3],
+                 [1.0, 3.0, 3.0, 1.0, 3.0, 6.0, 3.0, 3.0, 3.0, 1.0, 3.0, 6.0, 3.0, 6.0, 6.0, 3.0, 3.0, 3.0, 3.0, 1.0]),
+            ([[0, 0, 0], [0, 0, 1], [0, 0, 2], [0, 0, 3], [0, 0, 4], [0, 1, 0], [0, 1, 1], [0, 1, 2], [0, 1, 3], [0, 2, 0], [0, 2, 1], [0, 2, 2], [0, 3, 0], [0, 3, 1], [0, 4, 0], [1, 0, 0], [1, 0, 1], [1, 0, 2], [1, 0, 3], [1, 1, 0], [1, 1, 1], [1, 1, 2], [1, 2, 0], [1, 2, 1], [1, 3, 0], [2, 0, 0], [2, 0, 1], [2, 0, 2], [2, 1, 0], [2, 1, 1], [2, 2, 0], [3, 0, 0], [3, 0, 1], [3, 1, 0], [4, 0, 0]],
+                 [0, 1, 2, 3, 4, 1, 2, 3, 4, 2, 3, 4, 3, 4, 4, 1, 2, 3, 4, 2, 3, 4, 3, 4, 4, 2, 3, 4, 3, 4, 4, 3, 4, 4, 4],
+                 [1.0, 4.0, 6.0, 4.0, 1.0, 4.0, 12.0, 12.0, 4.0, 6.0, 12.0, 6.0, 4.0, 4.0, 1.0, 4.0, 12.0, 12.0, 4.0, 12.0, 24.0, 12.0, 12.0, 12.0, 4.0, 6.0, 12.0, 6.0, 12.0, 12.0, 6.0, 4.0, 4.0, 4.0, 1.0])
+             )
+    return terms[z-1]
+'''
 def precompute_fact_norm_lxlylz(z):
     """
     lxlylz, lxlylz_sum, fact_norm = z!/(z-n)!/n! * n!/lx!/ly!/lz!
@@ -19,7 +91,7 @@ def precompute_fact_norm_lxlylz(z):
                  [1.0, 4.0, 6.0, 4.0, 1.0, 4.0, 12.0, 12.0, 4.0, 6.0, 12.0, 6.0, 4.0, 4.0, 1.0, 4.0, 12.0, 12.0, 4.0, 12.0, 24.0, 12.0, 12.0, 12.0, 4.0, 6.0, 12.0, 6.0, 12.0, 12.0, 6.0, 4.0, 4.0, 4.0, 1.0])
              }
     return terms[z]
-
+'''
 def _compute_cosine_terms(z):
     # Expand all possible (lx, ly, lz) for n from 0 to max_n
     n_values = tf.range(z+1, dtype=tf.int32)
@@ -77,6 +149,7 @@ def _compute_cosine_terms(z):
     z_float = tf.cast(z, tf.float32)
     zetan_fact = zeta_fact / (zeta_fact_n * nfact)
     fact_norm = nfact_lxlylz * zetan_fact
+    #fact_norm = nfact_lxlylz
 
     return lxlylz, lxlylz_sum, fact_norm
 
@@ -403,6 +476,19 @@ def help_func(n):
     return tf.ones(n+1, tf.int32) * n
 def quad_loss(y, y_pred):
     loss = tf.reduce_mean((y - y_pred)**2)
+    return loss
+def mae_loss(y, y_pred):
+    loss = tf.reduce_mean(tf.abs(y - y_pred))
+    return loss
+@tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              tf.TensorSpec(shape=(None,), dtype=tf.float32))])
+def force_loss_mae(x):
+
+    nat = tf.cast(x[0], tf.int32)
+    force_ref = tf.reshape(x[1][:3*nat], (nat,3))
+    force_pred = tf.reshape(x[2][:3*nat], (nat,3))
+    loss = tf.reduce_mean(tf.abs(force_ref - force_pred))
     return loss
 
 @tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),

@@ -20,6 +20,7 @@ from mendeleev import element
 import argparse
 from data.data_processing import data_preparation
 from models import model
+from models import model_lchannels
 import logging
 
 def default_config():
@@ -30,8 +31,11 @@ def default_config():
         'zeta': 4,
         'rc_rad': 6,
         'Nrad': 8,
+        'n_bessels': None,
         'fcost': 0.0,
+        'fcost_swa': None,
         'ecost': 1.0,
+        'ecost_swa': None,
         'pbc': True,
         'initial_lr': 0.001,
         'model_version': 'linear',
@@ -78,7 +82,8 @@ def default_config():
         'oxidation_states': None,
         'is_training': True,
         'n_lambda': 2,
-        'lambda_act': 'tanh'
+        'lambda_act': 'tanh',
+        'self_correction': False
     }
 
 def estimate_species_chi0_J0(species):
@@ -91,17 +96,22 @@ def estimate_species_chi0_J0(species):
     species_electronegativity = 0.5 * (IE + EA)
     return (species_electronegativity, species_hardness)
 
-def get_compiled_model(configs,optimizer,example_input):
-    
-    _model = model.BACENET(configs=configs)
+def get_compiled_model(configs,optimizer,example_input,model_version='linear'):
+    if model_version != 'linear':
+        _model = model_lchannels.BACENET(configs=configs)
+    else:
+        _model = model.BACENET(configs=configs)
+
     #We should do something for tensorflow > 2.15.0
     #fake call to build the model
     # This will “dry run” through call() and allocate weights:
     #example_input = unpack_data(example_input)
     outs = _model(example_input, training=False)
     _model.compile(optimizer=optimizer,
-                  loss=help_fn.quad_loss,
-                  loss_f = help_fn.force_loss)
+                  #loss=help_fn.quad_loss,
+                  loss=help_fn.mae_loss,
+                  loss_f = help_fn.force_loss_mae)
+                  #loss_f = help_fn.force_loss_mae)
     print(_model.summary())
     return _model
 
@@ -261,7 +271,8 @@ def create_model(configs):
             last_epoch = int(epochs)
     else:
         last_epoch = 0
-
+    #configs['start_swa_global_step'] = 1000000000 # if not swa, no need to increase or descrease cutoff for now
+    #start_swa_step = 1000000000
     if configs['start_swa'] > -1:
         #try:
         #    epochs = np.loadtxt(model_outdir+"/metrics.dat",skiprows=1, usecols=0)
@@ -272,6 +283,11 @@ def create_model(configs):
             print(f"start_epoch_swa must be larger than the last saved epoch but are {configs['start_swa']} and {last_epoch}")
             print(f"setting start_swa to {last_epoch+2}")
             configs['start_swa'] = last_epoch + 2
+        if configs['fcost_swa'] is None:
+            configs['fcost_swa'] = configs['fcost']
+        if configs['ecost_swa'] is None:
+            configs['ecost_swa'] = configs['ecost']
+        start_swa_step = configs['start_swa'] # we multiply by step_per_epoch later
 
         swa = SWA(start_epoch=configs['start_swa'], 
               lr_schedule='manual', # other options are constant and cyclic (cycle between lr1 and lr2)
@@ -279,7 +295,7 @@ def create_model(configs):
               swa_lr2=configs['swa_lr2'],
               swa_freq=5,
               verbose=1)
-#        callbacks.append(swa)
+        callbacks.append(swa)
 #    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
 
     assert len(configs['activations']) == len(configs['layer_sizes']),'the number of activations must be same as the number of layer'
@@ -345,6 +361,11 @@ def create_model(configs):
         model_dir=model_outdir,n_epochs=configs['num_epochs']
         )
 
+    if configs['start_swa'] > -1:
+        configs['start_swa_global_step'] = start_swa_step * (nsamples // global_batch_size)
+    else:
+        configs['start_swa_global_step'] = start_swa_step
+
     configs['species_identity'] = species_identity
     backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
                                                           delete_checkpoint=False)
@@ -352,9 +373,10 @@ def create_model(configs):
 
     #with strategy.scope():
     model = get_compiled_model(configs,
-                                   opt(configs, lr_schedule),list(train_data)[0])
+                                   opt(configs, lr_schedule),list(train_data)[0],configs['model_version'])
     model.save_weights(checkpoint_path.format(epoch=0))
     #model.save(checkpoint_path.format(epoch=0))
+    
     try:
         model.fit(train_data,
              epochs=configs['num_epochs'],
