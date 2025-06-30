@@ -31,8 +31,11 @@ $$G_{\bf s}^3 = \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l\frac{\zeta!}{l!(\
 $$G_{\bf s}^3 = \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l G_{{\bf s}l}^3$$
 
 where
+
 $$G_{{\bf s}l}^3 =\sum_{l_xl_yl_z} \frac{\zeta!}{l!(\zeta-l)!} \frac{l!}{l_x!l_y!l_z!} (G_{i,l_xl_yl_z,{\bf s}})^2$$
+
 and 
+
 $$G_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{nij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}$$
 
 
