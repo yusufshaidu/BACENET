@@ -32,10 +32,10 @@ def default_config():
         'rc_rad': 6,
         'Nrad': 8,
         'n_bessels': None,
-        'fcost': 0.0,
-        'fcost_swa': None,
+        'fcost': 1.0,
+        'fcost_swa': 1.0,
         'ecost': 1.0,
-        'ecost_swa': None,
+        'ecost_swa': 1.0,
         'pbc': True,
         'initial_lr': 0.001,
         'model_version': 'linear',
@@ -83,7 +83,8 @@ def default_config():
         'is_training': True,
         'n_lambda': 2,
         'lambda_act': 'tanh',
-        'self_correction': False
+        'self_correction': False,
+        'start_swa_global_step': 1000000000
     }
 
 def estimate_species_chi0_J0(species):
@@ -272,7 +273,7 @@ def create_model(configs):
     else:
         last_epoch = 0
     #configs['start_swa_global_step'] = 1000000000 # if not swa, no need to increase or descrease cutoff for now
-    #start_swa_step = 1000000000
+    start_swa_step = 1000000000
     if configs['start_swa'] > -1:
         #try:
         #    epochs = np.loadtxt(model_outdir+"/metrics.dat",skiprows=1, usecols=0)
@@ -283,10 +284,10 @@ def create_model(configs):
             print(f"start_epoch_swa must be larger than the last saved epoch but are {configs['start_swa']} and {last_epoch}")
             print(f"setting start_swa to {last_epoch+2}")
             configs['start_swa'] = last_epoch + 2
-        if configs['fcost_swa'] is None:
-            configs['fcost_swa'] = configs['fcost']
-        if configs['ecost_swa'] is None:
-            configs['ecost_swa'] = configs['ecost']
+        #if configs['fcost_swa'] is None:
+        #    configs['fcost_swa'] = configs['fcost']
+        #if configs['ecost_swa'] is None:
+        #    configs['ecost_swa'] = configs['ecost']
         start_swa_step = configs['start_swa'] # we multiply by step_per_epoch later
 
         swa = SWA(start_epoch=configs['start_swa'], 

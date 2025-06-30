@@ -20,9 +20,27 @@ The species resolved radial functions are then give by:
  # Angular descriptors
  We start with the Behler-Parrinello angular descriptors given by
  
- $$G_i^{(3)}(s) = 2^{1-\zeta}\sum_{jk} (1+\lambda_s {\rm cos}(\theta_{ijk}))^\zeta R_{ijs} R_{iks}$$
+ $$G_i^{(3)}(s) = 2^{1-\zeta}\sum_{jk} (\frac{1+\lambda_s {\rm cos}(\theta_{ijk})}{2})^\zeta R_{ijs} R_{iks}$$
 
 where $R_{ijs} = R_n(r_{ij},s_1,s_2) fc(r_{ij, r_c})$
+
+Expanding over the integer $\zeta$ and the $cos(\theta)$, gives:
+
+\begin{align}
+    G_{\bf s}^3 &= \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l\frac{\zeta!}{l!(\zeta-l)!} \sum_{l_xl_yl_z} \frac{l!}{l_x!l_y!l_z!} (\mathcal{G}_{i,l_xl_yl_z,{\bf s}})^2\\
+    &= \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l G_{{\bf s}l}^3,
+\end{align}
+
+where
+
+\begin{equation}
+    G_{{\bf s}l}^3 =\sum_{l_xl_yl_z} \frac{\zeta!}{l!(\zeta-l)!} \frac{l!}{l_x!l_y!l_z!} (\mathcal{G}_{i,l_xl_yl_z,{\bf s}})^2,
+\end{equation}
+and 
+\begin{equation}
+    \mathcal{G}_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{nij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}
+\end{equation}
+
 ## todolist
 - implement a lammps interface for production runs
 
