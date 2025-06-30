@@ -27,12 +27,14 @@ where $R_{ijs} = R_n(r_{ij},s_1,s_2) fc(r_{ij, r_c})$
 Expanding over the integer $\zeta$ and the $cos(\theta)$, gives:
 
 $$G_{\bf s}^3 = \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l\frac{\zeta!}{l!(\zeta-l)!} \sum_{l_xl_yl_z} \frac{l!}{l_x!l_y!l_z!} (G_{i,l_xl_yl_z,{\bf s}})^2$$
-$$G_{\bf s}^3= \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l G_{{\bf s}l}^3$$
+
+$$G_{\bf s}^3 = \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l G_{{\bf s}l}^3$$
+
 where
 $$G_{{\bf s}l}^3 =\sum_{l_xl_yl_z} \frac{\zeta!}{l!(\zeta-l)!} \frac{l!}{l_x!l_y!l_z!} (\mathcal{G}_{i,l_xl_yl_z,{\bf s}})^2,
 $$
 and 
-$$\mathcal{G}_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{nij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}$$
+$$G_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{nij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}$$
 
 
 ## todolist
