@@ -36,8 +36,9 @@ $$G_{{\bf s}l}^3 =\sum_{l_xl_yl_z} \frac{\zeta!}{l!(\zeta-l)!} \frac{l!}{l_x!l_y
 
 and 
 
-$$G_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{nij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}$$
+$$G_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}$$
 
+where $${\bf s} =(n,s)$$
 
 ## todolist
 - implement a lammps interface for production runs
