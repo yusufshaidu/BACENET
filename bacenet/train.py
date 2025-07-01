@@ -109,10 +109,10 @@ def get_compiled_model(configs,optimizer,example_input,model_version='linear'):
     #example_input = unpack_data(example_input)
     outs = _model(example_input, training=False)
     _model.compile(optimizer=optimizer,
-                  #loss=help_fn.quad_loss,
-                  loss=help_fn.mae_loss,
-                  loss_f = help_fn.force_loss_mae)
+                  loss=help_fn.quad_loss,
+                  #loss=help_fn.mae_loss,
                   #loss_f = help_fn.force_loss_mae)
+                  loss_f = help_fn.force_loss)
     print(_model.summary())
     return _model
 

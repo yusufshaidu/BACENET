@@ -821,7 +821,7 @@ class BACENET(tf.keras.Model):
             fmse_loss = tf.map_fn(self.loss_f, 
                                   (batch_nats,target_f,forces), 
                                   fn_output_signature=tf.float32)
-            fmse_loss = tf.reduce_mean(fmse_loss)
+            fmse_loss = tf.reduce_mean(fmse_loss) # average over batch
 
             delta_n = tf.constant(self._start_swa, dtype=tf.int64) - self._train_counter
             _step_fn = self.step_fn(delta_n)

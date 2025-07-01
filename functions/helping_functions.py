@@ -488,7 +488,7 @@ def force_loss_mae(x):
     nat = tf.cast(x[0], tf.int32)
     force_ref = tf.reshape(x[1][:3*nat], (nat,3))
     force_pred = tf.reshape(x[2][:3*nat], (nat,3))
-    loss = tf.reduce_mean(tf.abs(force_ref - force_pred))
+    loss = tf.reduce_sum(tf.abs(force_ref - force_pred))
     return loss
 
 @tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
@@ -499,7 +499,7 @@ def force_loss(x):
     nat = tf.cast(x[0], tf.int32)
     force_ref = tf.reshape(x[1][:3*nat], (nat,3))
     force_pred = tf.reshape(x[2][:3*nat], (nat,3))
-    loss = tf.reduce_mean((force_ref - force_pred)**2)
+    loss = tf.reduce_sum((force_ref - force_pred)**2)
     return loss
 @tf.function(input_signature=[(tf.TensorSpec(shape=(), dtype=tf.float32),
                              tf.TensorSpec(shape=(None,), dtype=tf.float32),
