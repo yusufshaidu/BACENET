@@ -26,20 +26,19 @@ where $R_{ijs} = R_n(r_{ij},s_1,s_2) fc(r_{ij, r_c})$
 
 Expanding over the integer $\zeta$ and the $cos(\theta)$, gives:
 
-\begin{align}
-    G_{\bf s}^3 &= \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l\frac{\zeta!}{l!(\zeta-l)!} \sum_{l_xl_yl_z} \frac{l!}{l_x!l_y!l_z!} (\mathcal{G}_{i,l_xl_yl_z,{\bf s}})^2\\
-    &= \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l G_{{\bf s}l}^3,
-\end{align}
+$$G_{\bf s}^3 = \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l\frac{\zeta!}{l!(\zeta-l)!} \sum_{l_xl_yl_z} \frac{l!}{l_x!l_y!l_z!} (G_{i,l_xl_yl_z,{\bf s}})^2$$
+
+$$G_{\bf s}^3 = \frac{2}{2^{\zeta}}\sum_{l=0}^{\zeta}\lambda^l G_{{\bf s}l}^3$$
 
 where
 
-\begin{equation}
-    G_{{\bf s}l}^3 =\sum_{l_xl_yl_z} \frac{\zeta!}{l!(\zeta-l)!} \frac{l!}{l_x!l_y!l_z!} (\mathcal{G}_{i,l_xl_yl_z,{\bf s}})^2,
-\end{equation}
+$$G_{{\bf s}l}^3 =\sum_{l_xl_yl_z} \frac{\zeta!}{l!(\zeta-l)!} \frac{l!}{l_x!l_y!l_z!} (G_{i,l_xl_yl_z,{\bf s}})^2$$
+
 and 
-\begin{equation}
-    \mathcal{G}_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{nij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}
-\end{equation}
+
+$$G_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{\alpha}}$$
+
+where $${\bf s} =(n,s)$$
 
 ## todolist
 - implement a lammps interface for production runs
