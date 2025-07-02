@@ -326,7 +326,7 @@ class BACENET(tf.keras.Model):
 
         g_i_ll_ijk2 = tf.transpose(g_i_ll_ijk2, perm=[1,0,2])
         gi4 = tf.reshape(g_i_ll_ijk2, [nat, -1])
-        return [gi3,3.0*gi4] # there are three combinations for th for body terms
+        return [gi3,gi4] # there are three combinations for th for body terms
     @tf.function(jit_compile=False,
                 input_signature=[
                 tf.TensorSpec(shape=(None,None), dtype=tf.float32),

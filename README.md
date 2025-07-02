@@ -40,6 +40,12 @@ $$G_{i,l_xl_yl_z,{\bf s}}  = \sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alph
 
 where $${\bf s} =(n,s)$$
 
+There are two possible implementation of this descriptors:
+- following the original implementation of Behler Parrinello descriptors and chosing different $\zeta$ and performing the sum explicitly
+- using a fixed zeta and each component of zeta as a different channel. This is much computationally efficient.
+
+Both of these are implemented 
+
 ## todolist
 - implement a lammps interface for production runs
-
+- implement graph based model using the $G_{i,l_xl_yl_z,{\bf s}}$ as the initial node features
