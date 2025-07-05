@@ -55,7 +55,7 @@ $$G_{\bf s}^3 = \sum_{l_1l_2}^{\zeta}\lambda^l_1\lambda^l_2\frac{\zeta!}{l_1!(\z
 
 where $$G_{i,l_{12x}l_{12y}l_{12z},{\bf s}}=\sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{1\alpha}} \otimes \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{2\alpha}}$$
 
-As before, we drop the sum over, we decomposed the descriptors into $l_1\timesl_2$ components
+As before, we drop the sum over, we decomposed the descriptors into $l_1 \times l_2$ components
 
 ###
 ## todolist
