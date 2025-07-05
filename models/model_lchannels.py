@@ -363,9 +363,9 @@ class BACENET(tf.keras.Model):
         index = tf.reshape(shape - 1, (1, 2))
         Aij = tf.tensor_scatter_nd_update(Aij, index, new_values)
         '''
-        E1 = tf.pad(-E1, [[0,1]], constant_values=total_charge)
+        #E1 = tf.pad(-E1, [[0,1]], constant_values=total_charge)
         #total charge should be read from structures
-        E1_padded = tf.concat([E1, [self.total_charge]], axis=0)
+        E1_padded = tf.concat([-E1, [total_charge]], axis=0)
         #atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
         atomic_q0 = tf.concat([atomic_q0, [0.0]], axis=0)
 
@@ -549,7 +549,7 @@ class BACENET(tf.keras.Model):
             #predict energy and forces
             _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
             if self.coulumb or self.include_vdw:
-                total_energy = tr.reduce_sum(_atomic_energies[:,0])
+                total_energy = tf.reduce_sum(_atomic_energies[:,0])
             else:
                 total_energy = tf.reduce_sum(_atomic_energies)
 
