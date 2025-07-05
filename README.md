@@ -42,17 +42,21 @@ where $${\bf s} =(n,s)$$
 
 There are two possible implementation of this descriptors:
 - following the original implementation of Behler Parrinello descriptors and chosing different $\zeta$ and performing the sum explicitly
-- Using a fixed zeta and each component of zeta as a different channel. This is much computationally efficient. In this case, the normalization factor $\frac{2}{2^{\zeta}}$ is irrelevant and can be dropped.
+- Using a fixed zeta and each component of zeta as a different channel. This is much computationally efficient. In this case, the normalization factor $\frac{2}{2^{\zeta}}$ is irrelevant and can be dropped, as well as the $\lambda$
 
 Both of these are implemented 
 ## Higher body-order terms
 Following the same form for the three body terms, we can write a four-body descriptors as
- $$G_i^{(4)}(s) = \sum_{jkm} (\frac{1+\lambda_s {\rm cos}(\theta_{ijk})}{2})^\zeta (\frac{1+\lambda_s {\rm cos}(\theta_{ijm})}{2})^\zeta R_{ijs} R_{iks} R_{ijm}$$
+
+$$G_i^{(4)}(s) = \sum_{jkm} (\frac{1+\lambda_s {\rm cos}(\theta_{ijk})}{2})^\zeta (\frac{1+\lambda_s {\rm cos}(\theta_{ijm})}{2})^\zeta R_{ijs} R_{iks} R_{ijm}$$
 
 Other combination of jkm neighbors of i can be used but they all gives similar expression. Expanding in powers of z, and also expanding $cos\theta_{ijk}$ terms, we got
-$$G_{\bf s}^3 = \sum_{l_1,l_2}^{\zeta}\lambda^l_1\lambda^l_2\frac{\zeta!}{l_1!(\zeta-l_1)!} \frac{\zeta!}{l_2!(\zeta-l_2)!}\sum_{l_{1x}l_{1y}l_{1z}} \sum_{l_{2x}l_{2y}l_{2z}} \frac{l_1!}{l_{1x}!l_{1y}!l_{1z}!} \frac{l_2!}{l_{2x}!l_{2y}!l_{2z}!} (G_{i,l_{1x}l_{1y}l_{1z},{\bf s}} \otimes G_{i,l_{2x}l_{2y}l_{2z},{\bf s}}) G_{i,l_{12x}l_{12y}l_{12z},{\bf s}}$$
+$$G_{\bf s}^3 = \sum_{l_1l_2}^{\zeta}\lambda^l_1\lambda^l_2\frac{\zeta!}{l_1!(\zeta-l_1)!} \frac{\zeta!}{l_2!(\zeta-l_2)!}\sum_{l_{1x}l_{1y}l_{1z}} \sum_{l_{2x}l_{2y}l_{2z}} \frac{l_1!}{l_{1x}!l_{1y}!l_{1z}!} \frac{l_2!}{l_{2x}!l_{2y}!l_{2z}!} (G_{i,l_{1x}l_{1y}l_{1z},{\bf s}} \otimes G_{i,l_{2x}l_{2y}l_{2z},{\bf s}}) G_{i,l_{12x}l_{12y}l_{12z},{\bf s}}$$
 
 where $$G_{i,l_{12x}l_{12y}l_{12z},{\bf s}}=\sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{1\alpha}} \otimes \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{2\alpha}}$$
+
+As before, we drop the sum over, we decomposed the descriptors into $l_1\timesl_2$ components
+
 ###
 ## todolist
 - implement a lammps interface for production runs
