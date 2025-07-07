@@ -139,9 +139,9 @@ class BACENET(tf.keras.Model):
         # each body order learn single component of the radial functions
         #one radial function per components and different one for 3 and 4 body 
         #if self.body_order == 3:
-        self.number_radial_components = self.nzeta
-        #if self.body_order == 4:
-        #    self.number_radial_components = (2 * self.nzeta + 1)
+        self.number_radial_components = self.nzeta # this is lmax + 1
+        if self.body_order == 4:
+            self.number_radial_components = 2 * self.nzeta - 1
 
         _radial_layer_sizes.append(self.number_radial_components * self.Nrad)
         radial_activations = ['silu' for s in _radial_layer_sizes[:-1]]
@@ -243,7 +243,8 @@ class BACENET(tf.keras.Model):
         #there is no need for different lambdas
 
         # Multiply g_ilxlylz^2 and transpose
-        _gi3 = tf.einsum('ijk,ijk->kij', g_ilxlylz, g_ilxlylz)
+        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1])
+        #_gi3 = tf.einsum('ijk,ijk->kij', g_ilxlylz, g_ilxlylz)
         # shape: [n_lxlylz, nat, nspec * nrad, n_lambda]
 
         gi3 = tf.math.unsorted_segment_sum(_gi3, self.lxlylz_sum, num_segments=self.nzeta)
@@ -274,11 +275,15 @@ class BACENET(tf.keras.Model):
         '''
         # --- Angular terms ---
         g_ij_lxlylz = self._angular_terms(rij_unit)
+        shapes = tf.shape(g_ij_lxlylz)
+        npairs = shapes[0]
+        n_lxlylz = shapes[1]
         # shape: [npair, n_lxlylz]
         #radial_ij = tf.transpose(radial_ij, perm=[2,0,1])
         #radial_ij_expanded = tf.transpose(tf.gather(radial_ij, self.lxlylz_sum), perm=[1,2,0])
         #radial_ij_expanded = tf.gather(radial_ij, self.lxlylz_sum, axis=2)
-        radial_ij_expanded = radial_ij
+        radial_ij_expanded = tf.gather(radial_ij[:,:,:self.nzeta], self.lxlylz_sum, axis=2)
+        #radial_ij_expanded = radial_ij
         # shape: [npair, nspec * nrad, n_lxlylz]
 
         g_ilxlylz = radial_ij_expanded * tf.expand_dims(g_ij_lxlylz, axis=1)
@@ -293,7 +298,9 @@ class BACENET(tf.keras.Model):
         # shape: [nzeta,n_lambda]
 
         # Multiply g_ilxlylz^2 and transpose
-        _gi3 = tf.einsum('ijk,ijk->kij', g_ilxlylz, g_ilxlylz)
+        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1])
+        
+        #_gi3 = tf.einsum('ijk,ijk->kij', g_ilxlylz, g_ilxlylz)
         # shape: [n_lxlylz, nat, nspec * nrad, n_lambda]
 
         gi3 = tf.math.unsorted_segment_sum(_gi3, self.lxlylz_sum, num_segments=self.nzeta)
@@ -308,24 +315,40 @@ class BACENET(tf.keras.Model):
         gi3 = tf.reshape(gi3, [nat, -1])
 
         #
-        g_i_ll_kl = tf.einsum('ijk,ijl->ijkl', g_ilxlylz, g_ilxlylz) #nat, nrad*nspec,n_lxlylz,n_lxlylz
-            
-        g_ij_ll = tf.einsum('ik,il->ikl',g_ij_lxlylz, g_ij_lxlylz) # npair,n_lxlylz,n_lxlylz
-        g_ij_ll = tf.einsum('ijk,ikl->ijkl',radial_ij_expanded, g_ij_ll) #(npair, nrad*nspec,n_lxlylz,n_lxlylz)
+        #g_i_l1l2 = tf.einsum('ijk,ijl->ijkl', g_ilxlylz, g_ilxlylz) #nat, nrad*nspec,n_lxlylz,n_lxlylz
+        g_i_l1l2 = tf.expand_dims(g_ilxlylz,-1) * tf.expand_dims(g_ilxlylz,-2)
+        g_i_l1l2 = tf.reshape(g_i_l1l2, [nat, -1, n_lxlylz*n_lxlylz]) #nat, nrad*nspec,n_lxlylz*n_lxlylz
+
+        #rad_ij contains 2*zata + 1 radial functions
+
+        lxlylz_sum2 = tf.reshape(self.lxlylz_sum[None,:] + self.lxlylz_sum[:,None], [-1])
+        radial_ij_expanded = tf.gather(radial_ij, lxlylz_sum2, axis=2) # npair, nspec*nrad, n_lxlylz * n_lxlylz
+
+        #g_ij_l1_plus_l2 = tf.einsum('ik,il->ikl',g_ij_lxlylz, g_ij_lxlylz) # npair,n_lxlylz,n_lxlylz
+        g_ij_l1_plus_l2 = tf.expand_dims(g_ij_lxlylz,-1) * tf.expand_dims(g_ij_lxlylz,-2) # npair,n_lxlylz,n_lxlylz
+        g_ij_l1_plus_l2 = tf.reshape(g_ij_l1_plus_l2, [-1, n_lxlylz*n_lxlylz])
+
+        #g_ij_ll = tf.einsum('ijk,ik->ijk',radial_ij_expanded, g_ij_l1_plus_l2) #(npair, nrad*nspec,n_lxlylz*n_lxlylz)
+        g_ij_ll = radial_ij_expanded * tf.expand_dims(g_ij_l1_plus_l2, 1)
+
         #g_ij_ll = tf.einsum('ijk,il->ijkl',g_ij_ll_rad, g_ij_lxlylz) # n_lxlylz,n_lxlylz,npair, nrad*nspec
         #contribution after summing over j
-        g_i_ll_j = tf.math.unsorted_segment_sum(data=g_ij_ll,
+        g_i_l1_plus_l2 = tf.math.unsorted_segment_sum(data=g_ij_ll,
                                         segment_ids=first_atom_idx,num_segments=nat)#nat x nrad*nspec,n_lxlylz,n_lxlylz
-        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl # nat, nrad*nspec, n_lxlylz, n_lxlylz
-        g_i_ll_ijk = tf.reshape(g_i_ll_ijk, [nat, self.Nrad*self.spec_size, -1]) # nat, nrad*nspec, n_lxlylz * n_lxlylz
-        g_i_ll_ijk1 = tf.transpose(g_i_ll_ijk, perm=[2,0,1])
-        lxlylz_sum2 = tf.reshape(self.lxlylz_sum[None,:] + self.lxlylz_sum[:,None], [-1])
-        nzeta2 = self.nzeta * self.nzeta
-        g_i_ll_ijk2 = tf.math.unsorted_segment_sum(data=g_i_ll_ijk1,
-                                        segment_ids=lxlylz_sum2, num_segments=nzeta2) # nzeta*nzeta, nat, nrad*nspec
+        
+        g_i_l1l2_ijk = tf.transpose(g_i_l1l2 * g_i_l1_plus_l2, [2,0,1]) #n_lxlylz * n_lxlylz, nat, nrad*nspec
 
-        g_i_ll_ijk2 = tf.transpose(g_i_ll_ijk2, perm=[1,0,2])
-        gi4 = tf.reshape(g_i_ll_ijk2, [nat, -1])
+        #g_i_l1l2_ijk = tf.einsum('ijk,ijk->kij',g_i_l1l2, g_i_l1_plus_l2) # n_lxlylz * n_lxlylz, nat, nrad*nspec
+
+        nzeta2 = self.nzeta * self.nzeta
+
+        g_i_l1l2 = tf.math.unsorted_segment_sum(data=g_i_l1l2_ijk,
+                                        segment_ids=lxlylz_sum2, num_segments=nzeta2) # nzeta2, nat, nrad*nspec
+        g_i_l1l2 = tf.transpose(g_i_l1l2, perm=[1,0,2])
+
+        #g_i_ll_ijk2 = tf.transpose(g_i_ll_ijk2, perm=[1,0,2])
+        gi4 = tf.reshape(g_i_l1l2, [nat, -1])
+
         return [gi3,gi4] # there are three combinations for th for body terms
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -483,18 +506,17 @@ class BACENET(tf.keras.Model):
             all_rij_norm = tf.linalg.norm(all_rij, axis=-1) #npair
             reg = 1e-12
             #all_rij_norm = tf.sqrt(tf.reduce_sum(all_rij * all_rij , axis=-1) + reg) #npair
-
+            species_encoder_i = tf.gather(species_encoder,first_atom_idx)
+            species_encoder_j = tf.gather(species_encoder,second_atom_idx)
             if self.species_correlation=='tensor':
-                species_encoder_extended = tf.einsum('ik,il->ikl',
-                                                 tf.gather(species_encoder,first_atom_idx),
-                                                 tf.gather(species_encoder,second_atom_idx)
-                                                 )
-            else:
-                species_encoder_extended = tf.einsum('ik,ik->ik',
-                                                 tf.gather(species_encoder,first_atom_idx),
-                                                 tf.gather(species_encoder,second_atom_idx)
-                                                 )
+                species_encoder_extended = tf.expand_dims(species_encoder_i, -1) * tf.expand_dims(species_encoder_j, -2)
 
+               # species_encoder_extended = tf.einsum('ik,il->ikl',
+               #                                  tf.gather(species_encoder,first_atom_idx),
+               #                                  tf.gather(species_encoder,second_atom_idx)
+               #                                  )
+            else:
+                species_encoder_extended = species_encoder_i * species_encoder_j
 
             species_encoder_ij = tf.reshape(species_encoder_extended, 
                                                   [-1, self.spec_size]
@@ -513,23 +535,25 @@ class BACENET(tf.keras.Model):
             bf_radial1 = tf.reshape(bf_radial0, [-1,self.n_bessels])
             bf_radial2 = self.radial_funct_net(bf_radial1)
             bf_radial = tf.reshape(bf_radial2, [num_pairs, self.Nrad, self.number_radial_components])
-            radial_ij = tf.einsum('ijl,ik->ijkl',bf_radial, species_encoder_ij) # npairs x Nrad x nembeddingxzeta (l=zeta)
+            #radial_ij = tf.einsum('ijl,ik->ijkl',bf_radial, species_encoder_ij) # npairs x Nrad x nembeddingxzeta (l=zeta)
+            #radial_ij = bf_radial[:,:,None,:] * species_encoder_ij[:,None,:,None]
+            radial_ij = tf.expand_dims(bf_radial, 2) * tf.expand_dims(tf.expand_dims(species_encoder_ij, 1), -1)
+            #radial_ij = tf.einsum('ijl,ik->ijkl',bf_radial, species_encoder_ij) # npairs x Nrad x nembeddingxzeta (l=zeta)
             radial_ij = tf.reshape(radial_ij, [num_pairs, self.Nrad*self.spec_size,self.number_radial_components])
             atomic_descriptors = tf.math.unsorted_segment_sum(data=radial_ij[:,:,0],
                                                               segment_ids=first_atom_idx, num_segments=nat) 
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik
-            rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm+reg)) #npair,3
-            #rij_unit = all_rij / (all_rij_norm[:,None] + reg)
-            radial_ij_extended = tf.gather(radial_ij, self.lxlylz_sum, axis=2)
+            #rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm+reg)) #npair,3
+            rij_unit = all_rij / (tf.expand_dims(all_rij_norm + reg, -1))
 
             if self.body_order == 3:
-
+                radial_ij_extended = tf.gather(radial_ij[:,:,:self.nzeta], self.lxlylz_sum, axis=2)
                 Gi3 = self._to_three_body_terms(self.zeta, rij_unit, radial_ij_extended, first_atom_idx,nat)
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
             elif self.body_order == 4:
                   # this is require for proper backward propagation
-                Gi3,Gi4 = self._to_four_body_terms(self.zeta, rij_unit, radial_ij_extended, first_atom_idx, nat)
+                Gi3,Gi4 = self._to_four_body_terms(self.zeta, rij_unit, radial_ij, first_atom_idx, nat)
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi4], axis=1)
 

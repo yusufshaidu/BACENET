@@ -210,7 +210,7 @@ def create_model(configs):
 
     model_outdir = configs['outdir']
     if not os.path.exists(model_outdir):
-        os.mkdir(model_outdir)
+        os.makedirs(model_outdir, exist_ok=True)
 
     lr_schedule = configs['initial_lr']
     # Learning rate schedule
@@ -241,7 +241,7 @@ def create_model(configs):
     #save checkpoints
     checkpoint_dir = model_outdir+"/models"
     if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
+        os.makedirs(checkpoint_dir,exist_ok=True)
    
     checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.ckpt"
 #    checkpoint_path = checkpoint_dir+"/ckpts-{epoch:04d}.weights.h5"

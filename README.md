@@ -53,7 +53,7 @@ $$G_i^{(4)}(s) = \sum_{jkm} (\frac{1+\lambda_s {\rm cos}(\theta_{ijk})}{2})^\zet
 Other combination of jkm neighbors of i can be used but they all gives similar expression. Expanding in powers of z, and also expanding $cos\theta_{ijk}$ terms, we got
 $$G_{\bf s}^3 = \sum_{l_1l_2}^{\zeta}\lambda^l_1\lambda^l_2\frac{\zeta!}{l_1!(\zeta-l_1)!} \frac{\zeta!}{l_2!(\zeta-l_2)!}\sum_{l_{1x}l_{1y}l_{1z}} \sum_{l_{2x}l_{2y}l_{2z}} \frac{l_1!}{l_{1x}!l_{1y}!l_{1z}!} \frac{l_2!}{l_{2x}!l_{2y}!l_{2z}!} (G_{i,l_{1x}l_{1y}l_{1z},{\bf s}} \otimes G_{i,l_{2x}l_{2y}l_{2z},{\bf s}}) G_{i,l_{12x}l_{12y}l_{12z},{\bf s}}$$
 
-where $$G_{i,l_{12x}l_{12y}l_{12z},{\bf s}}=\sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{1\alpha}} \otimes \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{2\alpha}}$$
+where $$G_{i,l_{12x}l_{12y}l_{12z},{\bf s}}=\sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{1\alpha}} \otimes \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{2\alpha}}=\sum_{j} R_{s,ij} \prod_{\alpha={x,y,z}} r_{ij\alpha}^{l_{1\alpha}+l_{2\alpha}}$$
 
 As before, we drop the sum over, we decomposed the descriptors into $l_1 \times l_2$ components
 
