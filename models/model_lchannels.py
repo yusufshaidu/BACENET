@@ -153,9 +153,9 @@ class BACENET(tf.keras.Model):
                                  prefix='radial-functions')
         #lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta)
         lxlylz, lxlylz_sum, fact_norm = help_fn._compute_cosine_terms(self.zeta)
-        self.lxlylz = tf.cast(lxlylz,tf.float32)
-        self.lxlylz_sum = tf.cast(lxlylz_sum, tf.int32)
-        self.fact_norm = tf.cast(fact_norm, tf.float32)
+        self.lxlylz = tf.cast(lxlylz,tf.float32) #[n_lxlylz, 3]
+        self.lxlylz_sum = tf.cast(lxlylz_sum, tf.int32) #[n_lxlylz,]
+        self.fact_norm = tf.cast(fact_norm, tf.float32) #[n_lxlylz,]
 
         #self.lxlylz = tf.convert_to_tensor(lxlylz, dtype=tf.float32)
         #self.lxlylz_sum = tf.convert_to_tensor(lxlylz_sum, tf.int32)
@@ -192,7 +192,7 @@ class BACENET(tf.keras.Model):
 
         # Apply factorial norm (broadcasted)
         #fact_norm = tf.reshape(fact_norm, [-1])                        # [n_lxlylz]
-        g_ij_lxlylz = g_ij_lxlylz * self.fact_norm[None,:]                # [npairs, n_lxlylz]
+        #g_ij_lxlylz = g_ij_lxlylz * self.fact_norm[None,:]                # [npairs, n_lxlylz]
 
         return g_ij_lxlylz
 
@@ -243,9 +243,8 @@ class BACENET(tf.keras.Model):
         #there is no need for different lambdas
 
         # Multiply g_ilxlylz^2 and transpose
-        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1])
+        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1]) * self.fact_norm[:,None,None] #n_lxlylz, nat, nspec * nrad
         #_gi3 = tf.einsum('ijk,ijk->kij', g_ilxlylz, g_ilxlylz)
-        # shape: [n_lxlylz, nat, nspec * nrad, n_lambda]
 
         gi3 = tf.math.unsorted_segment_sum(_gi3, self.lxlylz_sum, num_segments=self.nzeta)
         #gi3 = self.custom_segment_sum(_gi3, self.lxlylz_sum, num_segments=self.nzeta)
@@ -298,10 +297,10 @@ class BACENET(tf.keras.Model):
         # shape: [nzeta,n_lambda]
 
         # Multiply g_ilxlylz^2 and transpose
-        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1])
+        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1]) * self.fact_norm[:,None,None]
         
         #_gi3 = tf.einsum('ijk,ijk->kij', g_ilxlylz, g_ilxlylz)
-        # shape: [n_lxlylz, nat, nspec * nrad, n_lambda]
+        # shape: [n_lxlylz, nat, nspec * nrad]
 
         gi3 = tf.math.unsorted_segment_sum(_gi3, self.lxlylz_sum, num_segments=self.nzeta)
         #gi3 = self.custom_segment_sum(_gi3, lxlylz_sum, num_segments=self.nzeta)
@@ -322,6 +321,7 @@ class BACENET(tf.keras.Model):
         #rad_ij contains 2*zata + 1 radial functions
 
         lxlylz_sum2 = tf.reshape(self.lxlylz_sum[None,:] + self.lxlylz_sum[:,None], [-1])
+        fact_norm2 = tf.reshape(self.fact_norm[None,:] * self.fact_norm[:, None], [-1])
         radial_ij_expanded = tf.gather(radial_ij, lxlylz_sum2, axis=2) # npair, nspec*nrad, n_lxlylz * n_lxlylz
 
         #g_ij_l1_plus_l2 = tf.einsum('ik,il->ikl',g_ij_lxlylz, g_ij_lxlylz) # npair,n_lxlylz,n_lxlylz
@@ -336,7 +336,7 @@ class BACENET(tf.keras.Model):
         g_i_l1_plus_l2 = tf.math.unsorted_segment_sum(data=g_ij_ll,
                                         segment_ids=first_atom_idx,num_segments=nat)#nat x nrad*nspec,n_lxlylz,n_lxlylz
         
-        g_i_l1l2_ijk = tf.transpose(g_i_l1l2 * g_i_l1_plus_l2, [2,0,1]) #n_lxlylz * n_lxlylz, nat, nrad*nspec
+        g_i_l1l2_ijk = tf.transpose(g_i_l1l2 * g_i_l1_plus_l2, [2,0,1]) * fact_norm2[:,None,None] #n_lxlylz * n_lxlylz, nat, nrad*nspec
 
         #g_i_l1l2_ijk = tf.einsum('ijk,ijk->kij',g_i_l1l2, g_i_l1_plus_l2) # n_lxlylz * n_lxlylz, nat, nrad*nspec
 
