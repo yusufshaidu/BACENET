@@ -25,6 +25,9 @@ def create_model(configs):
         if key not in configs.keys():
             configs[key] = _configs[key]
     species_chi0, species_J0 = train.estimate_species_chi0_J0(configs['species'])
+    if configs['scale_J0'] is None:
+        configs['scale_J0'] = tf.ones_like(species_chi0)
+
     configs['species_chi0'] = species_chi0
     configs['species_J0'] = species_J0
 
@@ -161,7 +164,7 @@ def create_model(configs):
 
         #if configs['coulumb']:
         e_ref, e_pred, force_ref, force_pred,nat,_charges,stress = model.predict(test_data)
-        #    charges = []
+        charges = []
         #else:
         #    e_ref, e_pred, metrics, force_ref, force_pred,nat,stress = model.predict(test_data)
         
@@ -189,8 +192,13 @@ def create_model(configs):
         force_pred = tf.reshape(_f_pred, [-1,3])
         diff_f = force_ref - force_pred
 
-        mae = tf.reduce_mean(tf.abs(e_ref-e_pred)).numpy()
-        rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2)).numpy()
+        if configs['per_atom']:
+            dE = (e_ref - e_pred) / nat
+            mae = tf.reduce_mean(tf.abs(dE)).numpy()
+            rmse = tf.sqrt(tf.reduce_mean((dE)**2)).numpy()
+        else:
+            mae = tf.reduce_mean(tf.abs(e_ref-e_pred)).numpy()
+            rmse = tf.sqrt(tf.reduce_mean((e_ref-e_pred)**2)).numpy()
         fmae = tf.reduce_mean(tf.abs(diff_f)).numpy()
         frmse = tf.sqrt(tf.reduce_mean(diff_f**2)).numpy()
         errors.append([_epoch,rmse*1000,mae*1000,frmse*1000,fmae*1000])

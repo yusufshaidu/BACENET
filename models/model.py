@@ -165,10 +165,9 @@ class BACENET(tf.keras.Model):
                 input_signature=[
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,3), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 ]
                  )
-    def _angular_terms(self,rij_unit,lxlylz, fact_norm):
+    def _angular_terms(self,rij_unit,lxlylz):
         '''
         compute vectorize three-body computation
 
@@ -181,9 +180,6 @@ class BACENET(tf.keras.Model):
         #g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1)              # [npairs, n_lxlylz]
         g_ij_lxlylz = rij_lxlylz[:,:,0] * rij_lxlylz[:,:,1] * rij_lxlylz[:,:,2]
 
-        # Apply factorial norm (broadcasted)
-        #fact_norm = tf.reshape(fact_norm, [-1])                        # [n_lxlylz]
-        g_ij_lxlylz = g_ij_lxlylz * fact_norm[None,:]                # [npairs, n_lxlylz]
         return g_ij_lxlylz
 
     @tf.function(jit_compile=False,
@@ -210,7 +206,7 @@ class BACENET(tf.keras.Model):
         compute vectorize three-body computation
 
         '''
-        g_ij_lxlylz = self._angular_terms(rij_unit,lxlylz, fact_norm)
+        g_ij_lxlylz = self._angular_terms(rij_unit,lxlylz)
         g_ilxlylz = tf.expand_dims(radial_ij, axis=2) * tf.expand_dims(g_ij_lxlylz, axis=1) #shape=(npair,nrad*species,n_lxlylz)
         #sum over neighbors
         g_ilxlylz = tf.math.unsorted_segment_sum(data=g_ilxlylz,
@@ -226,7 +222,9 @@ class BACENET(tf.keras.Model):
         lambda_comp = lambda_weights
         _lxlylz_sum = tf.cast(lxlylz_sum,tf.float32)
         lambda_comp_lxlylz = tf.expand_dims(lambda_comp,axis=1)**tf.expand_dims(_lxlylz_sum, axis=0) #n_lambda_comp, nlxlylz
-        gi3 = tf.einsum('ijk,lk->ijl', g2_ilxlylz, lambda_comp_lxlylz)
+        #gi3 = tf.einsum('ijk,lk->ijl', g2_ilxlylz, lambda_comp_lxlylz)
+        #gi3 = tf.einsum('ijk,lk, k->ijl', g2_ilxlylz, lambda_comp_lxlylz, fact_norm)
+        gi3 = tf.reduce_sum(g2_ilxlylz[:,:,None,:] * lambda_comp_lxlylz[None,None,:,:] * fact_norm[None,None,None,:], axis=3)
         z_float = tf.cast(z, tf.float32)
         '''
         if self.self_correction:
@@ -263,7 +261,7 @@ class BACENET(tf.keras.Model):
         compute  up to four-body computation
 
         '''
-        g_ij_lxlylz = self._angular_terms(rij_unit,lxlylz, fact_norm)
+        g_ij_lxlylz = self._angular_terms(rij_unit,lxlylz)
         g_ilxlylz = tf.expand_dims(radial_ij, axis=2) * tf.expand_dims(g_ij_lxlylz, axis=1) #shape=(npair,nrad*species,n_lxlylz)
         #sum over neighbors
         g_ilxlylz = tf.math.unsorted_segment_sum(data=g_ilxlylz,
@@ -278,7 +276,8 @@ class BACENET(tf.keras.Model):
         lambda_comp = lambda_weights
         _lxlylz_sum = tf.cast(lxlylz_sum,tf.float32)
         lambda_comp_lxlylz = tf.expand_dims(lambda_comp,axis=1)**tf.expand_dims(_lxlylz_sum, axis=0) #n_lambda_comp, nlxlylz
-        gi3 = tf.einsum('ijk,lk->ijl', g2_ilxlylz, lambda_comp_lxlylz)
+        #gi3 = tf.einsum('ijk,lk, k->ijl', g2_ilxlylz, lambda_comp_lxlylz, fact_norm)
+        gi3 = tf.reduce_sum(g2_ilxlylz[:,:,None,:] * lambda_comp_lxlylz[None,None,:,:] * fact_norm[None,None,None,:], axis=3)
         z_float = tf.cast(z, tf.float32)
         norm = tf.pow(2.0 , 1. - z_float)
 #        gi3 *= norm 
@@ -292,7 +291,8 @@ class BACENET(tf.keras.Model):
             
         g_ij_ll = tf.expand_dims(g_ij_lxlylz,axis=2) * tf.expand_dims(g_ij_lxlylz, axis=1) # npairs, n_lxlylz, n_lxlylz
         
-        g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij, g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
+        #g_i_ll_j = tf.einsum('ij,ikl->ijkl',radial_ij, g_ij_ll) #npair nrad*nspec,n_lxlylz,n_lzlylz
+        g_i_ll_j = radial_ij[:,:,None,None] *  g_ij_ll[:,None,:,:] #npair nrad*nspec,n_lxlylz,n_lzlylz
         #now we sum over neighbors                           
         g_i_ll_j = tf.math.unsorted_segment_sum(data=g_i_ll_j,
                                         segment_ids=first_atom_idx,
@@ -300,9 +300,12 @@ class BACENET(tf.keras.Model):
         #sum over the last two axes
         # the normalization should be 2**z * 2**z so that the values are bound by 2 like the 3 body them
         #norm = 2^(1-z) = 2/z^2
+        fact_norm2 = fact_norm[None,:] * fact_norm[:,None]
+
         _norm = 1.0 / tf.pow(2.0, 2.0*z_float)
-        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl # nat , nrad*nspec, n_lxlylz, n_lxlylz
-        gi4 = tf.einsum('ijkl, nkl->ijn',g_i_ll_ijk, lambda_weights_zxz)
+        g_i_ll_ijk = g_i_ll_j * g_i_ll_kl * fact_norm2[None,None,:,:] # nat , nrad*nspec, n_lxlylz, n_lxlylz
+        tf.reduce_sum(g_i_ll_ijk[:,:,None,:,:] * lambda_weights_zxz[None,None,:,:,:], axis=(3,4))
+        #gi4 = tf.einsum('ijkl, nkl->ijn',g_i_ll_ijk, lambda_weights_zxz)
         z_float = tf.cast(z, tf.float32)
 
         '''
@@ -317,7 +320,6 @@ class BACENET(tf.keras.Model):
             #                                                  segment_ids=first_atom_idx,num_segments=nat) # nat, nrad*nspec
             gi4 -= tf.einsum('ij,k->ijk',Gi_4_j_equal_kl, lambda_terms * lambda_terms)
         '''
-
         return [gi3 * norm, gi4 * _norm]
 
     @tf.function(jit_compile=False,
@@ -358,7 +360,7 @@ class BACENET(tf.keras.Model):
         '''
         #E1 = tf.pad(-E1, [[0,1]], constant_values=total_charge)
         #total charge should be read from structures
-        E1_padded = tf.concat([E1, [self.total_charge]], axis=0)
+        E1_padded = tf.concat([E1, [total_charge]], axis=0)
         #atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
         atomic_q0 = tf.concat([atomic_q0, [0.0]], axis=0)
 
@@ -514,8 +516,8 @@ class BACENET(tf.keras.Model):
                                                               segment_ids=first_atom_idx, num_segments=nat) 
 
             #implement angular part: compute vect_rij dot vect_rik / rij / rik
-            rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm+reg)) #npair,3
-            #rij_unit = all_rij / (tf.expand_dims(all_rij_norm, axis=1) + reg)
+            #rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm+reg)) #npair,3
+            rij_unit = all_rij / (tf.expand_dims(all_rij_norm, axis=1) + reg)
 
             #self correction : 2 * (1+lambda)**z/ 2**2 * sum_j Rij**2
             '''

@@ -58,6 +58,8 @@ class bacenet_Calculator(Calculator):
             if key not in configs.keys():
                 configs[key] = _configs[key]
         species_chi0, species_J0 = train.estimate_species_chi0_J0(configs['species'])
+        if configs['scale_J0'] is None:
+            configs['scale_J0'] = tf.ones_like(species_chi0)
         configs['species_chi0'] = species_chi0
         configs['species_J0'] = species_J0
         
@@ -71,9 +73,9 @@ class bacenet_Calculator(Calculator):
         else:
             rc = configs['rc_rad']
 
-        self.model_call = BACENET
+        _model_call = BACENET
         if configs['model_version'] != 'linear':
-            self.model_call = BACENET_lc
+            _model_call = BACENET_lc
 
         atomic_energy = configs['atomic_energy']
         if len(atomic_energy)==0:
@@ -97,21 +99,20 @@ class bacenet_Calculator(Calculator):
         epoch = ckpts_idx[-1]
         idx=f"{epoch:04d}"
         self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.ckpt"
-        print(f'##################################################################')
-        print(f'calculation are performed with the model:')
-        print(f'{self.ckpt}')
-        print(f'##################################################################')
+        #print(f'##################################################################')
+        #print(f'calculation are performed with the model:')
+        #print(f'{self.ckpt}')
+        #print(f'##################################################################')
 
 
         #self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"
         species_identity = [atomic_number(s) for s in configs['species']]
         #print(species_identity)
                 
-        #model_call = mBP_model
         configs['species_identity'] = species_identity
 #        print(species_identity, len(species_identity))
-        self.model = BACENET(configs)
-        self.model.load_weights(self.ckpt).expect_partial()
+        self.model_call = _model_call(configs)
+        self.model_call.load_weights(self.ckpt).expect_partial()
         #weights = self.model.get_weights()
         #print(weights[0])
 
@@ -141,7 +142,7 @@ class bacenet_Calculator(Calculator):
         
         #inputs = unpack_data(list(data)[0])
         inputs = list(data)[0]
-        outs = self.model(inputs)
+        outs = self.model_call(inputs)
         e0 = np.sum([self.atomic_energy_dic[s] for s in atoms.get_chemical_symbols()])
         energy = outs['energy'].numpy()[0] + e0
         forces = tf.squeeze(outs['forces']).numpy()

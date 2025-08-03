@@ -16,7 +16,8 @@ def unpack_data(data):
         data['gaussian_width'],
         data['energy'],
         data['forces'],
-        data['total_charge']
+        data['total_charge'],
+        data['charges']
     )
 def np_unpack_data(data):
     #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
@@ -33,5 +34,6 @@ def np_unpack_data(data):
         data['gaussian_width'],
         data['energy'],
         data['forces'],
-        data['total_charge']
+        data['total_charge'],
+        data['charges']
     )

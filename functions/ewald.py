@@ -26,7 +26,7 @@ class ewald:
         self._n_atoms = tf.cast(n_atoms, tf.int32)
         self._positions = tf.convert_to_tensor(positions, dtype=tf.float32)
         self._accuracy = accuracy
-        self._gaussian_width = tf.convert_to_tensor(gaussian_width,dtype=tf.float32) # this should be learnable, maybe!
+        self._gaussian_width = tf.convert_to_tensor(gaussian_width,dtype=tf.float32) # this could be learnable, maybe!
         self._sqrt_pi = tf.sqrt(pi)
 
         self.volume = tf.abs(tf.linalg.det(cell))
@@ -38,8 +38,8 @@ class ewald:
         if self.pbc:
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
             gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(gaussian_width))
-            self._gmax = gmax if gmax else 2.* gamma_max * tf.sqrt(-tf.math.log(accuracy))
-            self._gmax *= 1.001
+            self._gmax = gmax if gmax else 2 * gamma_max * tf.sqrt(-tf.math.log(accuracy))
+            self._gmax *= 1.0001
         if efield is not None:
             self.efield = tf.cast(tf.squeeze(efield), dtype=tf.float32)
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(cell))
@@ -91,13 +91,18 @@ class ewald:
             return [V, CONV_FACT*force, rij, gamma_all]
         '''
         return Vij
+
     @tf.function
-    def estimate_gmax(self,sigma_min):
+    def estimate_gmax(self,b_norm, sigma_min):
         gmax = 1.0
         result = 1e2
+        # convergence are based on energy: ~ 2 pi / volume * sum_G sum_j 1/G^2 exp(-G^2*(alpha_i^2 + alpha_j^2)/4) cos(G.rij)
+        #energy goes as 1/G^2 but note that the forces norm goes as 1/G
         c = lambda gmax, result: tf.greater(result, self._accuracy)
-        b = lambda gmax, result: (gmax + 0.1, 
-                                  tf.exp(-gmax**2*sigma_min**2/2.)/gmax**2*2.*pi/self.volume)
+        b = lambda gmax, result: (gmax + 1.0, 
+                                  2.* pi / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.) / (gmax**2*b_norm**2))
+                                  #2.* pi / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.))
+                                  #tf.exp(-gmax**2*sigma_min**2/2.)/gmax**2*2.*pi/self.volume)
         return tf.while_loop(c, b, [gmax, result])[0]
     
     @tf.function
@@ -118,6 +123,40 @@ class ewald:
                         g_norm = g_norm.write(index, _g_norm)
                         index += 1
         return [g_vecs.stack(), g_norm.stack()]  # [K, 3], [K]
+    @tf.function
+    def accumulate_over_g(self, rij_flat, sigma_flat, g_vecs, g_sq, chunk_size):
+        N2 = tf.shape(rij_flat)[0]  # N*N
+        K = tf.shape(g_vecs)[0]
+        #g_sq = g_norm * g_norm  # [K]
+        Vij_flat = tf.zeros([N2], dtype=rij_flat.dtype)
+
+        def cond(i, acc):
+            return i < K
+
+        def body(i, acc):
+            end = tf.minimum(i + chunk_size, K)
+            g_chunk = g_vecs[i:end]           # [M,3]
+            g_sq_chunk = g_sq[i:end]          # [M]
+
+            dot = tf.matmul(rij_flat, tf.transpose(g_chunk))  # [N2, M]
+            cos_term = tf.cos(dot)  # [N2, M]
+
+            exp_arg = -0.25 * tf.expand_dims(sigma_flat, 1) * tf.expand_dims(g_sq_chunk, 0)  # [N2, M]
+            exp_term = tf.exp(exp_arg)
+            inv_g_sq = 1.0 / (tf.expand_dims(g_sq_chunk, 0) + 1e-12)  # [1, M]
+
+            contribution = exp_term * inv_g_sq * cos_term  # [N2, M]
+            acc += tf.reduce_sum(contribution, axis=1)  # accumulate over k in chunk
+            return end, acc
+
+        _, Vij_flat = tf.while_loop(
+            cond,
+            body,
+            loop_vars=[0, Vij_flat],
+            shape_invariants=[tf.TensorShape([]), tf.TensorShape([None])]
+        )
+        return Vij_flat  # later reshape to [N, N]
+
 
     @tf.function
     def recip_space_term(self): 
@@ -130,10 +169,11 @@ class ewald:
         # the force on k due to atoms j is
         # rk-ri
         rij = self._positions[:,None,:] - self._positions[None,:,:]
+        rij = tf.reshape(rij, [-1,3])
         sigma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width**2
+        sigma_ij2 = tf.reshape(sigma_ij2, [-1])
         
 
-        gmax = self.estimate_gmax(tf.reduce_min(self._gaussian_width))
         #gmax = self._gmax
 
         # Build integer index grid for k-vectors
@@ -143,6 +183,17 @@ class ewald:
         b1_norm = b_norm[0]
         b2_norm = b_norm[1]
         b3_norm = b_norm[2]
+        sigma_min = tf.reduce_min(self._gaussian_width)
+        gmax1 = self.estimate_gmax(b1_norm, sigma_min)
+        gmax1 *= b1_norm 
+        gmax2 = self.estimate_gmax(b2_norm, sigma_min)
+        gmax2 *= b2_norm 
+        gmax3 = self.estimate_gmax(b3_norm, sigma_min)
+        gmax3 *= b3_norm 
+        gmax = tf.reduce_max([gmax1,gmax2,gmax3])
+        #gmax = tf.reduce_max([gmax1,gmax2])
+
+
         nmax1 = tf.cast(tf.math.floor(gmax / b1_norm), tf.int32)
         nmax2 = tf.cast(tf.math.floor(gmax / b2_norm), tf.int32)
         nmax3 = tf.cast(tf.math.floor(gmax / b3_norm), tf.int32)
@@ -169,33 +220,72 @@ class ewald:
         g_norm = tf.boolean_mask(g_norm, mask) #[K,]
         #'''
         #g_vecs, g_norm = self.generate_g_vectors(gmax, nmax1, nmax2, nmax3)
+        # keep g where first nonzero component is positive,
+        # tie-breakers: if g[0]==0, require g[1]>0; if g[0]==g[1]==0, require g[2] >= 0
+        g0, g1, g2 = tf.unstack(g_vecs, axis=1)
+        mask = (
+            (g0 > 0) |
+            ((g0 == 0) & (g1 > 0)) |
+            ((g0 == 0) & (g1 == 0) & (g2 >= 0))
+        )
+        g_vecs = tf.boolean_mask(g_vecs, mask)      # [K_plus, 3]
+        g_norm = tf.boolean_mask(g_norm, mask)  # [K_plus]
         g_sq = g_norm * g_norm  # [K]
-        
 
         # Prepare factors for summation
         # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
         # shape [K, N]
-        g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/4.0, g_sq) # [N,N,K]
+        #g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/4.0, g_sq) # [N*N,K]
+        #chunk_size = 128
+        #Vij = self.accumulate_over_g(rij, sigma_ij2, g_vecs, g_sq, chunk_size)
+        '''
+        Vij = tf.zeros(self._n_atoms * self._n_atoms, dtype=tf.float32)
+        #for k in tf.range(tf.shape(g_sq)[0]):
+        for k in tf.range(200):
+            g =  g_sq[k]
+            g_v = g_vecs[k,:]
+            g2_gamma2 = sigma_ij2 / 4.0 * g # [N*N,K]
+            exp_ij = tf.exp(-g2_gamma2)
+            exp_ij_by_g_sq = exp_ij * 1.0 / (g + 1e-12)
+
+            # The cosine term: shape [N*N,K]
+            cos_term = tf.cos(tf.einsum('ij, j->i', rij, g_v))
+            #rij_dot_g = tf.squeeze(tf.matmul(rij, g_v[:,None]))
+            #cos_term = tf.cos(rij_dot_g)
+            #cos_term = tf.cos(tf.reduce_sum(rij[:,:,None,:] * g_vecs[None,None,:,:], axis=-1))
+
+            # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/4)/g_sq[k] * cos_term[k]
+            # Compute exp outer product and divide by k^2
+            Vij += exp_ij_by_g_sq * cos_term  # [N*N]
+        ''' 
+
+        g2_gamma2 = 0.25 * tf.einsum('i,j->ij',sigma_ij2, g_sq) # [N*N,K]
         exp_ij = tf.exp(-g2_gamma2)
-        exp_ij_by_g_sq = tf.einsum('ijk,k->ijk',exp_ij, 1.0 / (g_sq + 1e-12))
+        #exp_ij_by_g_sq = exp_ij * 1.0 / (g_sq[None,:] + 1e-12)
+        g_sq_inv = 1.0 / (g_sq + 1e-12)
 
-        # The cosine term: shape [N,N,K]
-        cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
+        # The cosine term: shape [N*N,K]
+        #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
+        rij_dot_g = tf.matmul(rij, tf.transpose(g_vecs))
+        cos_term = tf.cos(rij_dot_g)
+        #cos_term = tf.cos(tf.reduce_sum(rij[:,:,None,:] * g_vecs[None,None,:,:], axis=-1))
 
-        # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/2)/g_sq[k] * cos_term[k]
+        # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/4)/g_sq[k] * cos_term[k]
         # Compute exp outer product and divide by k^2
-        Vij = tf.reduce_sum(exp_ij_by_g_sq * cos_term, axis=-1)  # [N,N]
-
+        Vij = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term, g_sq_inv)  # [N,N]
+        
         # Multiply by prefactor (charges, 4π/V, Coulomb constant e²/4πε0 in eV·Å units) so that E = 1/2 \sum_ij Vij
         Vij *= CONV_FACT * (4.* pi / self.volume)
         
-        return Vij 
+        return tf.reshape(Vij, [self._n_atoms, self._n_atoms]) 
+
     def sawtooth_PE(self):
         #k = n1 b1 + n2 b2 + n3 b3. We will set n1 = n2 = n3
         g = tf.reduce_sum(self.reciprocal_cell, axis=0)
         positions = self._positions
         gr = tf.math.sin(positions * g[None,:])
-        kernel = tf.einsum('ij,j,j->i', gr, self.efield, 1.0 / (g + 1e-12))
+        #kernel = tf.einsum('ij,j,j->i', gr, self.efield, 1.0 / (g + 1e-12))
+        kernel = tf.reduce_sum(gr * self.efield[None,:] * 1.0 / (g[None,:] + 1e-12), axis=1)
         return kernel
 
         

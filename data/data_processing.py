@@ -195,19 +195,21 @@ def process_ase(atoms, evaluate_test,species,atomic_energy,C6_spec,energy_key,fo
             try:
                 energy = atoms.get_potential_energy()
                 forces = atoms.get_forces()
-                charges = atoms.get_charges()
+                charges = atoms.get_initial_charges()
             except:
                 energy = atoms.info[energy_key]
                 forces = atoms.get_array(force_key)
-                charges = atoms.get_charges()
+                charges = atoms.get_initial_charges()
 
             energy -= E0
         else:
             energy = 0.0
             forces = np.zeros((len(atoms.positions), 3))
+            charges = np.zeros(len(atoms.positions))
         # Atomic encodings
         encoder = atoms.get_atomic_numbers()
         atoms.set_array('encoder', encoder)
+        atoms.set_array('charges', charges)
 
 
         # C6 coefficients
@@ -255,7 +257,8 @@ def _process_file(args):
         'j':    j_list,
         'S':    shifts,
         'nneigh':    len(i_list),
-        'total_charge': total_charge
+        'total_charge': total_charge,
+        'charges': atoms.get_array('charges')
     }
 
 def load_structure_data_parallel(files, data_format, species, atomic_energy,

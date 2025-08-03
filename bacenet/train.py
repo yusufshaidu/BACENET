@@ -84,7 +84,9 @@ def default_config():
         'n_lambda': 2,
         'lambda_act': 'tanh',
         'self_correction': False,
-        'start_swa_global_step': 1000000000
+        'start_swa_global_step': 1000000000,
+        'scale_J0': None,
+        'per_atom': False
     }
 
 def estimate_species_chi0_J0(species):
@@ -194,6 +196,10 @@ def create_model(configs):
                 tf.config.experimental.set_memory_growth(gpu, True)
         except RuntimeError as e:
             print("Failed to set memory growth:", e)
+    else:
+        tf.config.set_visible_devices([], 'GPU')
+        tf.config.threading.set_inter_op_parallelism_threads(32)
+        tf.config.threading.set_intra_op_parallelism_threads(32)
 
 
     #Read in model parameters
@@ -205,8 +211,11 @@ def create_model(configs):
         if key not in configs.keys():
             configs[key] = _configs[key]
     species_chi0, species_J0 = estimate_species_chi0_J0(configs['species'])
+    if configs['scale_J0'] is None:
+        configs['scale_J0'] = tf.ones_like(species_chi0)
+
     configs['species_chi0'] = species_chi0
-    configs['species_J0'] = species_J0
+    configs['species_J0'] = species_J0 #* configs['scale_J0']
 
     model_outdir = configs['outdir']
     if not os.path.exists(model_outdir):
