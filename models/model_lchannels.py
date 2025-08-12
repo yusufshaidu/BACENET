@@ -115,13 +115,16 @@ class BACENET(tf.keras.Model):
         self.efield = configs['efield']
         self.accuracy = configs['accuracy']
         self.pbc = configs['pbc']
-        #self.total_charge = configs['total_charge']
+        self.species_nelectrons = configs['species_nelectrons'] if configs['species_nelectrons'] else tf.zeros(self.nspecies, dtype=tf.float32)
         
         #if not self.species_layer_sizes:
         #    self.species_layer_sizes = [self.nspec_embedding]
         self.features = configs['features']
         if self.coulumb:
             self.feature_size += 1
+
+        self.pqeq = configs['pqeq']
+
         self.atomic_nets = Networks(self.feature_size, 
                     layer_sizes, _activations, 
                     l1=self.l1, l2=self.l2,
@@ -701,6 +704,36 @@ class BACENET(tf.keras.Model):
         return tf.reduce_sum(E)
 
     @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                ]
+                 )
+    def compute_coulumb_energy_pqeq(self,charges, atomic_q0, nuclei_charge, 
+                                    E1, E2, Vij_qq, Vij_qz, Vij_zz):
+        '''compute the coulumb energy
+        Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2 + \
+                \sum_i\sum_j Vij_qz qizj/2 + \sum_i\sum_j Vij_zz zizj
+        '''
+        q = charges
+        dq = q - atomic_q0
+        dq2 = dq * dq
+        q_outer = q[:,None] * q[None,:]
+        qz_outer = q[:,None] * nuclei_charge[None,:]
+        zz_outer = nuclei_charge[:,None] * nuclei_charge[None,:]
+        E = E1 * dq + 0.5 * (E2 * dq2 + tf.reduce_sum(
+            Vij_qq * q_outer + Vij_qz * qz_outer + Vij_zz * zz_outer, axis=-1
+            )
+                             )
+        return tf.reduce_sum(E)
+
+    @tf.function(jit_compile=False,
                 input_signature=[(
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -716,7 +749,8 @@ class BACENET(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(), dtype=tf.float32)
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 )])
     def tf_predict_energy_forces(self,x):
         ''' 
@@ -750,6 +784,7 @@ class BACENET(tf.keras.Model):
         J0 = x[12][:nat]
         atomic_q0 = x[13][:nat]
         total_charge = x[14]
+        nuclei_charge = x[15][:nat]
         #positions = tf.Variable(positions)
         #cell = tf.Variable(cell)
         if self.efield is not None:
@@ -815,10 +850,10 @@ class BACENET(tf.keras.Model):
             rij_unit = all_rij / (tf.expand_dims(all_rij_norm + reg, -1))
 
             if self.body_order == 3:
-                #radial_ij_extended = tf.gather(radial_ij[:,:,:(1+self.zeta[0])], self.lxlylz_sum[0], axis=2)
-                #Gi3 = self._to_three_body_terms(rij_unit, radial_ij_extended, first_atom_idx,nat)
-                Gi = self._to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
-                Gi3 = Gi[0]
+                radial_ij_extended = tf.gather(radial_ij[:,:,:(1+self.zeta[0])], self.lxlylz_sum[0], axis=2)
+                Gi3 = self._to_three_body_terms(rij_unit, radial_ij_extended, first_atom_idx,nat)
+                #Gi = self._to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
+                #Gi3 = Gi[0]
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
             elif self.body_order == 4:
                 #Gi3,Gi4 = self._to_four_body_terms(rij_unit, radial_ij, first_atom_idx, nat)
@@ -858,10 +893,10 @@ class BACENET(tf.keras.Model):
                 total_energy = tf.reduce_sum(_atomic_energies[:,0])
             else:
                 total_energy = tf.reduce_sum(_atomic_energies)
-
+            idx = 1
             if self.include_vdw:
                 # C6 has a shape of nat
-                C6 = tf.nn.relu(_atomic_energies[:,1])
+                C6 = tf.nn.relu(_atomic_energies[:,idx])
                 C6_ij = tf.gather(C6,second_atom_idx) * tf.gather(C6,first_atom_idx) # npair,
                 #na from C6_extended in 1xNeigh and C6 in nat
                 C6_ij = tf.sqrt(C6_ij + 1e-16)
@@ -873,28 +908,64 @@ class BACENET(tf.keras.Model):
                 total_energy += evdw
 
                 C6 = tf.pad(C6,[[0,nmax_diff]])
+                idx += 1
             else:
                 C6 = tf.pad(C6,[[0,nmax_diff]])
             if self.coulumb:
-                E1 = _atomic_energies[:,-2]
+                E1 = _atomic_energies[:,idx]
+                idx += 1
+                E2 = _atomic_energies[:,idx]
+                if self.pqeq:
+                    idx += 1
+                    #restrict the distance of the shell from atom to 0.5. We may need to find the optimum one
+                    # sigmoid restrict the range to 1.0 giving a maximum distance of sqrt(3.0)
+                    #shell_disp = (0.01 + tf.math.sigmoid(_atomic_energies[:,idx:])) / tf.sqrt(3.0)  
+                    shell_disp = (0.001 + tf.math.sigmoid(_atomic_energies[:,idx:])) / tf.sqrt(3.0)  
+                else:
+                    shell_disp = tf.zeros((nat, 3)) # not used
+
+
                 E1 += chi0
                 #include atomic electronegativity(chi0) and hardness (J0)
                 _b = tf.identity(E1)
-                E2 = _atomic_energies[:,-1]
                 #E2 = tf.nn.relu(_atomic_energies[:,-1])
                 E2 += J0
                 _b -= E2 * atomic_q0
                 _ewald = ewald(positions, cell, nat,
-                        gaussian_width,self.accuracy, None, self.pbc, _efield)
-                Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
+                        gaussian_width,self.accuracy, None, self.pbc, _efield, shell_disp)
+                if not self.pqeq:
+                    Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
+                else:
+                    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld()
+                    _b += tf.reduce_sum(Vij_qz * nuclei_charge[:,None], axis=-1)
+                    
                 if self.efield is not None:
-                    field_kernel = _ewald.sawtooth_PE()
-                    _b += field_kernel
+                    if not self.pqeq:
+
+                        field_kernel = _ewald.sawtooth_PE()
+                        _b += field_kernel
+                    else:
+                        field_kernel = _ewald.sawtooth_PE_pqeq()
+                        _b += field_kernel[0] # the term coming from qi--nuclei. The electronic contribution does not contribute to change in nuclei charges
+                 
+
+                
                 charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
-                ecoul = self.compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
+                if not self.pqeq:
+                    ecoul = self.compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
+                else:
+                    ecoul = self.compute_coulumb_energy_pqeq(charges, atomic_q0, nuclei_charge,
+                                    E1, E2, Vij, Vij_qz, Vij_zz)
+
                 if self.efield is not None:
-                    efield_energy = tf.reduce_sum(charges * field_kernel)
-                    ecoul += efield_energy
+                    if not self.pqeq:
+                        efield_energy = tf.reduce_sum(charges * field_kernel)
+                        ecoul += efield_energy
+                    else:
+                        #both nuclei and electron
+                        efield_energy = tf.reduce_sum(charges * field_kernel[0] - nuclei_charge * field_kernel[1])
+                        ecoul += efield_energy
+
                 total_energy += ecoul
                 pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
                 charges = tf.concat([charges, pad_rows], axis=0)
@@ -922,9 +993,10 @@ class BACENET(tf.keras.Model):
         #    Zstar = tf.zeros((nat+nmax_diff,9))
         pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
         forces = tf.concat([-forces, pad_rows], axis=0)
+        shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
 
         #forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
-        return [total_energy, forces,C6, charges,stress]
+        return [total_energy, forces,C6, charges,stress,shell_disp]
 
     @tf.function(jit_compile=False,
                 input_signature=[(
@@ -942,7 +1014,8 @@ class BACENET(tf.keras.Model):
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32)
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
                 )])
     def map_fn_parallel(self, elements):
         out_signature = [
@@ -952,6 +1025,7 @@ class BACENET(tf.keras.Model):
             tf.float32,  # C6
             tf.float32,  # charges
             tf.float32,  # stress
+            tf.float32,  # shell_disp
     #        tf.float32  # zstar
         ]
 
@@ -1003,6 +1077,7 @@ class BACENET(tf.keras.Model):
 
         #atomic hardness and electronegativity
         #species_chi0, species_J0 = self.estimate_species_chi0_J0()
+
         if self.coulumb:
             batch_atomic_chi0 = tf.gather(self.species_chi0, species_indices)
             shape = tf.shape(batch_atomic_chi0)
@@ -1014,17 +1089,27 @@ class BACENET(tf.keras.Model):
             batch_atomic_J0 = tf.where(valid_mask,
                                      batch_atomic_J0,
                                      tf.zeros(shape))
+
             #initial charges
             batch_atomic_q0 = tf.gather(tf.cast(self.oxidation_states,tf.float32), species_indices)
             shape = tf.shape(batch_atomic_q0)
             batch_atomic_q0 = tf.where(valid_mask,
                                      batch_atomic_q0,
                                      tf.zeros(shape))
+            ### N electrons per species
+            ###
+            batch_species_nelec = tf.gather(tf.cast(self.species_nelectrons, tf.float32), species_indices)
+            shape = tf.shape(batch_species_nelec)
+            batch_species_nelec = tf.where(valid_mask,
+                                     batch_species_nelec,
+                                     tf.zeros(shape))
+
             batch_total_charge = data['total_charge']
         else:
             batch_atomic_chi0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_atomic_J0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_atomic_q0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
+            batch_species_nelec = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_total_charge = tf.zeros(batch_size, dtype=tf.float32)
 
        #[0-positions,1-species_encoder,2-C6,3-cells,4-natoms,5-i,6-j,7-S,8-neigh, 9-energy,10-forces]
@@ -1048,10 +1133,11 @@ class BACENET(tf.keras.Model):
         elements = (batch_species_encoder,positions, 
                     nmax_diff, batch_nats,cells,C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_pairs, gaussian_width,
-                    batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0,batch_total_charge)
+                    batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0,batch_total_charge, 
+                    batch_species_nelec)
 
         # energies, forces, atomic_features, C6, charges, stress
-        energies, forces, C6, charges, stress = self.map_fn_parallel(elements)
+        energies, forces, C6, charges, stress, shell_disp = self.map_fn_parallel(elements)
         '''
         out_signature = [
             tf.float32,  # energies
@@ -1074,8 +1160,8 @@ class BACENET(tf.keras.Model):
                 #'features':atomic_features,
                 'C6': C6,
                 'charges': charges,
-                'stress': stress
-                #'Zstar':Zstar
+                'stress': stress,
+                'shell_disp':shell_disp
                 }
         return outs
 

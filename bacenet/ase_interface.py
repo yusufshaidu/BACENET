@@ -26,7 +26,7 @@ from pathlib import Path
 import os
 
 class bacenet_Calculator(Calculator):
-    implemented_properties = ['energy', 'forces', 'stress','charges', 'zstar']
+    implemented_properties = ['energy', 'forces', 'stress','charges']
     #implemented_properties = ['energy', 'forces']
 #    ignored_changes = {'pbc'}
 #    discard_results_on_any_change = True
@@ -148,6 +148,7 @@ class bacenet_Calculator(Calculator):
         forces = tf.squeeze(outs['forces']).numpy()
         stress = tf.squeeze(outs['stress']).numpy()
         charges = tf.squeeze(outs['charges']).numpy()
+        #print(tf.squeeze(outs['shell_disp']).numpy())
         #zstar = tf.squeeze(outs['Zstar']).numpy()
         #atoms.set_array('zstar',zstar)
 

@@ -14,7 +14,7 @@ class ewald:
     A pyth on class to implement ewasld sum with gaussian charge distribution
     '''
     def __init__(self, positions, cell, n_atoms, gaussian_width,
-                 accuracy, gmax,pbc=False,efield=None): 
+                 accuracy, gmax,pbc=False,efield=None, shell_displacement=None):
         '''
            positions: atomic positions in Angstrom
            cell: cell dimension
@@ -26,8 +26,11 @@ class ewald:
         self._n_atoms = tf.cast(n_atoms, tf.int32)
         self._positions = tf.convert_to_tensor(positions, dtype=tf.float32)
         self._accuracy = accuracy
+        self._shell_displacement = tf.convert_to_tensor(shell_displacement, dtype=tf.float32)
+
         self._gaussian_width = tf.convert_to_tensor(gaussian_width,dtype=tf.float32) # this could be learnable, maybe!
         self._sqrt_pi = tf.sqrt(pi)
+        
 
         self.volume = tf.abs(tf.linalg.det(cell))
 
@@ -96,13 +99,11 @@ class ewald:
     def estimate_gmax(self,b_norm, sigma_min):
         gmax = 1.0
         result = 1e2
-        # convergence are based on energy: ~ 2 pi / volume * sum_G sum_j 1/G^2 exp(-G^2*(alpha_i^2 + alpha_j^2)/4) cos(G.rij)
+        # convergence are based on forces: ~ 1 / volume * sum_G sum_j G_alpha/G^2 exp(-G^2*(alpha_i^2 + alpha_j^2)/4) sin(G.rij)
         #energy goes as 1/G^2 but note that the forces norm goes as 1/G
         c = lambda gmax, result: tf.greater(result, self._accuracy)
         b = lambda gmax, result: (gmax + 1.0, 
-                                  2.* pi / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.) / (gmax**2*b_norm**2))
-                                  #2.* pi / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.))
-                                  #tf.exp(-gmax**2*sigma_min**2/2.)/gmax**2*2.*pi/self.volume)
+                                  1.0 / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.) / (gmax**2*b_norm**2))
         return tf.while_loop(c, b, [gmax, result])[0]
     
     @tf.function
@@ -156,7 +157,6 @@ class ewald:
             shape_invariants=[tf.TensorShape([]), tf.TensorShape([None])]
         )
         return Vij_flat  # later reshape to [N, N]
-
 
     @tf.function
     def recip_space_term(self): 
@@ -279,13 +279,166 @@ class ewald:
         
         return tf.reshape(Vij, [self._n_atoms, self._n_atoms]) 
 
+    @tf.function
+    def recip_space_term_with_shelld(self):
+        '''
+        calculates the interaction contribution to the electrostatic energy
+        '''
+
+        #save the position of the shell
+        positions_plus_d = self._positions + self._shell_displacement
+        #compute the norm of all distances
+        # the force on k due to atoms j is
+
+        # rk-ri for core-core, shell-core and shell-shell
+
+        
+        sigma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width**2
+        sigma_ij2 = tf.reshape(sigma_ij2, [-1])
+        
+
+        #gmax = self._gmax
+
+        # Build integer index grid for k-vectors
+        # Estimate index ranges for each dimension
+        #b1_norm,b2_norm,b3_norm = tf.linalg.norm(self.reciprocal_cell, axis=-1)
+        b_norm = tf.linalg.norm(self.reciprocal_cell, axis=-1)
+        b1_norm = b_norm[0]
+        b2_norm = b_norm[1]
+        b3_norm = b_norm[2]
+        sigma_min = tf.reduce_min(self._gaussian_width)
+        gmax1 = self.estimate_gmax(b1_norm, sigma_min)
+        gmax1 *= b1_norm 
+        gmax2 = self.estimate_gmax(b2_norm, sigma_min)
+        gmax2 *= b2_norm 
+        gmax3 = self.estimate_gmax(b3_norm, sigma_min)
+        gmax3 *= b3_norm 
+        gmax = tf.reduce_max([gmax1,gmax2,gmax3])
+        #gmax = tf.reduce_max([gmax1,gmax2])
+
+
+        nmax1 = tf.cast(tf.math.floor(gmax / b1_norm), tf.int32)
+        nmax2 = tf.cast(tf.math.floor(gmax / b2_norm), tf.int32)
+        nmax3 = tf.cast(tf.math.floor(gmax / b3_norm), tf.int32)
+        #'''
+        n1 = tf.range(-nmax1, nmax1 + 1, dtype=tf.int32)
+        n2 = tf.range(-nmax2, nmax2 + 1, dtype=tf.int32)
+        n3 = tf.range(-nmax3, nmax3 + 1, dtype=tf.int32)
+
+        # Meshgrid of indices
+        n1g, n2g, n3g = tf.meshgrid(n1, n2, n3, indexing='ij')
+        replicas = tf.stack([tf.reshape(n1g, [-1]),
+                            tf.reshape(n2g, [-1]),
+                            tf.reshape(n3g, [-1])], axis=1)  # [M,3]
+        replicas = tf.cast(replicas, tf.float32)
+        g_all = tf.matmul(replicas, self.reciprocal_cell)  # [M,3] = n · recip_cell (each row n * recip_cell)
+        nonzero = tf.reduce_any(tf.not_equal(replicas, 0), axis=1)
+        # Mask: exclude (0,0,0) and enforce |k|<=kmax
+        g_vecs = tf.boolean_mask(g_all, nonzero)
+        g_norm = tf.linalg.norm(g_vecs, axis=1)
+        
+        #mask = tf.logical_and(g_norm <= gmax, nonzero)
+        mask = g_norm <= gmax
+        g_vecs = tf.boolean_mask(g_vecs, mask)  # [K,3]
+        g_norm = tf.boolean_mask(g_norm, mask) #[K,]
+        #'''
+        #g_vecs, g_norm = self.generate_g_vectors(gmax, nmax1, nmax2, nmax3)
+        # keep g where first nonzero component is positive,
+        # tie-breakers: if g[0]==0, require g[1]>0; if g[0]==g[1]==0, require g[2] >= 0
+        g0, g1, g2 = tf.unstack(g_vecs, axis=1)
+        mask = (
+            (g0 > 0) |
+            ((g0 == 0) & (g1 > 0)) |
+            ((g0 == 0) & (g1 == 0) & (g2 >= 0))
+        )
+        g_vecs = tf.boolean_mask(g_vecs, mask)      # [K_plus, 3]
+        g_norm = tf.boolean_mask(g_norm, mask)  # [K_plus]
+        g_sq = g_norm * g_norm  # [K]
+
+        # Prepare factors for summation
+        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
+        # shape [K, N]
+        #g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/4.0, g_sq) # [N*N,K]
+        #chunk_size = 128
+        #Vij = self.accumulate_over_g(rij, sigma_ij2, g_vecs, g_sq, chunk_size)
+        '''
+        Vij = tf.zeros(self._n_atoms * self._n_atoms, dtype=tf.float32)
+        #for k in tf.range(tf.shape(g_sq)[0]):
+        for k in tf.range(200):
+            g =  g_sq[k]
+            g_v = g_vecs[k,:]
+            g2_gamma2 = sigma_ij2 / 4.0 * g # [N*N,K]
+            exp_ij = tf.exp(-g2_gamma2)
+            exp_ij_by_g_sq = exp_ij * 1.0 / (g + 1e-12)
+
+            # The cosine term: shape [N*N,K]
+            cos_term = tf.cos(tf.einsum('ij, j->i', rij, g_v))
+            #rij_dot_g = tf.squeeze(tf.matmul(rij, g_v[:,None]))
+            #cos_term = tf.cos(rij_dot_g)
+            #cos_term = tf.cos(tf.reduce_sum(rij[:,:,None,:] * g_vecs[None,None,:,:], axis=-1))
+
+            # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/4)/g_sq[k] * cos_term[k]
+            # Compute exp outer product and divide by k^2
+            Vij += exp_ij_by_g_sq * cos_term  # [N*N]
+        ''' 
+
+        g2_gamma2 = 0.25 * tf.einsum('i,j->ij',sigma_ij2, g_sq) # [N*N,K]
+        exp_ij = tf.exp(-g2_gamma2)
+        #exp_ij_by_g_sq = exp_ij * 1.0 / (g_sq[None,:] + 1e-12)
+        g_sq_inv = 1.0 / (g_sq + 1e-12)
+
+        # The cosine term: shape [N*N,K]
+        #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
+        g_vecs_transpose = tf.transpose(g_vecs)
+
+        rij = tf.reshape(self._positions[:,None,:] - self._positions[None,:,:], [-1,3])
+        rij_dot_g = tf.matmul(rij, g_vecs_transpose)
+        cos_term = tf.cos(rij_dot_g)
+        Vij_qq = 2.0 * exp_ij * cos_term * g_sq_inv[None,:]  # [N*N]
+
+
+        rij = tf.reshape(positions_plus_d[:,None,:] - self._positions[None,:,:], [-1,3])
+        rij_dot_g = tf.matmul(rij, g_vecs_transpose)
+        cos_term = tf.cos(rij_dot_g)
+        _Vij_dj =  exp_ij * cos_term * g_sq_inv[None,:]
+        Vij_qz = Vij_qq - 2.0 * _Vij_dj  # [N*N]
+
+        rij = tf.reshape(positions_plus_d[:,None,:] - positions_plus_d[None,:,:], [-1,3])
+        rij_dot_g = tf.matmul(rij, g_vecs_transpose)
+        cos_term = tf.cos(rij_dot_g)
+        Vij_zz = 2.0 * (Vij_qq / 2.0 - 2.0 * _Vij_dj + exp_ij * cos_term * g_sq_inv[None,:])  # [N*N]
+
+        #cos_term = tf.cos(tf.reduce_sum(rij[:,:,None,:] * g_vecs[None,None,:,:], axis=-1))
+
+        # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/4)/g_sq[k] * cos_term[k]
+        # Compute exp outer product and divide by k^2
+        #Vij_qq = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term, g_sq_inv)  # [N*N]
+        #Vij_qz = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term - cos_plus_dj_term, g_sq_inv)  # [N*N]
+        #Vij_zz = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term - 2 * cos_plus_dj_term + cos_plus_didj_term, g_sq_inv)  # [N*N]
+        #divide Vij_qq by 2 because of the factor of 2 multiplied above
+
+        # Multiply by prefactor (charges, 4pi/V, Coulomb constant e^2/4piepsilon_0 in eV-Å units) so that E = 1/2 \sum_ij Vij
+        conversion_fact = CONV_FACT * (4.* pi / self.volume)
+        Vij_qq = tf.reshape(tf.reduce_sum(Vij_qq, axis=1) * conversion_fact, [self._n_atoms, self._n_atoms])
+        Vij_qz = tf.reshape(tf.reduce_sum(Vij_qz, axis=1) * conversion_fact, [self._n_atoms, self._n_atoms])
+        Vij_zz = tf.reshape(tf.reduce_sum(Vij_zz, axis=1) * conversion_fact, [self._n_atoms, self._n_atoms])
+        
+        return [Vij_qq, Vij_qz, Vij_zz]
     def sawtooth_PE(self):
         #k = n1 b1 + n2 b2 + n3 b3. We will set n1 = n2 = n3
         g = tf.reduce_sum(self.reciprocal_cell, axis=0)
         positions = self._positions
-        gr = tf.math.sin(positions * g[None,:])
-        #kernel = tf.einsum('ij,j,j->i', gr, self.efield, 1.0 / (g + 1e-12))
-        kernel = tf.reduce_sum(gr * self.efield[None,:] * 1.0 / (g[None,:] + 1e-12), axis=1)
+        cos_gr = tf.math.cos(positions * g[None,:])
+
+        kernel = tf.reduce_sum(-cos_gr * self.efield[None,:] * positions , axis=1)
         return kernel
 
-        
+    def sawtooth_PE_pqeq(self):
+        #k = n1 b1 + n2 b2 + n3 b3. We will set n1 = n2 = n3
+        g = tf.reduce_sum(self.reciprocal_cell, axis=0)
+        positions = self._positions
+        cos_gr = tf.math.cos(positions * g[None,:])
+
+        kernel_q = tf.reduce_sum(-cos_gr * self.efield[None,:] * positions , axis=1)
+        kernel_e = tf.reduce_sum(-cos_gr * self.efield[None,:] * self._shell_displacement , axis=1)
+        return kernel_q, kernel_e

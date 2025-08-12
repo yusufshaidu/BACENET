@@ -86,7 +86,9 @@ def default_config():
         'self_correction': False,
         'start_swa_global_step': 1000000000,
         'scale_J0': None,
-        'per_atom': False
+        'per_atom': False,
+        'pqeq': False,
+        'species_nelectrons': None
     }
 
 def estimate_species_chi0_J0(species):
@@ -118,40 +120,52 @@ def get_compiled_model(configs,optimizer,example_input,model_version='linear'):
     print(_model.summary())
     return _model
 
-class CustomCallback(tf.keras.callbacks.Callback):
-    def on_train_begin(self, logs=None):
-        keys = list(logs.keys())
-        print("Starting training; got log keys: {}".format(keys))
-
-    def on_train_end(self, logs=None):
-        keys = list(logs.keys())
-        print("Stop training; got log keys: {}".format(keys))
-
-    def on_epoch_begin(self, epoch, logs=None):
-        keys = list(logs.keys())
-        #self.model._training_state = None
-#        self.model._training_state["epoch"] = epoch
-        print("Start epoch {} of training; got log keys: {}".format(epoch, keys))
-
-    def on_epoch_end(self, epoch, logs=None):
-        keys = list(logs.keys())
-        print("End epoch {} of training; got log keys: {}".format(epoch, keys))
-
 
 #This is an example from tensorflow not currently used
 #TODO
-def make_or_restore_model(model_outdir,configs,optimizer):
+def make_or_restore_model(model_outdir,configs,optimizer,
+                          example_input,model_version='linear'):
     # Either restore the latest model, or create a fresh one
     # if there is no checkpoint available.
+
     checkpoint_dir = model_outdir + "/models/"
-    checkpoints = [checkpoint_dir + name for name in os.listdir(checkpoint_dir)]
+    checkpoints = [checkpoint_dir + name for name in os.listdir(checkpoint_dir) if name.endswith('index')]
     if checkpoints:
         latest_checkpoint = max(checkpoints, key=os.path.getctime)
+        latest_checkpoint = latest_checkpoint.split('.index')[0]
+        last_ckpt_idx = int(latest_checkpoint.split('-')[-1].split('.')[0])
         print("Restoring from", latest_checkpoint)
-        return tf.keras.models.load_model(latest_checkpoint,custom_objects=None)
+        if model_version != 'linear':
+            _model = model_lchannels.BACENET(configs=configs)
+        else:
+            _model = model.BACENET(configs=configs)
+
+        outs = _model(example_input, training=False)
+        #checkpoint = tf.train.Checkpoint(model=_model, optimizer=optimizer)
+        #latest_ckpt = tf.train.latest_checkpoint(checkpoint_dir)
+        #if latest_ckpt:
+        #    checkpoint.restore(latest_ckpt).expect_partial()
+
+        #load and set weights manually
+        _model.load_weights(latest_checkpoint).expect_partial()
+        #_model.load_weights(latest_ckpt).expect_partial()
+        weights = _model.get_weights()
+        #weights = checkpoint.get_weights()
+        _model.set_weights(weights)
+        _model.compile(optimizer=optimizer,
+               loss=help_fn.quad_loss,
+               loss_f=help_fn.force_loss)
+
+        print(_model.summary())
+        return _model, last_ckpt_idx
+    else:
+        last_ckpt_idx = 0
     print("Creating a new model")
-    return get_compiled_model(configs,optimizer)
-def opt(configs, lr_schedule):
+    
+    return get_compiled_model(configs,optimizer,example_input,model_version=model_version), last_ckpt_idx
+
+
+def opt(configs, lr_schedule, init_step):
     if configs['opt_method'] in ['adamW', 'AdamW', 'adamw']:
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
@@ -184,10 +198,31 @@ def opt(configs, lr_schedule):
              name='adam')
 
     #optimizer.lr = optimizer.learning_rate
+
+    optimizer.iterations.assign(init_step)
     return optimizer
+class CustomCallback(tf.keras.callbacks.Callback):
+    def on_train_begin(self, logs=None):
+        keys = list(logs.keys())
+        print("Starting training; got log keys: {}".format(keys))
+
+    def on_train_end(self, logs=None):
+        keys = list(logs.keys())
+        print("Stop training; got log keys: {}".format(keys))
+
+    def on_epoch_begin(self, epoch, logs=None):
+        keys = list(logs.keys())
+        #self.model._training_state = None
+#        self.model._training_state["epoch"] = epoch
+        print("Start epoch {} of training; got log keys: {}".format(epoch, keys))
+
+    def on_epoch_end(self, epoch, logs=None):
+        keys = list(logs.keys())
+        print("End epoch {} of training; got log keys: {}".format(epoch, keys))
+
 
 def create_model(configs):
-
+    '''
     # Set memory growth before any GPU work is done
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
@@ -198,10 +233,10 @@ def create_model(configs):
             print("Failed to set memory growth:", e)
     else:
         tf.config.set_visible_devices([], 'GPU')
-        tf.config.threading.set_inter_op_parallelism_threads(32)
-        tf.config.threading.set_intra_op_parallelism_threads(32)
+        tf.config.threading.set_inter_op_parallelism_threads(16)
+        tf.config.threading.set_intra_op_parallelism_threads(16)
 
-
+    '''
     #Read in model parameters
     #I am parsing yaml files with all the parameters
     #
@@ -264,8 +299,13 @@ def create_model(configs):
                                                      verbose=1,
                                                     save_freq=configs['save_freq']),
                    tf.keras.callbacks.TensorBoard(model_outdir, histogram_freq=1,
-                                                  update_freq='epoch'),
+                                                  update_freq=configs['save_freq']),
                    tf.keras.callbacks.CSVLogger(model_outdir+"/metrics.dat", separator=" ", append=True)]
+
+    #this callback seems to slowdown training by a lot
+    #backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
+    #                                                      delete_checkpoint=False, save_freq=configs['save_freq'])
+
                  #CustomCallback()]
     #if not configs['fixed_lr']:
     #    callbacks.append(cb_ReduceLROnPlateau)
@@ -305,8 +345,7 @@ def create_model(configs):
               swa_lr2=configs['swa_lr2'],
               swa_freq=5,
               verbose=1)
-        callbacks.append(swa)
-#    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup", delete_checkpoint=False)
+#        callbacks.append(swa)
 
     assert len(configs['activations']) == len(configs['layer_sizes']),'the number of activations must be same as the number of layer'
     if configs['activations'][-1] != 'linear':
@@ -377,25 +416,36 @@ def create_model(configs):
         configs['start_swa_global_step'] = start_swa_step
 
     configs['species_identity'] = species_identity
-    backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
-                                                          delete_checkpoint=False)
-    #    callbacks.append(backupandrestore)
 
     #with strategy.scope():
-    model = get_compiled_model(configs,
-                                   opt(configs, lr_schedule),list(train_data)[0],configs['model_version'])
-    model.save_weights(checkpoint_path.format(epoch=0))
-    #model.save(checkpoint_path.format(epoch=0))
+    #model = get_compiled_model(configs,
+    #                               opt(configs, lr_schedule),list(train_data)[0],configs['model_version'])
+    #create or restore model
+    checkpoint_dir = model_outdir + "/models/"
+    checkpoints = [checkpoint_dir + name for name in os.listdir(checkpoint_dir) if name.endswith('index')]
+    if checkpoints:
+        latest_checkpoint = max(checkpoints, key=os.path.getctime)
+        latest_checkpoint = latest_checkpoint.split('.index')[0]
+        last_ckpt_idx = int(latest_checkpoint.split('-')[-1].split('.')[0])
+        init_step = (last_ckpt_idx-1) * nsamples // global_batch_size
+    else:
+        init_step = 0
+    model, initial_epoch = make_or_restore_model(model_outdir,configs,opt(configs, lr_schedule, init_step),
+                          list(train_data)[0],model_version=configs['model_version'])
+    if initial_epoch == 0:
+        model.save_weights(checkpoint_path.format(epoch=0))
+        #model.save(checkpoint_path.format(epoch=0))
     
     try:
         model.fit(train_data,
              epochs=configs['num_epochs'],
              batch_size=global_batch_size,
              #steps_per_epoch = nsamples // global_batch_size, 
-             #initial_epoch = last_epoch,
+             initial_epoch = initial_epoch,
              validation_data=test_data,
              validation_freq=10,
-             callbacks=[callbacks, backupandrestore])
+             callbacks=callbacks)
+             #callbacks=[callbacks, backupandrestore])
     except:
         pass
 
@@ -403,7 +453,7 @@ def create_model(configs):
              epochs=configs['num_epochs'],
              batch_size=global_batch_size,
              #steps_per_epoch=nsamples // global_batch_size, 
-             #initial_epoch = last_epoch,
+             initial_epoch = initial_epoch,
              validation_data=test_data,
              validation_freq=10,
              callbacks=callbacks)
