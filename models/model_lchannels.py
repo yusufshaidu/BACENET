@@ -30,8 +30,8 @@ class BACENET(tf.keras.Model):
         #self._training_state = {}    # allow Keras to populate counters here
         self._training_state = None  # mutable mapping
         self.is_training = configs['is_training']
-
-    
+        self.starting_step = configs['initial_global_step']
+         
         self.species_layer_sizes = configs['species_layer_sizes']
         layer_sizes = configs['layer_sizes']
         _activations = configs['activations']
@@ -69,14 +69,8 @@ class BACENET(tf.keras.Model):
         self.species_identity = configs['species_identity'] # atomic number
         self.nspecies = len(self.species_identity)
         self.species = configs['species']
-        # this should be the zeros of the tayloe expansion
-        self.oxidation_states = configs['oxidation_states']
-        if self.oxidation_states is None:
-            self.oxidation_states = [0.0 for i in self.species]
 
-        self.species_chi0 = configs['species_chi0']
-        self.species_J0 = configs['species_J0'] * configs['scale_J0']
-
+        
         self.nspec_embedding = self.species_layer_sizes[-1]
         if self.species_correlation == 'tensor':
             self.spec_size = self.nspec_embedding*self.nspec_embedding
@@ -103,7 +97,7 @@ class BACENET(tf.keras.Model):
         self.learn_radial = configs['learn_radial']
 
 
-        #dispersion parameters
+        #dispersion parameters and electrostatics
         self.include_vdw = configs['include_vdw']
         self.rmin_u = configs['rmin_u']
         self.rmax_u = configs['rmax_u']
@@ -115,13 +109,31 @@ class BACENET(tf.keras.Model):
         self.efield = configs['efield']
         self.accuracy = configs['accuracy']
         self.pbc = configs['pbc']
-        self.species_nelectrons = configs['species_nelectrons'] if configs['species_nelectrons'] else tf.zeros(self.nspecies, dtype=tf.float32)
-        
+        #self.species_nelectrons = configs['species_nelectrons'] if configs['species_nelectrons'] else tf.zeros(self.nspecies, dtype=tf.float32)
+        self.species_nelectrons =  tf.constant([element(sym).nvalence() for sym in self.species])
+        # this should be the zeros of the tayloe expansion
+        self.oxidation_states = configs['oxidation_states']
+        self.learn_oxidation_states = True
+        self.gaussian_width_scale = configs['gaussian_width_scale']
+        mse_os = 0.0 # this is not a tensor object
+        if self.oxidation_states:
+            for i, oxs in enumerate(self.oxidation_states):
+                mse_os += oxs * oxs
+
+        if self.oxidation_states is None or mse_os < 1e-6 :
+            self.oxidation_states = tf.constant([0.0 for i in self.species], tf.float32)
+            self.learn_oxidation_states = False
+
+        self.species_chi0 = configs['species_chi0'] * configs['scale_chi0']
+        self.species_J0 = configs['species_J0'] * configs['scale_J0']
+
+        self._qcost = 0.1 
+
         #if not self.species_layer_sizes:
         #    self.species_layer_sizes = [self.nspec_embedding]
         self.features = configs['features']
-        if self.coulumb:
-            self.feature_size += 1
+        #if self.coulumb:
+        #    self.feature_size += 1
 
         self.pqeq = configs['pqeq']
 
@@ -139,8 +151,10 @@ class BACENET(tf.keras.Model):
         #species_activations = ['silu' for x in self.species_layer_sizes[:-1]]
         species_activations = ['tanh' for x in self.species_layer_sizes[:-1]]
         species_activations.append('linear')
-
-        self.species_nets = Networks(self.nelement, 
+        nelements = self.nelement
+        if self.coulumb:
+            nelements += 1
+        self.species_nets = Networks(nelements, 
                 self.species_layer_sizes, 
                 species_activations, prefix='species_encoder')
 
@@ -166,6 +180,11 @@ class BACENET(tf.keras.Model):
                                          #l1=self.l1, l2=self.l2
                                  #bias_initializer='zeros',
                                  prefix='radial-functions')
+
+        self.gaussian_width_net = Networks(self.nelement, # pass one-hot encoder
+                [64,len(self.species)],
+                ['silu', 'sigmoid'], prefix='species_gaussian_width')
+
         #lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta)
         self.lxlylz = []
         self.lxlylz_sum = []
@@ -181,7 +200,8 @@ class BACENET(tf.keras.Model):
 
         #self.lxlylz = tf.convert_to_tensor(lxlylz, dtype=tf.float32)
         #self.lxlylz_sum = tf.convert_to_tensor(lxlylz_sum, tf.int32)
-        #self.fact_norm = tf.convert_to_tensor(fact_norm, dtype=tf.float32)
+        #self.fact_norm = tf.convert_to_te
+        #self.species_gaussian_width = self.nsor(fact_norm, dtype=tf.float32)
         #initializer for lambda
 
     @tf.function
@@ -639,12 +659,30 @@ class BACENET(tf.keras.Model):
         Aij = tf.pad(Vij, [[0,1],[0,1]], constant_values = 1.0)
         Aij += tf.linalg.diag(E2)
         '''
-
+       
         N = tf.shape(E2)
         E2_padded = tf.concat([E2, [-1.0]], axis=0)  # shape [N+1]
         Aij = tf.concat([Vij, tf.ones(N,tf.float32)[:,None]], 1)
         Aij = tf.concat([Aij, tf.ones(N+1,tf.float32)[None,:]], 0)
         Aij += tf.linalg.diag(E2_padded)
+        '''
+        # changing E2 to E2 * fc
+        # Top-left block
+        top_left = Vij + E2  # shape [N, N]
+
+        # Column of ones for the last column (except bottom-right = 0)
+        last_col = tf.concat([tf.ones((N,), dtype=tf.float32), [0.0]], axis=0)[:, None]
+
+        # Row of ones for the last row (except bottom-right = 0)
+        last_row = tf.concat([tf.ones((N,), dtype=tf.float32), [0.0]], axis=0)[None, :]
+
+        # Assemble full (N+1)x(N+1) matrix
+        Aij = tf.concat([
+            tf.concat([top_left, last_col[:N]], axis=1),
+            last_row
+        ], axis=0)
+
+        '''
 
         #Aij = 0.5 * (Aij + tf.transpose(Aij))
 
@@ -658,8 +696,10 @@ class BACENET(tf.keras.Model):
         #E1 = tf.pad(-E1, [[0,1]], constant_values=total_charge)
         #total charge should be read from structures
         E1_padded = tf.concat([-E1, [total_charge]], axis=0)
+        #since we are fitting dq rather than q, total charges must be replaced with zero
+        #E1_padded = tf.concat([-E1, [0.0]], axis=0)
         #atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
-        atomic_q0 = tf.concat([atomic_q0, [0.0]], axis=0)
+        #atomic_q0 = tf.concat([atomic_q0, [0.0]], axis=0)
         
         charges = tf.linalg.solve(Aij, E1_padded[:,None])
         '''
@@ -721,19 +761,25 @@ class BACENET(tf.keras.Model):
         Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2 + \
                 \sum_i\sum_j Vij_qz qizj/2 + \sum_i\sum_j Vij_zz zizj
         '''
-        q = charges
-        dq = q - atomic_q0
+        #q = charges
+        dq = charges - atomic_q0
         dq2 = dq * dq
-        q_outer = q[:,None] * q[None,:]
-        qz_outer = q[:,None] * nuclei_charge[None,:]
+        q_outer = charges[:,None] * charges[None,:]
+        qz_outer = charges[:,None] * nuclei_charge[None,:]
         zz_outer = nuclei_charge[:,None] * nuclei_charge[None,:]
-        E = E1 * dq + 0.5 * (E2 * dq2 + tf.reduce_sum(
+        #if self.learn_oxidation_states:
+        #    E = E1 * tf.abs(dq)
+        #else:
+        E = E1 * dq
+
+        E += 0.5 * (E2 * dq2 + tf.reduce_sum(
             Vij_qq * q_outer + Vij_qz * qz_outer + Vij_zz * zz_outer, axis=-1
             )
                              )
         return tf.reduce_sum(E)
 
     @tf.function(jit_compile=False,
+                 reduce_retracing=True,
                 input_signature=[(
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -806,6 +852,19 @@ class BACENET(tf.keras.Model):
                     tf.tensordot(shift_vector,cell,axes=1)
 
             all_rij_norm = tf.linalg.norm(all_rij, axis=-1) #npair
+            '''
+            #damping function for atomic chi and J
+            fc_ij = help_fn.tf_fcut_rbf(all_rij_norm,rc=1.2)
+            fc_ij = tf.scatter_nd(
+                indices=tf.stack([first_atom_idx, second_atom_idx], axis=1),
+                updates=fc_ij,
+                shape=(nat, nat)
+            )
+            # the diagonal elements are currently zero since they are never present in the neighbor list
+            #instead, they should be 1.0
+            fc_ij += tf.eye(nat, dtype=tf.float32)
+            #fc_ij = tf.eye(nat, dtype=tf.float32)
+            '''
             reg = 1e-12
             #all_rij_norm = tf.sqrt(tf.reduce_sum(all_rij * all_rij , axis=-1) + reg) #npair
             species_encoder_i = tf.gather(species_encoder,first_atom_idx)
@@ -869,15 +928,15 @@ class BACENET(tf.keras.Model):
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi4], axis=1)
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi5], axis=1)
-            elif self.body_order == 40:
-                Gi3,Gi4 = self._to_four_body_terms_general(rij_unit, radial_ij, first_atom_idx, nat)
-                atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
-                atomic_descriptors = tf.concat([atomic_descriptors, Gi4], axis=1)
+           # elif self.body_order == 40:
+           #     Gi3,Gi4 = self._to_four_body_terms_general(rij_unit, radial_ij, first_atom_idx, nat)
+           #     atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
+           #     atomic_descriptors = tf.concat([atomic_descriptors, Gi4], axis=1)
 
             #the descriptors can be scaled
             #append initial atomic charges
-            if self.coulumb:
-                atomic_descriptors = tf.concat([atomic_descriptors, atomic_q0[:,None]], axis=1)
+            #if self.coulumb:
+                #atomic_descriptors = tf.concat([atomic_descriptors, atomic_q0[:,None]], axis=1)
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
             #feature_size = Nrad * nembedding + Nrad, 2*zeta+1, nembedding
             #if self._normalize:
@@ -912,50 +971,100 @@ class BACENET(tf.keras.Model):
             else:
                 C6 = tf.pad(C6,[[0,nmax_diff]])
             if self.coulumb:
-                E1 = _atomic_energies[:,idx]
+                #E1 = tf.nn.silu(_atomic_energies[:,idx])
+                E1 = _atomic_energies[:,idx] 
                 idx += 1
-                E2 = _atomic_energies[:,idx]
+                #E2 = tf.nn.silu(_atomic_energies[:,idx])
+                E2 = _atomic_energies[:,idx] # can modulate the diagonal elements either ways
                 if self.pqeq:
                     idx += 1
-                    #restrict the distance of the shell from atom to 0.5. We may need to find the optimum one
+                    #restrict the distance of the shell from atom to 0.25 We may need to find the optimum one
                     # sigmoid restrict the range to 1.0 giving a maximum distance of sqrt(3.0)
                     #shell_disp = (0.01 + tf.math.sigmoid(_atomic_energies[:,idx:])) / tf.sqrt(3.0)  
-                    shell_disp = (0.001 + tf.math.sigmoid(_atomic_energies[:,idx:])) / tf.sqrt(3.0)  
+                    #dmin = 0.01
+                    #dmax = 0.05
+                    #dd = dmax - dmin
+                    #shell_disp = (dmin + dd * tf.math.sigmoid(_atomic_energies[:,idx:])) 
+                    shell_disp = _atomic_energies[:,idx:idx+3]
+                    shell_norm = tf.linalg.norm(shell_disp, axis=-1) + 1e-12
+                    shell_disp_direction = shell_disp / shell_norm[:,None]
+                    shell_disp = shell_disp_direction * tf.math.sigmoid(shell_norm)[:, None] * 0.2 # smallest shell disp = 0.02 and max=0.2 
+                    # now relax the energy with respect to the shell displacements
+                    E_di = (1.0 + tf.math.sigmoid(_atomic_energies[:,idx+3])) * 10.0   # up to 20 eV/A^2
                 else:
                     shell_disp = tf.zeros((nat, 3)) # not used
 
-
-                E1 += chi0
                 #include atomic electronegativity(chi0) and hardness (J0)
-                _b = tf.identity(E1)
-                #E2 = tf.nn.relu(_atomic_energies[:,-1])
+                E1 += chi0
                 E2 += J0
+                #impose contrain that E1 and E2 go to zero if rij -> inf
+                #Note that they are originally zero beyong cutoff before adding J0 and chi0
+                #E1 = tf.reduce_sum(fc_ij * E1[None, :], axis=-1) #\sum_j fij * Ej
+                #E2 = tf.reduce_sum(fc_ij * E2[None,:], axis=-1) #\sum_j fij * Ej
+
+
+                _b = tf.identity(E1)
+                #'''
+                # Ej *(1+delta_ij) + Ei
+                #Eij = 0.5*(E2[None,:] + E2[:,None]) #+ tf.eye(nat, dtype=tf.float32) * E2
+                #E2ij = Eij * fc_ij
+                #_b -= tf.reduce_sum(E2ij * atomic_q0[:,None], axis=-1) # contribution from q0 in the q-q0 terms
+                #'''
                 _b -= E2 * atomic_q0
+
                 _ewald = ewald(positions, cell, nat,
-                        gaussian_width,self.accuracy, None, self.pbc, _efield, shell_disp)
+                        gaussian_width,self.accuracy, 
+                               None, self.pbc, _efield,
+                               self.gaussian_width_scale 
+                               )
                 if not self.pqeq:
                     Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
-                else:
-                    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld()
-                    _b += tf.reduce_sum(Vij_qz * nuclei_charge[:,None], axis=-1)
-                    
-                if self.efield is not None:
-                    if not self.pqeq:
-
+                    _b += tf.reduce_sum(Vij * atomic_q0[None,:], axis=-1)
+                    if self.efield is not None:
                         field_kernel = _ewald.sawtooth_PE()
                         _b += field_kernel
-                    else:
-                        field_kernel = _ewald.sawtooth_PE_pqeq()
-                        _b += field_kernel[0] # the term coming from qi--nuclei. The electronic contribution does not contribute to change in nuclei charges
-                 
+                else:
+                                        
 
-                
-                charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+                    '''                
+                    shell_disp = tf.ones_like(positions) * 0.02
+                    #E_di = tf.ones_like(positions) * 5
+                    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld(shell_disp)
+                    _b += 0.5 * tf.reduce_sum(Vij_qz * nuclei_charge[None, :], axis=-1)
+                    _b += tf.reduce_sum(Vij * atomic_q0[None,:], axis=-1)
+                    charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+                    shell_disp = _ewald.compute_shell_disp_linear(nuclei_charge, charges, E_di)
+                    #shell_disp = tf.clip_by_value(shell_disp, 0.01, 0.1)
+                    
+                    '''
+                    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld(shell_disp)
+                    _b += 0.5 * tf.reduce_sum(Vij_qz * nuclei_charge[None, :], axis=-1)
+                    #_b += tf.reduce_sum(Vij * atomic_q0[None,:], axis=-1) # useful for learning delat_q
+                    charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+
+                    '''
+                    # do only two iterations. This can be done self consistently
+                    for n_iter in tf.range(2):
+
+                        #max_iter = 1 means instantatneous relaxations of the shell position
+                        shell_disp = _ewald.shell_optimization_newton(shell_disp, 
+                                                                      nuclei_charge, charges, 
+                                                                      E_di,max_iter=200,
+                                                                      tol=1e-2)
+                    #shell_disp = tf.reshape(shell_disp, [nat,3]) 
+                    '''
+                    if self.efield is not None:
+                        field_kernel = _ewald.sawtooth_PE_pqeq(shell_disp)
+                        #field_kernel = _ewald.sawtooth_PE_pqeq_fourier()
+                        _b += field_kernel[0] # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
+
                 if not self.pqeq:
                     ecoul = self.compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
                 else:
                     ecoul = self.compute_coulumb_energy_pqeq(charges, atomic_q0, nuclei_charge,
                                     E1, E2, Vij, Vij_qz, Vij_zz)
+                    ecoul += 0.5 * tf.reduce_sum(E_di[:,None] * shell_disp * shell_disp) # 1/2 8\sum_{i,alpha} E_{i} d_{i\alpha}**2
+
 
                 if self.efield is not None:
                     if not self.pqeq:
@@ -963,7 +1072,8 @@ class BACENET(tf.keras.Model):
                         ecoul += efield_energy
                     else:
                         #both nuclei and electron
-                        efield_energy = tf.reduce_sum(charges * field_kernel[0] - nuclei_charge * field_kernel[1])
+                        efield_energy = tf.reduce_sum(charges * field_kernel[0] + 
+                                                      nuclei_charge * field_kernel[1])
                         ecoul += efield_energy
 
                 total_energy += ecoul
@@ -1053,8 +1163,17 @@ class BACENET(tf.keras.Model):
         positions = tf.reshape(data['positions'][:,:nmax*3], (-1, nmax*3))
 
         spec_identity = tf.constant(self.species_identity, dtype=tf.int32) # atomic number
-        species_one_hot_encoder = tf.one_hot(spec_identity-1, depth=self.nelement)
+        _species_one_hot_encoder = tf.one_hot(spec_identity-1, depth=self.nelement)
+        #include the oxidation states as part of species descriptors for long range electrostatic interactions
+        if self.coulumb:
+            species_one_hot_encoder = tf.concat([_species_one_hot_encoder, 
+                                             tf.cast(self.oxidation_states,tf.float32)[:,None]], 1)
         self.trainable_species_encoder = self.species_nets(species_one_hot_encoder) # nspecies x nembedding
+
+        self.species_gaussian_width = self.gaussian_width_net(_species_one_hot_encoder) # between 0,1
+        #t should be fulling learnable but scale width between 0.5 and 3.0 
+        self.species_gaussian_width = 0.5 + 2.5 * tf.reshape(self.species_gaussian_width, [-1])
+
         #species_encoder = inputs[1].to_tensor(shape=(-1, nmax)) #contains atomic number per atoms for all element in a batch
         species_encoder = tf.reshape(data['atomic_number'][:,:nmax], (-1,nmax)) #contains atomic number per atoms for all element in a batch
 
@@ -1073,7 +1192,7 @@ class BACENET(tf.keras.Model):
         batch_species_encoder = tf.where(valid_mask[..., tf.newaxis],
                                          batch_species_encoder,
                                          tf.zeros(shape))
-        batch_species_encoder = tf.reshape(batch_species_encoder, [batch_size, nmax * self.nspec_embedding])
+        #batch_species_encoder = tf.reshape(batch_species_encoder, [batch_size, nmax * self.nspec_embedding])
 
         #atomic hardness and electronegativity
         #species_chi0, species_J0 = self.estimate_species_chi0_J0()
@@ -1090,6 +1209,11 @@ class BACENET(tf.keras.Model):
                                      batch_atomic_J0,
                                      tf.zeros(shape))
 
+            batch_gaussian_width = tf.gather(self.species_gaussian_width, species_indices)
+            batch_gaussian_width = tf.where(valid_mask,
+                                    batch_gaussian_width,
+                                     tf.zeros(shape))
+
             #initial charges
             batch_atomic_q0 = tf.gather(tf.cast(self.oxidation_states,tf.float32), species_indices)
             shape = tf.shape(batch_atomic_q0)
@@ -1099,18 +1223,28 @@ class BACENET(tf.keras.Model):
             ### N electrons per species
             ###
             batch_species_nelec = tf.gather(tf.cast(self.species_nelectrons, tf.float32), species_indices)
+            #use atomic number instead
+            #batch_species_nelec = tf.gather(tf.cast(spec_identity, tf.float32), species_indices)
             shape = tf.shape(batch_species_nelec)
             batch_species_nelec = tf.where(valid_mask,
                                      batch_species_nelec,
                                      tf.zeros(shape))
 
             batch_total_charge = data['total_charge']
+
+            if self.learn_oxidation_states:
+                self.batch_oxidation_states = tf.reshape(tf.identity(batch_atomic_q0), [batch_size,nmax]) #to regress against predicted charges
         else:
             batch_atomic_chi0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
+            batch_gaussian_width = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_atomic_J0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_atomic_q0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_species_nelec = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_total_charge = tf.zeros(batch_size, dtype=tf.float32)
+
+        batch_species_encoder = tf.reshape(batch_species_encoder, [batch_size, nmax * self.nspec_embedding])
+
+            
 
        #[0-positions,1-species_encoder,2-C6,3-cells,4-natoms,5-i,6-j,7-S,8-neigh, 9-energy,10-forces]
         C6 = data['C6']
@@ -1132,13 +1266,13 @@ class BACENET(tf.keras.Model):
 
         elements = (batch_species_encoder,positions, 
                     nmax_diff, batch_nats,cells,C6, 
-                first_atom_idx,second_atom_idx,shift_vectors,num_pairs, gaussian_width,
+                first_atom_idx,second_atom_idx,shift_vectors,num_pairs, batch_gaussian_width,
                     batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0,batch_total_charge, 
                     batch_species_nelec)
 
         # energies, forces, atomic_features, C6, charges, stress
         energies, forces, C6, charges, stress, shell_disp = self.map_fn_parallel(elements)
-        '''
+        #'''
         out_signature = [
             tf.float32,  # energies
             tf.float32,  # forces
@@ -1146,14 +1280,14 @@ class BACENET(tf.keras.Model):
             tf.float32,  # C6
             tf.float32,  # charges
             tf.float32,  # stress
-            #tf.float32  # zstar
+            tf.float32  # shell_disp
         ]
 
 
-        energies, forces, C6, charges, stress = tf.map_fn(self.tf_predict_energy_forces, elements,
-                                     fn_output_signature=out_signature,
-                                     parallel_iterations=self.batch_size)
-        '''
+        #energies, forces, C6, charges, stress, shell_disp = tf.map_fn(self.tf_predict_energy_forces, elements,
+        #                             fn_output_signature=out_signature,
+        #                             parallel_iterations=self.batch_size)
+        #'''
         #outs = [energies, forces, atomic_features]
         outs = {'energy':energies,
                 'forces':forces,
@@ -1165,12 +1299,13 @@ class BACENET(tf.keras.Model):
                 }
         return outs
 
-    def compile(self, optimizer, loss, loss_f=None):
+    def compile(self, optimizer, loss, loss_f, loss_q):
         super().compile()
         self.optimizer = optimizer
         self.loss_e = loss
-        if loss_f:
-            self.loss_f = loss_f
+        self.loss_f = loss_f
+        self.loss_q = loss_q
+
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
         # on what you pass to `fit()`.
@@ -1186,7 +1321,7 @@ class BACENET(tf.keras.Model):
         
         #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
         #target_f = tf.cast(target_f, tf.float32)
-
+        
         with tf.GradientTape() as tape:
             #outs = self(inputs_target[:10], training=True)
             outs = self(data, training=True)
@@ -1215,13 +1350,21 @@ class BACENET(tf.keras.Model):
                                   fn_output_signature=tf.float32)
             fmse_loss = tf.reduce_mean(fmse_loss) # average over batch
 
-            delta_n = tf.constant(self._start_swa, dtype=tf.int64) - self._train_counter
+            delta_n = tf.constant(self._start_swa, dtype=tf.int64) - (self._train_counter + self.starting_step)
             _step_fn = self.step_fn(delta_n)
             _ecost = self.ecost + (self.ecost_swa - self.ecost) * _step_fn #=self.ecost if self._start_swa > self._train_counter and self.ecost_swa otherwise
             _fcost = self.fcost + (self.fcost_swa - self.fcost) * _step_fn #=self.fcost if self._start_swa > self._train_counter and self.fcost_swa otherwise
 
             _loss = _ecost * emse_loss
             _loss += _fcost * fmse_loss
+            if self.learn_oxidation_states:
+                q_loss = tf.map_fn(self.loss_q,
+                                  (self.batch_oxidation_states,charges,batch_nats),
+                                  fn_output_signature=tf.float32)
+                q_loss = self._qcost * tf.reduce_mean(q_loss)
+                _loss += q_loss
+            else:
+                q_loss = tf.zeros(1)
         # Compute gradients
         trainable_vars = self.trainable_variables
         #assert trainable_vars == self.trainable_weights
@@ -1234,7 +1377,7 @@ class BACENET(tf.keras.Model):
 
 
 
-        metrics = {'tot_st': self._train_counter}
+        metrics = {'tot_st': self._train_counter + self.starting_step}
         #metrics = {}
         mae = tf.reduce_mean(tf.abs(ediff / batch_nats))
         rmse = tf.sqrt(tf.reduce_mean((ediff/batch_nats)**2))
@@ -1254,26 +1397,28 @@ class BACENET(tf.keras.Model):
         metrics.update({'loss': _loss})
         metrics.update({'energy loss': _ecost*emse_loss})
         metrics.update({'force loss': _fcost*fmse_loss})
+        metrics.update({'charge loss': q_loss})
 
         #with writer.set_as_default():
         #'''
         with self.train_writer.as_default(step=self._train_counter):
         #with self.train_writer.as_default():
 
-            tf.summary.scalar('1. Losses/1. Total',_loss, self._train_counter)
-            tf.summary.scalar('1. Losses/2. Energy',emse_loss,self._train_counter)
-            tf.summary.scalar('1. Losses/3. Forces',fmse_loss,self._train_counter)
-            tf.summary.scalar('2. Metrics/1. RMSE/atom',rmse,self._train_counter)
-            tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter)
-            tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter)
-            tf.summary.scalar('2. Metrics/4. MAE_F',mae_f,self._train_counter)
+            tf.summary.scalar('1. Losses/1. Total',_loss, self._train_counter + self.starting_step)
+            tf.summary.scalar('1. Losses/2. Energy',emse_loss,self._train_counter + self.starting_step)
+            tf.summary.scalar('1. Losses/3. Forces',fmse_loss,self._train_counter + self.starting_step)
+            tf.summary.scalar('2. Metrics/1. RMSE/atom',rmse,self._train_counter + self.starting_step)
+            tf.summary.scalar('2. Metrics/2. MAE/atom',mae,self._train_counter + self.starting_step)
+            tf.summary.scalar('2. Metrics/3. RMSE_F',rmse_f,self._train_counter + self.starting_step)
+            tf.summary.scalar('2. Metrics/4. MAE_F',mae_f,self._train_counter + self.starting_step)
             #tf.summary.histogram(f'3. angular terms: lambda',self._lambda_weights,self._train_counter)
             for idx, spec in enumerate(self.species_identity):
-                tf.summary.histogram(f'3. encoding /{spec}',self.trainable_species_encoder[idx],self._train_counter)
+                tf.summary.histogram(f'3. encoding /{spec}',self.trainable_species_encoder[idx],self._train_counter + self.starting_step)
+                tf.summary.scalar(f'31. gaussian_width /{spec}',self.species_gaussian_width[idx],self._train_counter + self.starting_step)
             if self.include_vdw:
-                tf.summary.histogram(f'4. C6 parameters',C6, self._train_counter)
+                tf.summary.histogram(f'4. C6 parameters',C6, self._train_counter + self.starting_step)
             if self.coulumb:
-                tf.summary.histogram(f'5. charges',charges, self._train_counter)
+                tf.summary.histogram(f'5. charges',charges, self._train_counter + self.starting_step)
 
         #'''
         return {key: metrics[key] for key in metrics.keys()}
@@ -1328,11 +1473,11 @@ class BACENET(tf.keras.Model):
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
         metrics.update({'loss': loss})
-        with self.train_writer.as_default(step=self._train_counter):
-            tf.summary.scalar('2. Metrics/1. V_RMSE/atom',rmse,self._train_counter)
-            tf.summary.scalar('2. Metrics/2. V_MAE/atom',mae,self._train_counter)
-            tf.summary.scalar('2. Metrics/3. V_RMSE_F',rmse_f,self._train_counter)
-            tf.summary.scalar('2. Metrics/3. V_MAE_F',mae_f,self._train_counter)
+        with self.train_writer.as_default(step=self._train_counter + self.starting_step):
+            tf.summary.scalar('2. Metrics/1. V_RMSE/atom',rmse,self._train_counter + self.starting_step)
+            tf.summary.scalar('2. Metrics/2. V_MAE/atom',mae,self._train_counter + self.starting_step)
+            tf.summary.scalar('2. Metrics/3. V_RMSE_F',rmse_f,self._train_counter + self.starting_step)
+            tf.summary.scalar('2. Metrics/3. V_MAE_F',mae_f,self._train_counter + self.starting_step)
 
 
 

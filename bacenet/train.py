@@ -23,6 +23,7 @@ from models import model
 from models import model_lchannels
 import logging
 
+#tf.config.run_functions_eagerly(True)
 def default_config():
     return {
         'layer_sizes': None,
@@ -86,9 +87,14 @@ def default_config():
         'self_correction': False,
         'start_swa_global_step': 1000000000,
         'scale_J0': None,
+        'scale_chi0': None,
         'per_atom': False,
         'pqeq': False,
-        'species_nelectrons': None
+        'species_nelectrons': None,
+        'debug': False,
+        'initial_global_step': 0,
+        'gaussian_width_scale': 1.0
+
     }
 
 def estimate_species_chi0_J0(species):
@@ -101,7 +107,8 @@ def estimate_species_chi0_J0(species):
     species_electronegativity = 0.5 * (IE + EA)
     return (species_electronegativity, species_hardness)
 
-def get_compiled_model(configs,optimizer,example_input,model_version='linear'):
+def get_compiled_model(configs,optimizer,example_input):
+    model_version = configs['model_version']
     if model_version != 'linear':
         _model = model_lchannels.BACENET(configs=configs)
     else:
@@ -116,7 +123,8 @@ def get_compiled_model(configs,optimizer,example_input,model_version='linear'):
                   loss=help_fn.quad_loss,
                   #loss=help_fn.mae_loss,
                   #loss_f = help_fn.force_loss_mae)
-                  loss_f = help_fn.force_loss)
+                  loss_f = help_fn.force_loss,
+                  loss_q = help_fn.charge_loss)
     print(_model.summary())
     return _model
 
@@ -124,10 +132,10 @@ def get_compiled_model(configs,optimizer,example_input,model_version='linear'):
 #This is an example from tensorflow not currently used
 #TODO
 def make_or_restore_model(model_outdir,configs,optimizer,
-                          example_input,model_version='linear'):
+                          example_input):
     # Either restore the latest model, or create a fresh one
     # if there is no checkpoint available.
-
+    model_version = configs['model_version']
     checkpoint_dir = model_outdir + "/models/"
     checkpoints = [checkpoint_dir + name for name in os.listdir(checkpoint_dir) if name.endswith('index')]
     if checkpoints:
@@ -148,13 +156,13 @@ def make_or_restore_model(model_outdir,configs,optimizer,
 
         #load and set weights manually
         _model.load_weights(latest_checkpoint).expect_partial()
-        #_model.load_weights(latest_ckpt).expect_partial()
+        # probably do this in the most naive way
         weights = _model.get_weights()
-        #weights = checkpoint.get_weights()
         _model.set_weights(weights)
         _model.compile(optimizer=optimizer,
                loss=help_fn.quad_loss,
-               loss_f=help_fn.force_loss)
+               loss_f=help_fn.force_loss,
+               loss_q = help_fn.charge_loss)
 
         print(_model.summary())
         return _model, last_ckpt_idx
@@ -162,10 +170,10 @@ def make_or_restore_model(model_outdir,configs,optimizer,
         last_ckpt_idx = 0
     print("Creating a new model")
     
-    return get_compiled_model(configs,optimizer,example_input,model_version=model_version), last_ckpt_idx
+    return get_compiled_model(configs,optimizer,example_input), last_ckpt_idx
 
 
-def opt(configs, lr_schedule, init_step):
+def opt(configs, lr_schedule, init_step=0):
     if configs['opt_method'] in ['adamW', 'AdamW', 'adamw']:
         optimizer = tf.keras.optimizers.AdamW(
             learning_rate=lr_schedule,
@@ -248,9 +256,13 @@ def create_model(configs):
     species_chi0, species_J0 = estimate_species_chi0_J0(configs['species'])
     if configs['scale_J0'] is None:
         configs['scale_J0'] = tf.ones_like(species_chi0)
+    if configs['scale_chi0'] is None:
+        configs['scale_chi0'] = tf.ones_like(species_chi0)
 
     configs['species_chi0'] = species_chi0
     configs['species_J0'] = species_J0 #* configs['scale_J0']
+    print(f"the values of chi0 used are {configs['scale_chi0']*species_chi0}")
+    print(f"the values of J0 used are {configs['scale_J0']*species_J0}")
 
     model_outdir = configs['outdir']
     if not os.path.exists(model_outdir):
@@ -304,7 +316,7 @@ def create_model(configs):
 
     #this callback seems to slowdown training by a lot
     #backupandrestore = tf.keras.callbacks.BackupAndRestore(backup_dir=model_outdir+"/tmp_backup",
-    #                                                      delete_checkpoint=False, save_freq=configs['save_freq'])
+    #                                                      delete_checkpoint=False, save_freq='epoch')
 
                  #CustomCallback()]
     #if not configs['fixed_lr']:
@@ -407,8 +419,15 @@ def create_model(configs):
         atomic_energy=atomic_energy,
         atomic_energy_file=os.path.join(model_outdir,'atomic_energy.json'),
         model_version=configs['model_version'],
-        model_dir=model_outdir,n_epochs=configs['num_epochs']
+        model_dir=model_outdir,n_epochs=configs['num_epochs'],
+        #oxidation_states={configs['species'][i]:configs['oxidation_states'][i] 
+        #                  for i in range(len(configs['species']))},
+        #nuclei_charges={configs['species'][i]:configs['species_nelectrons'][i] 
+        #                  for i in range(len(configs['species']))}
         )
+
+    #for batch in train_data.take(1):
+     #   print("One batch:", batch)
 
     if configs['start_swa'] > -1:
         configs['start_swa_global_step'] = start_swa_step * (nsamples // global_batch_size)
@@ -419,22 +438,26 @@ def create_model(configs):
 
     #with strategy.scope():
     #model = get_compiled_model(configs,
-    #                               opt(configs, lr_schedule),list(train_data)[0],configs['model_version'])
+    #                               opt(configs, lr_schedule),list(train_data)[0])
     #create or restore model
     checkpoint_dir = model_outdir + "/models/"
+
     checkpoints = [checkpoint_dir + name for name in os.listdir(checkpoint_dir) if name.endswith('index')]
     if checkpoints:
         latest_checkpoint = max(checkpoints, key=os.path.getctime)
         latest_checkpoint = latest_checkpoint.split('.index')[0]
         last_ckpt_idx = int(latest_checkpoint.split('-')[-1].split('.')[0])
-        init_step = (last_ckpt_idx-1) * nsamples // global_batch_size
+        init_step = (last_ckpt_idx) * (nsamples // global_batch_size)
     else:
         init_step = 0
-    model, initial_epoch = make_or_restore_model(model_outdir,configs,opt(configs, lr_schedule, init_step),
-                          list(train_data)[0],model_version=configs['model_version'])
+    
+    configs['initial_global_step'] = init_step
+    model, initial_epoch = make_or_restore_model(model_outdir,configs,opt(configs, lr_schedule, init_step=init_step),
+                          list(train_data)[0])
     if initial_epoch == 0:
         model.save_weights(checkpoint_path.format(epoch=0))
-        #model.save(checkpoint_path.format(epoch=0))
+    #'''
+   # model.save(checkpoint_path.format(epoch=0))
     
     try:
         model.fit(train_data,

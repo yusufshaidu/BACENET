@@ -16,9 +16,28 @@ import json
 import ase
 from ase.neighborlist import neighbor_list
 from data.tfr_data_processing import write_tfr, get_tfrs
+from functions.ewald import ewald
 import warnings
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+
+def compute_electrostatic_energy0(cell, positions, gaussian_width, pbc,
+                                  shelld, atomic_charges, nuclei_charges):
+    _ewald = ewald(positions, cell, len(positions),
+                        gaussian_width,accuracy=1e-3,
+                               gmax=None, pbc=pbc,
+                               )
+    #Vij = _ewald.recip_space_term() if pbc else _ewald.real_space_term()
+    #Vij = Vij.numpy()
+    q_outer = atomic_charges[:,None] * atomic_charges[None,:]
+    qz_outer = atomic_charges[:,None] * nuclei_charges[None,:]
+    zz_outer = nuclei_charges[:,None] * nuclei_charges[None,:]
+    
+    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld(shelld)
+    return 0.5 * (np.sum(Vij.numpy() * q_outer + 
+                        Vij_qz.numpy() * qz_outer + 
+                        Vij_zz.numpy() * zz_outer) + np.sum(0.1 * shelld**2))
 
 #from ml_potentials.pbc import replicas_max_idx
 #try:
@@ -463,7 +482,9 @@ def data_preparation(data_dir, species, data_format,
                      model_version='v0',
                      model_dir='tmp',
                      evaluate_test=0,max_workers=8,
-                     n_epochs=64):
+                     n_epochs=64,
+                     oxidation_states={},
+                     nuclei_charges={}):
     
 #    rc = np.max([rc_rad, rc_ang])
 
@@ -477,7 +498,12 @@ def data_preparation(data_dir, species, data_format,
         #collect configurations
     #all_configs_ase = []
 
-   
+    species_identity = [atomic_number(s) for s in species]
+    # C6 are in Ha * au^6
+    to_eV = 27.211324570273 * 0.529177**6
+    C6_spec = {ss:element(ss).c6_gb * to_eV for ss in species}
+    covalent_radii = {x:element(x).covalent_radius*0.01 for x in species}
+
     #print(f'we have a total of {len(files)} configurations')
     #shuffle dataset before splitting
     # this method shuffle files in-place
@@ -485,7 +511,8 @@ def data_preparation(data_dir, species, data_format,
     repeat_count = n_samples // batch_size * n_epochs
     random.Random(42).shuffle(files)
 
-    #determine atomic zeros
+    #determine atomic zeros from a linear fit
+    # we should remove the energy due to the atomic charges especially in the cae of polarizable Qeq
     if len(atomic_energy)==0:
         print('estimating atomic reference from a linear fit')
         mat_A = []
@@ -495,10 +522,21 @@ def data_preparation(data_dir, species, data_format,
         for file in files:
             if data_format == 'panna_json':
                 Nspec, spec, ene = get_energy_json(file,species)
+                atoms = convert_json2ASE_atoms(atomic_energy, file, C6_spec, species)
             else:
                 Nspec, spec, ene =  get_energy_ase(file,species,energy_key)
-
+                atoms = file
+            '''
+            shelld = np.ones_like(atoms.positions) * 0.08 # uniform displacement
+            atomic_charges = np.array([oxidation_states[s] for s in atoms.get_chemical_symbols()])
+            z_charges = np.array([nuclei_charges[s] for s in atoms.get_chemical_symbols()])
+            gaussian_width = np.array([covalent_radii[s] for s in atoms.get_chemical_symbols()])
+            Eele = compute_electrostatic_energy0(atoms.cell, atoms.positions, 
+                                                 gaussian_width, pbc,
+                                                 shelld, atomic_charges, z_charges)
           
+            #print('electrostatic energy',Eele)
+            '''
             mat_A.append(Nspec)
             energy.append(ene)
             in_spec = np.append(in_spec, spec)
@@ -507,7 +545,7 @@ def data_preparation(data_dir, species, data_format,
                 if s in in_spec:
                     check += 1
             #if len(energy) > int(0.1*len(files)) and check == len(species):
-            if len(energy) > len(species)+5 and check == len(species):
+            if len(energy) > len(species)+50 and check == len(species):
                 break
         #fit
 
@@ -518,7 +556,7 @@ def data_preparation(data_dir, species, data_format,
 
         A = np.matmul(mat_A.T, mat_A)
         n,m = A.shape
-        A += np.eye(n) * 1e-3
+        A += np.eye(n) * 1e-6
 
         b = np.matmul(mat_A.T, energy)
         atomic_energy = np.matmul(np.linalg.inv(A), b)
@@ -547,11 +585,7 @@ def data_preparation(data_dir, species, data_format,
     #species encoder for all atomic species.
     #_spec_encoder = species_encoder()
     
-    species_identity = [atomic_number(s) for s in species]
-    # C6 are in Ha * au^6
-    to_eV = 27.211324570273 * 0.529177**6
-    C6_spec = {ss:element(ss).c6_gb * to_eV for ss in species}
-
+    
     # a quick check whether to create tfrs 
     Nconf = len(files)
     ntest = int(test_fraction*Nconf)

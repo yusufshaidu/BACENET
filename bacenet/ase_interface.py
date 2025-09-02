@@ -37,7 +37,7 @@ class bacenet_Calculator(Calculator):
     def __init__(self, 
                  config=None,efield=None,
                  **kwargs):
-        """Construct weighted Behler Parrinello  calculator.
+        """Construct ACE-like descriptors Behler Parrinello  calculator.
 
         The keyword arguments (kwargs) can be one of the ASE standard
         keywords: this is currently empty
@@ -60,6 +60,9 @@ class bacenet_Calculator(Calculator):
         species_chi0, species_J0 = train.estimate_species_chi0_J0(configs['species'])
         if configs['scale_J0'] is None:
             configs['scale_J0'] = tf.ones_like(species_chi0)
+        if configs['scale_chi0'] is None:
+            configs['scale_chi0'] = tf.ones_like(species_chi0)
+
         configs['species_chi0'] = species_chi0
         configs['species_J0'] = species_J0
         
@@ -119,7 +122,19 @@ class bacenet_Calculator(Calculator):
         #self.model.load_weights(ckpts[-1]).expect_partial()
         self.configs = configs
     def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
-        Calculator.calculate(self, atoms)
+        """
+        atoms: Atoms object
+            Contains positions, unit-cell, ...
+        properties: list of str
+            List of what needs to be calculated.  Can be any combination
+            of 'energy', 'forces'
+        system_changes: list of str
+            List of what has changed since last calculation.  Can be
+            any combination of these five: 'positions', 'numbers', 'cell',
+            'pbc', 'initial_charges' and 'initial_magmoms'.
+        """
+        Calculator.calculate(self, atoms, properties, system_changes)
+
         configs = self.configs
         data, test_data, \
                 species_identity, _ = \
@@ -148,6 +163,7 @@ class bacenet_Calculator(Calculator):
         forces = tf.squeeze(outs['forces']).numpy()
         stress = tf.squeeze(outs['stress']).numpy()
         charges = tf.squeeze(outs['charges']).numpy()
+        #print(np.linalg.norm(tf.squeeze(outs['shell_disp']).numpy(), axis=-1))
         #print(tf.squeeze(outs['shell_disp']).numpy())
         #zstar = tf.squeeze(outs['Zstar']).numpy()
         #atoms.set_array('zstar',zstar)
@@ -168,3 +184,4 @@ class bacenet_Calculator(Calculator):
             "forces":forces,
             "stress":stress,
             "charges":charges}
+        #system_changes

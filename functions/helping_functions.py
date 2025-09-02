@@ -521,4 +521,13 @@ def force_mae(x):
     force_pred = tf.reshape(x[2][:3*nat], (nat,3))
     fmae = tf.reduce_mean(tf.abs(force_ref - force_pred))
     return fmae
-
+@tf.function(input_signature=[
+                             (tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              tf.TensorSpec(shape=(), dtype=tf.float32))])
+def charge_loss(x):
+    nat = tf.cast(x[2], tf.int32)
+    charge_ref = x[0][:nat]
+    charge_pred = x[1][:nat]
+    loss = tf.reduce_mean((charge_ref - charge_pred)**2)
+    return loss
