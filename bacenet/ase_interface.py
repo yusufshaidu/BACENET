@@ -14,19 +14,22 @@ import tensorflow as tf
 from models.model import BACENET
 from models.model_lchannels import BACENET as BACENET_lc
 
-from data.data_processing import data_preparation, atomic_number
+from data.data_processing import data_preparation, atomic_number, _process_file
 
 import sys, yaml,argparse, json
 import numpy as np
 import bacenet.train as train
 from pathlib import Path
+import mendeleev
+from mendeleev import element
+
 
 
 
 import os
 
 class bacenet_Calculator(Calculator):
-    implemented_properties = ['energy', 'forces', 'stress','charges']
+    implemented_properties = ['energy', 'forces', 'stress','charges', 'zstar', 'shell_displacements', 'Pi_a']
     #implemented_properties = ['energy', 'forces']
 #    ignored_changes = {'pbc'}
 #    discard_results_on_any_change = True
@@ -50,6 +53,7 @@ class bacenet_Calculator(Calculator):
         #I am parsing yaml files with all the parameters
 
         #
+        self._properties = ['energy', 'forces', 'stress','charges', 'zstar', 'shell_displacements']
         with open(config) as f:
             configs = yaml.safe_load(f)
 
@@ -133,9 +137,11 @@ class bacenet_Calculator(Calculator):
             any combination of these five: 'positions', 'numbers', 'cell',
             'pbc', 'initial_charges' and 'initial_magmoms'.
         """
+        properties = self._properties
         Calculator.calculate(self, atoms, properties, system_changes)
 
         configs = self.configs
+        '''
         data, test_data, \
                 species_identity, _ = \
                 data_preparation([atoms], 
@@ -153,17 +159,42 @@ class bacenet_Calculator(Calculator):
                                  model_dir='./',
                                  evaluate_test=-1,
                                  max_workers=1)
+        '''
         #print(self.ckpt)
-        
+        # C6 are in Ha * au^6
+        to_eV = 27.211324570273 * 0.529177**6
+        C6_spec = {ss:element(ss).c6_gb * to_eV for ss in configs['species']}
+        covalent_radii = {x:element(x).covalent_radius*0.01 for x in configs['species']}
+
+        #file, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii = args
+        args = (atoms, 'ase', configs['species'], 
+               self.atomic_energy, C6_spec,
+               configs['energy_key'],configs['force_key'],
+               configs['rc_rad'], -1, covalent_radii)
+        _data = _process_file(args)
+        data = {}
+        for key in _data.keys():
+            #add the batch dimension
+            data[key] = tf.expand_dims(tf.reshape(_data[key], [-1]), axis=0)
+#            print(key)
+
         #inputs = unpack_data(list(data)[0])
-        inputs = list(data)[0]
-        outs = self.model_call(inputs)
+        #inputs = list(data)[0]
+        #print(data)
+        outs = self.model_call(data)
         e0 = np.sum([self.atomic_energy_dic[s] for s in atoms.get_chemical_symbols()])
         energy = outs['energy'].numpy()[0] + e0
         forces = tf.squeeze(outs['forces']).numpy()
         stress = tf.squeeze(outs['stress']).numpy()
         charges = tf.squeeze(outs['charges']).numpy()
-        #print(np.linalg.norm(tf.squeeze(outs['shell_disp']).numpy(), axis=-1))
+        Vj = tf.squeeze(outs['Vj']).numpy()
+        Pi_a = tf.squeeze(outs['Pi_a']).numpy()
+        E1 = tf.squeeze(outs['E1']).numpy()
+        E2 = tf.squeeze(outs['E2']).numpy()
+        E_di = tf.squeeze(outs['E_di']).numpy()
+        shell_disp = tf.squeeze(outs['shell_disp']).numpy()
+       # print(zstar)
+#        print(np.linalg.norm(tf.squeeze(outs['shell_disp']).numpy(), axis=-1))
         #print(tf.squeeze(outs['shell_disp']).numpy())
         #zstar = tf.squeeze(outs['Zstar']).numpy()
         #atoms.set_array('zstar',zstar)
@@ -183,5 +214,12 @@ class bacenet_Calculator(Calculator):
             "energy":energy,
             "forces":forces,
             "stress":stress,
-            "charges":charges}
+            "charges":charges,
+            "shell_displacements":shell_disp,
+            "Pi_a": Pi_a,
+            "E1": E1,
+            "E2": E2,
+            "E_di": E_di,
+            "Vj": Vj,
+            }
         #system_changes

@@ -345,8 +345,8 @@ def prepare_and_split_data_ragged(files, species, data_format,
         write_tfr('train',all_dict,
                   nmax,neigh_max, 
                   nelement=nelement, tfr_dir=model_dir+'/tfrs_train')
-    else:
-        warnings.warn('there are no configurations for training!')
+    #else:
+    #    warnings.warn('there are no configurations for training!')
     if Ntest > 0:
         all_dict = {}
         for key,val in data.items():
@@ -360,8 +360,8 @@ def prepare_and_split_data_ragged(files, species, data_format,
         write_tfr('test',all_dict, 
                   nmax,neigh_max,
                   nelement=nelement, tfr_dir=test_dir)
-    else:
-        warnings.warn('there are no configurations for validation!')
+    #else:
+    #    warnings.warn('there are no configurations for validation!')
 
     ''' 
     filenames = tf.io.gfile.glob("tfrs_train/train*.tfrecords")

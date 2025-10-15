@@ -110,24 +110,33 @@ class BACENET(tf.keras.Model):
         self.accuracy = configs['accuracy']
         self.pbc = configs['pbc']
         #self.species_nelectrons = configs['species_nelectrons'] if configs['species_nelectrons'] else tf.zeros(self.nspecies, dtype=tf.float32)
-        self.species_nelectrons =  tf.constant([element(sym).nvalence() for sym in self.species])
+        #self.species_nelectrons =  tf.constant([element(sym).nvalence() for sym in self.species])
+        #self.species_nelectrons =  tf.constant([element(sym).atomic_number for sym in self.species])
+        self.species_nelectrons =  tf.constant([help_fn.valence_with_two_shells(sym) for sym in self.species]) # include electrons from l=lmax and l=lmax-1
+        print(f'Shell charges used are: {self.species_nelectrons}')
         # this should be the zeros of the tayloe expansion
         self.oxidation_states = configs['oxidation_states']
         self.learn_oxidation_states = True
         self.gaussian_width_scale = configs['gaussian_width_scale']
-        mse_os = 0.0 # this is not a tensor object
-        if self.oxidation_states:
-            for i, oxs in enumerate(self.oxidation_states):
-                mse_os += oxs * oxs
-
-        if self.oxidation_states is None or mse_os < 1e-6 :
+        self._qcost = configs['qcost'] 
+        
+        if self.oxidation_states is None:
             self.oxidation_states = tf.constant([0.0 for i in self.species], tf.float32)
+
+        mse_os = 0.0 # this is not a tensor object
+        for i, oxs in enumerate(self.oxidation_states):
+            mse_os += oxs * oxs
+
+        if mse_os < 1e-3  or self._qcost == 0.0:
             self.learn_oxidation_states = False
+        else:
+            print(f'Learning of oxidation state: {self.oxidation_states}')
 
         self.species_chi0 = configs['species_chi0'] * configs['scale_chi0']
         self.species_J0 = configs['species_J0'] * configs['scale_J0']
 
-        self._qcost = 0.1 
+        self._max_width = configs['max_width']
+        self._linearize_d = configs['linearize_d']
 
         #if not self.species_layer_sizes:
         #    self.species_layer_sizes = [self.nspec_embedding]
@@ -152,7 +161,8 @@ class BACENET(tf.keras.Model):
         species_activations = ['tanh' for x in self.species_layer_sizes[:-1]]
         species_activations.append('linear')
         nelements = self.nelement
-        if self.coulumb:
+
+        if self.coulumb: # and self.learn_oxidation_states:
             nelements += 1
         self.species_nets = Networks(nelements, 
                 self.species_layer_sizes, 
@@ -643,6 +653,122 @@ class BACENET(tf.keras.Model):
                 input_signature=[
                 tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
+                 )
+    def compute_Aij(self, Vij, E2):
+        '''construct Aij'''
+
+        #this is removed after padding Vij with 1's at the last row and columns
+        # Aij has exactly zero at N+1,N+1 elements a needed
+       
+        N = tf.shape(E2)[0]
+        E2_padded = tf.concat([E2, [-1.0]], axis=0)  # shape [N+1]
+        Aij = tf.concat([Vij, tf.ones(N,tf.float32)[:,None]], 1)
+        Aij = tf.concat([Aij, tf.ones(N+1,tf.float32)[None,:]], 0)
+        Aij += tf.linalg.diag(E2_padded)
+        return Aij # (N+1,N+1)
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
+                 )
+    def compute_Fia(self, Vij_qz, z_charge):
+        '''construct Aij'''
+
+        #this is removed after padding Vij with 1's at the last row and columns
+        # Aij has exactly zero at N+1,N+1 elements a needed
+       
+        N = tf.shape(z_charge)[0]
+
+        Fia = 0.5 * tf.reduce_sum(Vij_qz * z_charge[None, :, None], axis=1) # N,3
+        Fia = tf.pad(Fia, [[0,1],[0,0]])
+        delta_ij = tf.eye(num_rows=N+1, num_columns=N)
+
+        Fia = Fia[:,None,:] * delta_ij[:,:,None]
+
+        return tf.reshape(Fia,[N+1, 3*N]) # N+1, N * 3
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                ]
+                 )
+    def compute_Fiajb(self, Vij_zz, z_charge,E_di):
+        '''construct Aij'''
+
+        #this is removed after padding Vij with 1's at the last row and columns
+        # Aij has exactly zero at N+1,N+1 elements a needed
+       
+        N = tf.shape(z_charge)[0]
+        zz = z_charge[:,None] * z_charge[None, :]
+        #Eijab = E_di delta_ij delta_ab
+        Eijab = E_di[:,None,:,None] * tf.eye(N)[:,:,None,None] * tf.eye(3)[None,None,:,:]
+
+        Fiajb = tf.transpose(Vij_zz * zz[:,:,None,None] + Eijab, perm=(0,2,1,3)) # N,N,3,3
+
+        return tf.reshape(Fiajb, [3*N, 3*N]) # 3*N, 3*N
+
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+                ]
+                 )
+    def compute_charges_disp(self, Vij, Vij_qz, Vij_zz, 
+                             E1, E2,E_di,field_kernel_e,
+                             atomic_q0,z_charge,total_charge):
+        '''compute charges and shell displacements through the solution of linear system'''
+
+        #collect all block matrices
+        N = tf.shape(z_charge)[0]
+        Aij = self.compute_Aij(Vij, E2) #shape = (N+1,N+1)
+        Fia = self.compute_Fia(Vij_qz, z_charge) # shape = (N+1,3N)
+        Fiajb = self.compute_Fiajb(Vij_zz, z_charge, E_di) # shape = (3N,3N)
+        upper_layer = tf.concat([Aij, Fia], axis=1)
+        lower_layer = tf.concat([tf.transpose(Fia),Fiajb], axis=1)
+        Mat = tf.concat([upper_layer,lower_layer], axis=0)
+        E1_padded = tf.concat([-E1, [total_charge]], axis=0)
+        b = tf.concat([E1_padded, -tf.reshape(field_kernel_e, [-1])], axis=0)
+
+        charges_disp = tf.squeeze(tf.linalg.solve(Mat, b[:,None]))
+
+        '''
+        lin_op_A = tf.linalg.LinearOperatorFullMatrix(
+            Aij,
+            is_self_adjoint=True,
+            is_positive_definite=True,  # Optional: set to True if you know it is
+            is_non_singular=True        # Optional: set to True if you know it is
+        )
+        outs = tf.linalg.experimental.conjugate_gradient(
+            lin_op_A,
+            E1,
+            preconditioner=None,
+            x=atomic_q0,
+            tol=1e-05,
+            max_iter=500,
+            name='conjugate_gradient'
+            )
+        #outs[0]= max_iter, outs[2]=residual,outs[3]=basis vectors, outs[4]=preconditioner 
+        charges = outs[1]
+        '''
+        charges = charges_disp[:N]
+        shell_disp = tf.reshape(charges_disp[N+1:], [N,3])
+        return charges, shell_disp
+
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.float32),
@@ -660,7 +786,7 @@ class BACENET(tf.keras.Model):
         Aij += tf.linalg.diag(E2)
         '''
        
-        N = tf.shape(E2)
+        N = tf.shape(E2)[0]
         E2_padded = tf.concat([E2, [-1.0]], axis=0)  # shape [N+1]
         Aij = tf.concat([Vij, tf.ones(N,tf.float32)[:,None]], 1)
         Aij = tf.concat([Aij, tf.ones(N+1,tf.float32)[None,:]], 0)
@@ -742,6 +868,46 @@ class BACENET(tf.keras.Model):
         q_outer = q[:,None] * q[None,:]
         E = E1 * dq + 0.5 * (E2 * dq2 + tf.reduce_sum(Vij * q_outer, axis=-1))
         return tf.reduce_sum(E)
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
+                ]
+                 )
+    def compute_coulumb_energy_pqeq_qd(self,charges, atomic_q0, nuclei_charge, 
+                                    E1, E2, shell_disp, Vij_qq, Vij_qz, Vij_zz):
+        '''compute the coulumb energy
+        Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2 + \
+                \sum_i\sum_j\sum_a Vija_qz shell_disp_ia qizj/2 + \sum_i\sum_j \sum_ab Vijab_zz shell_disp_ia * shell_disp_jb zizj
+        '''
+        #q = charges
+        shell_disp_outer = shell_disp[:,None,:,None] * shell_disp[None,:,None,:] # N,N,3,3
+
+        dq = charges - atomic_q0
+        dq2 = dq * dq
+        q_outer = charges[:,None] * charges[None,:]
+        qz_outer = charges[:,None] * nuclei_charge[None,:]
+        zz_outer = nuclei_charge[:,None] * nuclei_charge[None,:]
+        #if self.learn_oxidation_states:
+        #    E = E1 * tf.abs(dq)
+        #else:
+        E = E1 * dq
+
+        E += 0.5 * (E2 * dq2 + tf.reduce_sum(
+            Vij_qq * q_outer + 
+            tf.reduce_sum(Vij_qz * shell_disp[:,None,:] * qz_outer[:,:,None], axis=2) + 
+            tf.reduce_sum(Vij_zz * shell_disp_outer * zz_outer[:,:,None,None], axis=(2,3)),
+            axis=-1
+            )
+                             )
+        return tf.reduce_sum(E)
 
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -753,10 +919,11 @@ class BACENET(tf.keras.Model):
                 tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
                 ]
                  )
     def compute_coulumb_energy_pqeq(self,charges, atomic_q0, nuclei_charge, 
-                                    E1, E2, Vij_qq, Vij_qz, Vij_zz):
+                                    E1, E2, Vij_qq, Vij_qz, Vij_zq, Vij_zz):
         '''compute the coulumb energy
         Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2 + \
                 \sum_i\sum_j Vij_qz qizj/2 + \sum_i\sum_j Vij_zz zizj
@@ -773,7 +940,7 @@ class BACENET(tf.keras.Model):
         E = E1 * dq
 
         E += 0.5 * (E2 * dq2 + tf.reduce_sum(
-            Vij_qq * q_outer + Vij_qz * qz_outer + Vij_zz * zz_outer, axis=-1
+            Vij_qq * q_outer + (Vij_qz + Vij_zq) * qz_outer + Vij_zz * zz_outer, axis=-1
             )
                              )
         return tf.reduce_sum(E)
@@ -834,9 +1001,12 @@ class BACENET(tf.keras.Model):
         #positions = tf.Variable(positions)
         #cell = tf.Variable(cell)
         if self.efield is not None:
-            _efield = tf.constant(self.efield)
+            _efield = tf.cast(self.efield, tf.float32)
+
+            apply_field = True
         else:
-            _efield = tf.constant([0.,0.,0.])
+            _efield = tf.cast([0.,0.,0.], tf.float32)
+            apply_field = False
         #with tf.GradientTape(persistent=True) as tape1:
             #the computation of Zstar is a second derivative and require additional gradient tape recording when computing the forces
        #     tape1.watch(_efield)
@@ -844,6 +1014,7 @@ class BACENET(tf.keras.Model):
             #'''
             tape0.watch(positions)
             tape0.watch(cell)
+            #tape0.watch(_efield)
 
             #based on ase 
             #npairs x 3
@@ -971,28 +1142,21 @@ class BACENET(tf.keras.Model):
             else:
                 C6 = tf.pad(C6,[[0,nmax_diff]])
             if self.coulumb:
-                #E1 = tf.nn.silu(_atomic_energies[:,idx])
-                E1 = _atomic_energies[:,idx] 
+                E1 = tf.nn.softplus(_atomic_energies[:,idx])
+                #E1 = _atomic_energies[:,idx] 
                 idx += 1
-                #E2 = tf.nn.silu(_atomic_energies[:,idx])
-                E2 = _atomic_energies[:,idx] # can modulate the diagonal elements either ways
+                E2 = tf.nn.softplus(_atomic_energies[:,idx])
+                #E2 = _atomic_energies[:,idx] # can modulate the diagonal elements either ways
                 if self.pqeq:
                     idx += 1
-                    #restrict the distance of the shell from atom to 0.25 We may need to find the optimum one
-                    # sigmoid restrict the range to 1.0 giving a maximum distance of sqrt(3.0)
-                    #shell_disp = (0.01 + tf.math.sigmoid(_atomic_energies[:,idx:])) / tf.sqrt(3.0)  
-                    #dmin = 0.01
-                    #dmax = 0.05
-                    #dd = dmax - dmin
-                    #shell_disp = (dmin + dd * tf.math.sigmoid(_atomic_energies[:,idx:])) 
-                    shell_disp = _atomic_energies[:,idx:idx+3]
-                    shell_norm = tf.linalg.norm(shell_disp, axis=-1) + 1e-12
-                    shell_disp_direction = shell_disp / shell_norm[:,None]
-                    shell_disp = shell_disp_direction * tf.math.sigmoid(shell_norm)[:, None] * 0.2 # smallest shell disp = 0.02 and max=0.2 
-                    # now relax the energy with respect to the shell displacements
-                    E_di = (1.0 + tf.math.sigmoid(_atomic_energies[:,idx+3])) * 10.0   # up to 20 eV/A^2
-                else:
-                    shell_disp = tf.zeros((nat, 3)) # not used
+                    #E_di = (0.1 + tf.math.sigmoid(_atomic_energies[:,idx:])) * 20.0   # [5, 15] in eV/A^2
+                    #E_di = tf.nn.softplus(_atomic_energies[:,idx:]) # * 10   # [5, 15] in eV/A^2
+
+                    #E_di = tf.ones_like(positions) * 2.0   # [5, 15] in eV/A^2
+                    #E_di = (0.5 + tf.math.sigmoid(_atomic_energies[:,idx:])) * 2.0   # [5, 15] in eV/A^2
+                    #E_di = tf.math.sigmoid(_atomic_energies[:,idx:])   # [5, 15] in eV/A^2
+                    #E_di = tf.tile(_atomic_energies[:,idx][:,None], [1,3])  # eV/A^2
+                    E_di = tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3])  # eV/A^2
 
                 #include atomic electronegativity(chi0) and hardness (J0)
                 E1 += chi0
@@ -1010,7 +1174,7 @@ class BACENET(tf.keras.Model):
                 #E2ij = Eij * fc_ij
                 #_b -= tf.reduce_sum(E2ij * atomic_q0[:,None], axis=-1) # contribution from q0 in the q-q0 terms
                 #'''
-                _b -= E2 * atomic_q0
+                _b -= E2 * atomic_q0 # only if we are not optimizing deq
 
                 _ewald = ewald(positions, cell, nat,
                         gaussian_width,self.accuracy, 
@@ -1020,70 +1184,140 @@ class BACENET(tf.keras.Model):
                 if not self.pqeq:
                     Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
                     _b += tf.reduce_sum(Vij * atomic_q0[None,:], axis=-1)
-                    if self.efield is not None:
+                    if apply_field:
                         field_kernel = _ewald.sawtooth_PE()
                         _b += field_kernel
-                else:
-                                        
-
-                    '''                
-                    shell_disp = tf.ones_like(positions) * 0.02
-                    #E_di = tf.ones_like(positions) * 5
-                    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld(shell_disp)
-                    _b += 0.5 * tf.reduce_sum(Vij_qz * nuclei_charge[None, :], axis=-1)
-                    _b += tf.reduce_sum(Vij * atomic_q0[None,:], axis=-1)
                     charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
-                    shell_disp = _ewald.compute_shell_disp_linear(nuclei_charge, charges, E_di)
-                    #shell_disp = tf.clip_by_value(shell_disp, 0.01, 0.1)
+                else:
+                    if apply_field:
+                        field_kernel_q, field_kernel_e = _ewald.potential_linearized_periodic(nuclei_charge)
+                        _b += field_kernel_q # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
+                    else:
+                        field_kernel_q,field_kernel_e = tf.zeros(nat), tf.zeros((nat,3))
+                    
+                    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld_quadratic_qd()
+                    charges, shell_disp = self.compute_charges_disp(Vij, Vij_qz, Vij_zz,
+                             _b, E2, E_di,field_kernel_e, #field_kernel_e changes the right hand side of the d segment
+                             atomic_q0, nuclei_charge, total_charge)
                     
                     '''
-                    Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld(shell_disp)
-                    _b += 0.5 * tf.reduce_sum(Vij_qz * nuclei_charge[None, :], axis=-1)
-                    #_b += tf.reduce_sum(Vij * atomic_q0[None,:], axis=-1) # useful for learning delat_q
-                    charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
-
-                    '''
-                    # do only two iterations. This can be done self consistently
-                    for n_iter in tf.range(2):
+                    shell_disp = tf.zeros_like(positions) #for iterative procedure
+                    # do only 2 iterations. This can be done self consistently
+                    # This is equivalent to di=0->qi->di->qi : we can self-consistently solve this
+                    for n_iter in [0,1]:
 
                         #max_iter = 1 means instantatneous relaxations of the shell position
-                        shell_disp = _ewald.shell_optimization_newton(shell_disp, 
-                                                                      nuclei_charge, charges, 
-                                                                      E_di,max_iter=200,
+                        b = tf.identity(_b)
+                        if self._linearize_d:
+
+                            #this is a quadradic model in the shell displacement so that the equaltion to determine d is linear and devoid of self consistency
+                            Vij, Vij_qz, Vij_zq, Vij_zz = _ewald.recip_space_term_with_shelld_linear(shell_disp)
+                            #Vij, Vij_qz, Vij_zq, Vij_zz = _ewald.recip_space_term_with_shelld(shell_disp)
+                            if self.efield is not None:
+                                field_kernel_q, field_kernel_e = _ewald.sawtooth_potential_fourier_linearized(shell_disp)
+                                b += field_kernel_q # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
+
+                        else:
+
+                            Vij, Vij_qz, Vij_zq, Vij_zz = _ewald.recip_space_term_with_shelld(shell_disp)
+                            if self.efield is not None:
+                                field_kernel_q, field_kernel_e = _ewald.sawtooth_PE_pqeq(shell_disp)
+                                #field_kernel = _ewald.sawtooth_PE_pqeq_fourier()
+                                b += field_kernel_q # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
+                        b += tf.reduce_sum(Vij_qz * nuclei_charge[None, :], axis=-1)
+                      #  _b += tf.reduce_sum(Vij * atomic_q0[None,:], axis=-1) # useful for learning delat_q
+                        charges = self.compute_charges(Vij, b, E2, atomic_q0, total_charge)
+
+                        #update shell_dist
+                        if self._linearize_d:
+                            shell_disp = _ewald.compute_shell_disp_linear(nuclei_charge, charges, E_di)
+                            shell_disp = tf.clip_by_value(shell_disp, -0.2, 0.2) # this is useful especially in the beginning of the training
+                        else:
+                            shell_disp = _ewald.shell_optimization_newton(shell_disp,
+                                                                      nuclei_charge, charges,
+                                                                      E_di,max_iter=1,
                                                                       tol=1e-2)
-                    #shell_disp = tf.reshape(shell_disp, [nat,3]) 
+                            #shell_disp = tf.clip_by_value(shell_disp, -0.15, 0.15)
                     '''
-                    if self.efield is not None:
-                        field_kernel = _ewald.sawtooth_PE_pqeq(shell_disp)
-                        #field_kernel = _ewald.sawtooth_PE_pqeq_fourier()
-                        _b += field_kernel[0] # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
+
 
                 if not self.pqeq:
                     ecoul = self.compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
                 else:
-                    ecoul = self.compute_coulumb_energy_pqeq(charges, atomic_q0, nuclei_charge,
-                                    E1, E2, Vij, Vij_qz, Vij_zz)
-                    ecoul += 0.5 * tf.reduce_sum(E_di[:,None] * shell_disp * shell_disp) # 1/2 8\sum_{i,alpha} E_{i} d_{i\alpha}**2
 
+                    ecoul = self.compute_coulumb_energy_pqeq_qd(charges, atomic_q0, nuclei_charge,
+                                    E1, E2, shell_disp, Vij, Vij_qz, Vij_zz)
+                    ecoul += 0.5 * tf.reduce_sum(E_di * shell_disp * shell_disp) # 1/2 \sum_{i,alpha} E_{i}_alpha d_{i\alpha}**2
+                
 
-                if self.efield is not None:
+                if apply_field:
                     if not self.pqeq:
                         efield_energy = tf.reduce_sum(charges * field_kernel)
                         ecoul += efield_energy
                     else:
                         #both nuclei and electron
-                        efield_energy = tf.reduce_sum(charges * field_kernel[0] + 
-                                                      nuclei_charge * field_kernel[1])
+                        #field_kernel_q, field_kernel_e = _ewald.sawtooth_PE_pqeq(shell_disp)
+                        #efield_energy = tf.reduce_sum(charges * field_kernel_q + 
+                        #                              tf.reduce_sum(field_kernel_e * shell_disp, axis=1))
+                        z_charge_j = tf.gather(nuclei_charge, second_atom_idx) #npair
+                        q_charge_j = tf.gather(charges, second_atom_idx) # npair
+                        shell_disp_j = tf.gather(shell_disp, second_atom_idx)
+
+                        efield_energy = _ewald.total_energy_linearized_periodic(all_rij,
+                                                                shell_disp_j,
+                                                                z_charge_j,
+                                                                q_charge_j,
+                                                                first_atom_idx, #[Nat,3]
+                                                                second_atom_idx)
+                        ecoul += (efield_energy - tf.reduce_sum(shell_disp * nuclei_charge[:,None]))
+                        '''
+                        efield_energy = _ewald.total_energy_linearized_periodic(shell_disp, nuclei_charge, charges)
                         ecoul += efield_energy
+                        '''
 
                 total_energy += ecoul
+
+                Vj = _ewald.recip_space_term_with_shelld_linear_Vj(shell_disp,
+                                               nuclei_charge,
+                                               charges)
+
+                #Pi_a = _ewald.sawtooth_polarization_fourier_linearized(shell_disp, nuclei_charge, charges) #[Nat,3]
+                if not apply_field:
+                    z_charge_j = tf.gather(nuclei_charge, second_atom_idx) #npair
+                    q_charge_j = tf.gather(charges, second_atom_idx) # npair
+                    shell_disp_j = tf.gather(shell_disp, second_atom_idx)
+                Pi_a = _ewald.polarization_linearized_periodic(all_rij, 
+                                                                shell_disp_j, 
+                                                                z_charge_j, 
+                                                                q_charge_j,
+                                                                first_atom_idx, #[Nat,3]
+                                                                second_atom_idx) #[Nat,3]
+                
+                Pi_a -= shell_disp * nuclei_charge[:,None]
+                '''
+                Pi_a = _ewald.polarization_linearized_periodic(shell_disp, nuclei_charge, charges)
+                '''
+
+                #P_total = tf.reduce_sum(Pi_a, axis=0) # sum over atoms. 
                 pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
                 charges = tf.concat([charges, pad_rows], axis=0)
+                #compute polarization
             else:
                 charges = tf.zeros([nmax_diff+nat], dtype=tf.float32)
+                Vj = tf.zeros(nat, dtype=tf.float32)
 
         #differentiating a scalar w.r.t tensors
         forces = tape0.gradient(total_energy, positions)
+        '''
+        #compute zstar as dP_a/dRi_b
+
+        if self.coulumb and self.efield is not None:
+            #zstar = tf.transpose(tape0.jacobian(P_total, positions), [1,0,2]) # [3,Nat,3]
+            #zstar = tape0.jacobian(forces, _efield) # [Nat,3,3]
+            zstar = tf.zeros((nat,3,3), dtype=tf.float32)
+        else:
+            zstar = tf.zeros((nat,3,3), dtype=tf.float32)
+        '''
         #needs tape to be persistent
         if self.pbc:
             dE_dh = tape0.gradient(total_energy, cell)
@@ -1106,7 +1340,7 @@ class BACENET(tf.keras.Model):
         shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
 
         #forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
-        return [total_energy, forces,C6, charges,stress,shell_disp]
+        return [total_energy, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_di, Vj]
 
     @tf.function(jit_compile=False,
                 input_signature=[(
@@ -1136,7 +1370,11 @@ class BACENET(tf.keras.Model):
             tf.float32,  # charges
             tf.float32,  # stress
             tf.float32,  # shell_disp
-    #        tf.float32  # zstar
+            tf.float32,  # P
+            tf.float32,  # E1
+            tf.float32,  # E2
+            tf.float32,  # E_di
+            tf.float32,  # Vj
         ]
 
 
@@ -1165,20 +1403,22 @@ class BACENET(tf.keras.Model):
         spec_identity = tf.constant(self.species_identity, dtype=tf.int32) # atomic number
         _species_one_hot_encoder = tf.one_hot(spec_identity-1, depth=self.nelement)
         #include the oxidation states as part of species descriptors for long range electrostatic interactions
-        if self.coulumb:
+        if self.coulumb: # and self.learn_oxidation_states:
             species_one_hot_encoder = tf.concat([_species_one_hot_encoder, 
                                              tf.cast(self.oxidation_states,tf.float32)[:,None]], 1)
+        else:
+            species_one_hot_encoder = _species_one_hot_encoder
         self.trainable_species_encoder = self.species_nets(species_one_hot_encoder) # nspecies x nembedding
 
         self.species_gaussian_width = self.gaussian_width_net(_species_one_hot_encoder) # between 0,1
-        #t should be fulling learnable but scale width between 0.5 and 3.0 
-        self.species_gaussian_width = 0.5 + 2.5 * tf.reshape(self.species_gaussian_width, [-1])
+        #t should be fulling learnable but scale width between 0.5 and 5.0 
+        self.species_gaussian_width = 0.5 + (self._max_width - 0.5) * tf.reshape(self.species_gaussian_width, [-1])
 
         #species_encoder = inputs[1].to_tensor(shape=(-1, nmax)) #contains atomic number per atoms for all element in a batch
         species_encoder = tf.reshape(data['atomic_number'][:,:nmax], (-1,nmax)) #contains atomic number per atoms for all element in a batch
 
         # Compare each element in species_encoder to atomic_numbers in spec_identity: It has one true value per row
-        matches = tf.equal(species_encoder[..., tf.newaxis], tf.cast(spec_identity,dtype=tf.float32))  # [batch_size, nmaxx, nspecies]
+        matches = tf.equal(tf.cast(species_encoder, tf.float32)[..., tf.newaxis], tf.cast(spec_identity,dtype=tf.float32))  # [batch_size, nmaxx, nspecies]
 
         # Convert boolean match to one-hot-like index mask and extract all true index including the paddings
         species_indices = tf.argmax(tf.cast(matches, tf.int32), axis=-1)  # [batch_size, nmaxx]
@@ -1230,10 +1470,10 @@ class BACENET(tf.keras.Model):
                                      batch_species_nelec,
                                      tf.zeros(shape))
 
-            batch_total_charge = data['total_charge']
+            batch_total_charge = tf.reshape(data['total_charge'], [-1])
 
-            if self.learn_oxidation_states:
-                self.batch_oxidation_states = tf.reshape(tf.identity(batch_atomic_q0), [batch_size,nmax]) #to regress against predicted charges
+            #if self.learn_oxidation_states:
+            self.batch_oxidation_states = tf.reshape(tf.identity(batch_atomic_q0), [batch_size,nmax]) #to regress against predicted charges
         else:
             batch_atomic_chi0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_gaussian_width = tf.zeros((batch_size,nmax), dtype=tf.float32)
@@ -1271,7 +1511,7 @@ class BACENET(tf.keras.Model):
                     batch_species_nelec)
 
         # energies, forces, atomic_features, C6, charges, stress
-        energies, forces, C6, charges, stress, shell_disp = self.map_fn_parallel(elements)
+        energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_di,Vj = self.map_fn_parallel(elements)
         #'''
         out_signature = [
             tf.float32,  # energies
@@ -1280,7 +1520,13 @@ class BACENET(tf.keras.Model):
             tf.float32,  # C6
             tf.float32,  # charges
             tf.float32,  # stress
-            tf.float32  # shell_disp
+            tf.float32,  # shell_disp
+            tf.float32,  # Pi_a
+            tf.float32,  # E1
+            tf.float32,  # E2
+            tf.float32,  # E3
+            tf.float32,  # Vj
+
         ]
 
 
@@ -1295,7 +1541,12 @@ class BACENET(tf.keras.Model):
                 'C6': C6,
                 'charges': charges,
                 'stress': stress,
-                'shell_disp':shell_disp
+                'shell_disp':shell_disp,
+                'Pi_a':Pi_a,
+                'E1':E1,
+                'E2':E2,
+                'E_di':E_di,
+                'Vj':Vj,
                 }
         return outs
 
@@ -1364,7 +1615,7 @@ class BACENET(tf.keras.Model):
                 q_loss = self._qcost * tf.reduce_mean(q_loss)
                 _loss += q_loss
             else:
-                q_loss = tf.zeros(1)
+                q_loss = 0.0
         # Compute gradients
         trainable_vars = self.trainable_variables
         #assert trainable_vars == self.trainable_weights
@@ -1495,11 +1746,10 @@ class BACENET(tf.keras.Model):
         #outs = self(data, training=False)
         e_pred = outs['energy']
         forces = outs['forces']
-        stress = outs['stress']
-        #Zstar = outs['Zstar']
-        #features = outs['features']
-        C6 = outs['C6']
-        charges = outs['charges']
+        #stress = outs['stress']
+       # C6 = outs['C6']
+       # charges = outs['charges']
+       # zstar = outs['zstar']
 
         #target = tf.cast(tf.reshape(inputs_target[10], [-1]), tf.float32)
         #target_f = tf.reshape(inputs_target[11][:,:nmax*3], [-1, 3*nmax])
@@ -1536,5 +1786,8 @@ class BACENET(tf.keras.Model):
 
         #if self.coulumb:
         charges = tf.reshape(charges, [-1,nmax])
-        return [target, e_pred, forces_ref, forces_pred, batch_nats, charges,stress]
+        return [target, e_pred, forces_ref, forces_pred, 
+                batch_nats, charges,outs['stress'],
+                outs['Pi_a'],outs['E1'],outs['E2'],outs['E_di']]
+
         #return [target, e_pred, metrics, forces_ref, forces_pred, batch_nats,stress]

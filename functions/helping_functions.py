@@ -2,6 +2,7 @@ import numpy as np
 import tensorflow as tf
 import math 
 pi = 3.141592653589793
+from mendeleev import element
 
 @tf.function
 def get_basis_terms(z):
@@ -531,3 +532,18 @@ def charge_loss(x):
     charge_pred = x[1][:nat]
     loss = tf.reduce_mean((charge_ref - charge_pred)**2)
     return loss
+
+def valence_with_two_shells(Z):
+    """Return valence electrons including the last two shells for element Z."""
+    el = element(Z)
+    conf = el.ec.conf  # dict {orbital: occupancy}, e.g. {'1s':2, '2s':2, ...}
+
+    # get principal quantum numbers present
+    ns = [int(orb[0]) for orb in conf.keys()]  # first char = principal n
+    nmax = max(ns)
+
+    # select orbitals with n = nmax and n = nmax-1
+    selected_orbitals = [orb for orb in conf if int(orb[0]) in (nmax, nmax-1)]
+    #selected_orbitals = [orb for orb in conf if int(orb[0]) in (nmax,)]
+
+    return sum(conf[orb] for orb in selected_orbitals)

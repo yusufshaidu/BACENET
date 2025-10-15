@@ -36,6 +36,7 @@ def default_config():
         'fcost': 1.0,
         'fcost_swa': 1.0,
         'ecost': 1.0,
+        'qcost': 1.0,
         'ecost_swa': 1.0,
         'pbc': True,
         'initial_lr': 0.001,
@@ -68,7 +69,7 @@ def default_config():
         'min_lr': 1e-5,
         'swa_lr': 1e-4,
         'swa_lr2': 1e-3,
-        'clip_value': None,
+        'clip_value': 100,
         'species_layer_sizes': [],
         'species_correlation': 'dot',
         'radial_layer_sizes': [128, 128],
@@ -93,7 +94,9 @@ def default_config():
         'species_nelectrons': None,
         'debug': False,
         'initial_global_step': 0,
-        'gaussian_width_scale': 1.0
+        'gaussian_width_scale': 1.0,
+        'max_width': 3.0,
+        'linearize_d': False
 
     }
 

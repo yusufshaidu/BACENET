@@ -165,7 +165,7 @@ def create_model(configs):
 #        print(weights[0])
 
         #if configs['coulumb']:
-        e_ref, e_pred, force_ref, force_pred,nat,_charges,stress, _shell_disp = model.predict(test_data)
+        e_ref, e_pred, force_ref, force_pred,nat,_charges,stress, _shell_disp, P_ia, E1,E2,E_di = model.predict(test_data)
         #else:
         #    e_ref, e_pred, metrics, force_ref, force_pred,nat,stress = model.predict(test_data)
         
