@@ -191,7 +191,8 @@ class bacenet_Calculator(Calculator):
         Pi_a = tf.squeeze(outs['Pi_a']).numpy()
         E1 = tf.squeeze(outs['E1']).numpy()
         E2 = tf.squeeze(outs['E2']).numpy()
-        E_di = tf.squeeze(outs['E_di']).numpy()
+        E_d1 = tf.squeeze(outs['E_d1']).numpy()
+        E_d2 = tf.squeeze(outs['E_d2']).numpy()
         shell_disp = tf.squeeze(outs['shell_disp']).numpy()
        # print(zstar)
 #        print(np.linalg.norm(tf.squeeze(outs['shell_disp']).numpy(), axis=-1))
@@ -219,7 +220,8 @@ class bacenet_Calculator(Calculator):
             "Pi_a": Pi_a,
             "E1": E1,
             "E2": E2,
-            "E_di": E_di,
+            "E_d1": E_d1,
+            "E_d2": E_d2,
             "Vj": Vj,
             }
         #system_changes

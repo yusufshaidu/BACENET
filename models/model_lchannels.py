@@ -107,12 +107,26 @@ class BACENET(tf.keras.Model):
         self.nelement = configs['nelement']
         self.coulumb = configs['coulumb']
         self.efield = configs['efield']
+        self._sawtooth_PE = configs['sawtooth_PE']
         self.accuracy = configs['accuracy']
         self.pbc = configs['pbc']
-        #self.species_nelectrons = configs['species_nelectrons'] if configs['species_nelectrons'] else tf.zeros(self.nspecies, dtype=tf.float32)
+        self.central_atom_id = configs['central_atom_id']
+        self.species_nelectrons = configs['species_nelectrons']
+
         #self.species_nelectrons =  tf.constant([element(sym).nvalence() for sym in self.species])
         #self.species_nelectrons =  tf.constant([element(sym).atomic_number for sym in self.species])
-        self.species_nelectrons =  tf.constant([help_fn.valence_with_two_shells(sym) for sym in self.species]) # include electrons from l=lmax and l=lmax-1
+        if self.species_nelectrons is None:
+            if configs['nshells'] == 0:
+                self.species_nelectrons = tf.constant([1.0 for symb in self.species], dtype=tf.float32)
+            elif configs['nshells'] == -1: # Use all electrons in the containing unfilled shells
+                self.species_nelectrons =  tf.constant([help_fn.unfilled_orbitals(symb)
+                                                    for symb in self.species]) # include electrons from l=lmax and l=lmax-1
+            else: #select shells to include.
+                self.species_nelectrons =  tf.constant([help_fn.valence_with_two_shells(symb,  
+                                                                                    nshells=configs['nshells']) 
+                                                    for symb in self.species]) # include electrons from l=lmax and l=lmax-1
+
+        self._initial_shell_sping_constant = configs['initial_shell_spring_constant'] # If this is true, estimate E_d from Zi
         print(f'Shell charges used are: {self.species_nelectrons}')
         # this should be the zeros of the tayloe expansion
         self.oxidation_states = configs['oxidation_states']
@@ -120,6 +134,8 @@ class BACENET(tf.keras.Model):
         self.gaussian_width_scale = configs['gaussian_width_scale']
         self._qcost = configs['qcost'] 
         
+        self.linear_d_terms = configs['linear_d_terms']
+
         if self.oxidation_states is None:
             self.oxidation_states = tf.constant([0.0 for i in self.species], tf.float32)
 
@@ -137,6 +153,13 @@ class BACENET(tf.keras.Model):
 
         self._max_width = configs['max_width']
         self._linearize_d = configs['linearize_d']
+        self._anisotropy = configs['anisotropy']
+        if self._anisotropy:
+            print('d coefficient is anisotropy')
+            if layer_sizes[-1] != 6:
+                raise ValueError("The last layer must be 6")
+
+
 
         #if not self.species_layer_sizes:
         #    self.species_layer_sizes = [self.nspec_embedding]
@@ -193,7 +216,9 @@ class BACENET(tf.keras.Model):
 
         self.gaussian_width_net = Networks(self.nelement, # pass one-hot encoder
                 [64,len(self.species)],
-                ['silu', 'sigmoid'], prefix='species_gaussian_width')
+                ['softplus', 'softplus'], prefix='species_gaussian_width')
+                #['sigmoid', 'softplus'], prefix='species_gaussian_width')
+                #['silu', 'sigmoid'], prefix='species_gaussian_width')
 
         #lxlylz, lxlylz_sum, fact_norm = help_fn.precompute_fact_norm_lxlylz(self.zeta)
         self.lxlylz = []
@@ -705,9 +730,8 @@ class BACENET(tf.keras.Model):
         zz = z_charge[:,None] * z_charge[None, :]
         #Eijab = E_di delta_ij delta_ab
         Eijab = E_di[:,None,:,None] * tf.eye(N)[:,:,None,None] * tf.eye(3)[None,None,:,:]
-
+        #Eijab = E_di[:,None,:,:] * tf.eye(N)[:,:,None,None]
         Fiajb = tf.transpose(Vij_zz * zz[:,:,None,None] + Eijab, perm=(0,2,1,3)) # N,N,3,3
-
         return tf.reshape(Fiajb, [3*N, 3*N]) # 3*N, 3*N
 
     @tf.function(jit_compile=False,
@@ -725,7 +749,7 @@ class BACENET(tf.keras.Model):
                 ]
                  )
     def compute_charges_disp(self, Vij, Vij_qz, Vij_zz, 
-                             E1, E2,E_di,field_kernel_e,
+                             E1, E2,E_d2,E_d1,
                              atomic_q0,z_charge,total_charge):
         '''compute charges and shell displacements through the solution of linear system'''
 
@@ -733,12 +757,12 @@ class BACENET(tf.keras.Model):
         N = tf.shape(z_charge)[0]
         Aij = self.compute_Aij(Vij, E2) #shape = (N+1,N+1)
         Fia = self.compute_Fia(Vij_qz, z_charge) # shape = (N+1,3N)
-        Fiajb = self.compute_Fiajb(Vij_zz, z_charge, E_di) # shape = (3N,3N)
+        Fiajb = self.compute_Fiajb(Vij_zz, z_charge, E_d2) # shape = (3N,3N)
         upper_layer = tf.concat([Aij, Fia], axis=1)
         lower_layer = tf.concat([tf.transpose(Fia),Fiajb], axis=1)
         Mat = tf.concat([upper_layer,lower_layer], axis=0)
         E1_padded = tf.concat([-E1, [total_charge]], axis=0)
-        b = tf.concat([E1_padded, -tf.reshape(field_kernel_e, [-1])], axis=0)
+        b = tf.concat([E1_padded, -tf.reshape(E_d1, [-1])], axis=0)
 
         charges_disp = tf.squeeze(tf.linalg.solve(Mat, b[:,None]))
 
@@ -964,6 +988,7 @@ class BACENET(tf.keras.Model):
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 )])
     def tf_predict_energy_forces(self,x):
         ''' 
@@ -998,6 +1023,7 @@ class BACENET(tf.keras.Model):
         atomic_q0 = x[13][:nat]
         total_charge = x[14]
         nuclei_charge = x[15][:nat]
+        atomic_number = x[16][:nat]
         #positions = tf.Variable(positions)
         #cell = tf.Variable(cell)
         if self.efield is not None:
@@ -1156,7 +1182,21 @@ class BACENET(tf.keras.Model):
                     #E_di = (0.5 + tf.math.sigmoid(_atomic_energies[:,idx:])) * 2.0   # [5, 15] in eV/A^2
                     #E_di = tf.math.sigmoid(_atomic_energies[:,idx:])   # [5, 15] in eV/A^2
                     #E_di = tf.tile(_atomic_energies[:,idx][:,None], [1,3])  # eV/A^2
-                    E_di = tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3])  # eV/A^2
+                    if self._anisotropy:
+                        E_d2 = tf.reshape(tf.nn.softplus(_atomic_energies[:,idx:]), [nat,3])  # eV/A^2
+                    else:
+                        #shape=(N,3,3) and diagonal
+                        if self.linear_d_terms:
+                            E_d1 = tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2
+                            idx += 1
+                        else:
+                            E_d1 = tf.zeros((nat,3), dtype=tf.float32)
+
+                        E_d2 = tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2
+                    if self._initial_shell_sping_constant:
+                        E_d2 += tf.tile(nuclei_charge[:,None] * 1.e-2 / 1e-3, [1,3]) # = Z_i * efield / d_i from force balancing
+                        
+
 
                 #include atomic electronegativity(chi0) and hardness (J0)
                 E1 += chi0
@@ -1190,14 +1230,26 @@ class BACENET(tf.keras.Model):
                     charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
                 else:
                     if apply_field:
-                        field_kernel_q, field_kernel_e = _ewald.potential_linearized_periodic(nuclei_charge)
+                        if self._sawtooth_PE:
+                            #field_kernel_q, field_kernel_e, field_kernel_ed = _ewald.sawtooth_potential_fourier_linearized_qd(nuclei_charge)
+                            field_kernel_q, field_kernel_e = _ewald.potential_linearized_periodic_ref0(nuclei_charge)
+                            field_kernel_ed = tf.zeros_like(E_d2)
+                            E_d2 += field_kernel_ed
+                        else:
+                            field_kernel_q, field_kernel_e = _ewald.potential_linearized_periodic(all_rij, nuclei_charge,
+                                                                                              atomic_number,
+                                                                                              self.central_atom_id,
+                                                                                              first_atom_idx,
+                                                                                              second_atom_idx)
+                            
                         _b += field_kernel_q # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
                     else:
                         field_kernel_q,field_kernel_e = tf.zeros(nat), tf.zeros((nat,3))
                     
+                    #E_d1 += field_kernel_e # the linear term in d
                     Vij, Vij_qz, Vij_zz = _ewald.recip_space_term_with_shelld_quadratic_qd()
                     charges, shell_disp = self.compute_charges_disp(Vij, Vij_qz, Vij_zz,
-                             _b, E2, E_di,field_kernel_e, #field_kernel_e changes the right hand side of the d segment
+                             _b, E2, E_d2,E_d1 + field_kernel_e, #E_di_1 changes the right hand side of the d segment and contains linear terms
                              atomic_q0, nuclei_charge, total_charge)
                     
                     '''
@@ -1247,7 +1299,7 @@ class BACENET(tf.keras.Model):
 
                     ecoul = self.compute_coulumb_energy_pqeq_qd(charges, atomic_q0, nuclei_charge,
                                     E1, E2, shell_disp, Vij, Vij_qz, Vij_zz)
-                    ecoul += 0.5 * tf.reduce_sum(E_di * shell_disp * shell_disp) # 1/2 \sum_{i,alpha} E_{i}_alpha d_{i\alpha}**2
+                    ecoul += tf.reduce_sum((E_d1  + 0.5 *  E_d2 * shell_disp) * shell_disp) # 1/2 \sum_{i,alpha,\beta} E_{i alpha \beta} d_{i\alpha}d_{i\beta}
                 
 
                 if apply_field:
@@ -1256,24 +1308,22 @@ class BACENET(tf.keras.Model):
                         ecoul += efield_energy
                     else:
                         #both nuclei and electron
-                        #field_kernel_q, field_kernel_e = _ewald.sawtooth_PE_pqeq(shell_disp)
-                        #efield_energy = tf.reduce_sum(charges * field_kernel_q + 
-                        #                              tf.reduce_sum(field_kernel_e * shell_disp, axis=1))
-                        z_charge_j = tf.gather(nuclei_charge, second_atom_idx) #npair
-                        q_charge_j = tf.gather(charges, second_atom_idx) # npair
-                        shell_disp_j = tf.gather(shell_disp, second_atom_idx)
-
-                        efield_energy = _ewald.total_energy_linearized_periodic(all_rij,
-                                                                shell_disp_j,
-                                                                z_charge_j,
-                                                                q_charge_j,
+                        if self._sawtooth_PE:
+                            efield_energy = (tf.reduce_sum(charges * field_kernel_q) + 
+                                                      tf.reduce_sum((field_kernel_e * shell_disp)))
+                        else:
+                            efield_energy = _ewald.total_energy_linearized_periodic(all_rij,
+                                                                shell_disp,
+                                                                nuclei_charge,
+                                                                charges,
                                                                 first_atom_idx, #[Nat,3]
-                                                                second_atom_idx)
-                        ecoul += (efield_energy - tf.reduce_sum(shell_disp * nuclei_charge[:,None]))
-                        '''
-                        efield_energy = _ewald.total_energy_linearized_periodic(shell_disp, nuclei_charge, charges)
-                        ecoul += efield_energy
-                        '''
+                                                                second_atom_idx,
+                                                                self.central_atom_id,
+                                                                atomic_number)
+                        ecoul += efield_energy 
+                        #'''
+                        #efield_energy = _ewald.total_energy_linearized_periodic(shell_disp, nuclei_charge, charges)
+                       # ecoul += efield_energy
 
                 total_energy += ecoul
 
@@ -1281,27 +1331,26 @@ class BACENET(tf.keras.Model):
                                                nuclei_charge,
                                                charges)
 
-                #Pi_a = _ewald.sawtooth_polarization_fourier_linearized(shell_disp, nuclei_charge, charges) #[Nat,3]
-                if not apply_field:
-                    z_charge_j = tf.gather(nuclei_charge, second_atom_idx) #npair
-                    q_charge_j = tf.gather(charges, second_atom_idx) # npair
-                    shell_disp_j = tf.gather(shell_disp, second_atom_idx)
                 Pi_a = _ewald.polarization_linearized_periodic(all_rij, 
-                                                                shell_disp_j, 
-                                                                z_charge_j, 
-                                                                q_charge_j,
+                                                                shell_disp, 
+                                                                nuclei_charge, 
+                                                                charges,
                                                                 first_atom_idx, #[Nat,3]
-                                                                second_atom_idx) #[Nat,3]
+                                                                second_atom_idx,
+                                                                self.central_atom_id,
+                                                                atomic_number) #[Nat,3]
                 
-                Pi_a -= shell_disp * nuclei_charge[:,None]
-                '''
-                Pi_a = _ewald.polarization_linearized_periodic(shell_disp, nuclei_charge, charges)
-                '''
-
-                #P_total = tf.reduce_sum(Pi_a, axis=0) # sum over atoms. 
+                Piq_a, Pie_a = _ewald.polarization_linearized_periodic_component(all_rij,
+                                                                shell_disp,
+                                                                nuclei_charge,
+                                                                charges,
+                                                                first_atom_idx, #[Nat,3]
+                                                                second_atom_idx,
+                                                                self.central_atom_id,
+                                                                atomic_number) #[Nat,3]
+                Pi_a = tf.stack([Pi_a, Piq_a, Pie_a])
                 pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
                 charges = tf.concat([charges, pad_rows], axis=0)
-                #compute polarization
             else:
                 charges = tf.zeros([nmax_diff+nat], dtype=tf.float32)
                 Vj = tf.zeros(nat, dtype=tf.float32)
@@ -1340,7 +1389,7 @@ class BACENET(tf.keras.Model):
         shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
 
         #forces = tf.pad(-forces, paddings=[[0,nmax_diff],[0,0]], constant_values=0.0)
-        return [total_energy, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_di, Vj]
+        return [total_energy, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d1, E_d2, Vj]
 
     @tf.function(jit_compile=False,
                 input_signature=[(
@@ -1360,6 +1409,7 @@ class BACENET(tf.keras.Model):
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
                 )])
     def map_fn_parallel(self, elements):
         out_signature = [
@@ -1373,7 +1423,8 @@ class BACENET(tf.keras.Model):
             tf.float32,  # P
             tf.float32,  # E1
             tf.float32,  # E2
-            tf.float32,  # E_di
+            tf.float32,  # E_d1
+            tf.float32,  # E_d2
             tf.float32,  # Vj
         ]
 
@@ -1410,15 +1461,16 @@ class BACENET(tf.keras.Model):
             species_one_hot_encoder = _species_one_hot_encoder
         self.trainable_species_encoder = self.species_nets(species_one_hot_encoder) # nspecies x nembedding
 
-        self.species_gaussian_width = self.gaussian_width_net(_species_one_hot_encoder) # between 0,1
+        self.species_gaussian_width = tf.reshape(self.gaussian_width_net(_species_one_hot_encoder), [-1]) # between 0,1
         #t should be fulling learnable but scale width between 0.5 and 5.0 
-        self.species_gaussian_width = 0.5 + (self._max_width - 0.5) * tf.reshape(self.species_gaussian_width, [-1])
+        #self.species_gaussian_width = 0.5 + (self._max_width - 0.5) * tf.reshape(self.species_gaussian_width, [-1])
 
         #species_encoder = inputs[1].to_tensor(shape=(-1, nmax)) #contains atomic number per atoms for all element in a batch
-        species_encoder = tf.reshape(data['atomic_number'][:,:nmax], (-1,nmax)) #contains atomic number per atoms for all element in a batch
+        atomic_number = tf.reshape(data['atomic_number'][:,:nmax], (-1,nmax)) #contains atomic number per atoms for all element in a batch
+        atomic_number = tf.cast(atomic_number, tf.int32)
 
         # Compare each element in species_encoder to atomic_numbers in spec_identity: It has one true value per row
-        matches = tf.equal(tf.cast(species_encoder, tf.float32)[..., tf.newaxis], tf.cast(spec_identity,dtype=tf.float32))  # [batch_size, nmaxx, nspecies]
+        matches = tf.equal(tf.cast(atomic_number, tf.float32)[..., tf.newaxis], tf.cast(spec_identity,dtype=tf.float32))  # [batch_size, nmaxx, nspecies]
 
         # Convert boolean match to one-hot-like index mask and extract all true index including the paddings
         species_indices = tf.argmax(tf.cast(matches, tf.int32), axis=-1)  # [batch_size, nmaxx]
@@ -1508,10 +1560,10 @@ class BACENET(tf.keras.Model):
                     nmax_diff, batch_nats,cells,C6, 
                 first_atom_idx,second_atom_idx,shift_vectors,num_pairs, batch_gaussian_width,
                     batch_atomic_chi0,batch_atomic_J0,batch_atomic_q0,batch_total_charge, 
-                    batch_species_nelec)
+                    batch_species_nelec, atomic_number)
 
         # energies, forces, atomic_features, C6, charges, stress
-        energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_di,Vj = self.map_fn_parallel(elements)
+        energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d1, E_d2, Vj = self.map_fn_parallel(elements)
         #'''
         out_signature = [
             tf.float32,  # energies
@@ -1524,7 +1576,8 @@ class BACENET(tf.keras.Model):
             tf.float32,  # Pi_a
             tf.float32,  # E1
             tf.float32,  # E2
-            tf.float32,  # E3
+            tf.float32,  # E_d1
+            tf.float32,  # E_d2
             tf.float32,  # Vj
 
         ]
@@ -1545,7 +1598,8 @@ class BACENET(tf.keras.Model):
                 'Pi_a':Pi_a,
                 'E1':E1,
                 'E2':E2,
-                'E_di':E_di,
+                'E_d1':E_d1,
+                'E_d2':E_d2,
                 'Vj':Vj,
                 }
         return outs
@@ -1788,6 +1842,6 @@ class BACENET(tf.keras.Model):
         charges = tf.reshape(charges, [-1,nmax])
         return [target, e_pred, forces_ref, forces_pred, 
                 batch_nats, charges,outs['stress'],
-                outs['Pi_a'],outs['E1'],outs['E2'],outs['E_di']]
+                outs['Pi_a'],outs['E1'],outs['E2'],outs['E_d1'],outs['E_d2']]
 
         #return [target, e_pred, metrics, forces_ref, forces_pred, batch_nats,stress]

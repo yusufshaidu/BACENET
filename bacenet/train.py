@@ -22,6 +22,7 @@ from data.data_processing import data_preparation
 from models import model
 from models import model_lchannels
 import logging
+import yaml
 
 #tf.config.run_functions_eagerly(True)
 def default_config():
@@ -96,9 +97,14 @@ def default_config():
         'initial_global_step': 0,
         'gaussian_width_scale': 1.0,
         'max_width': 3.0,
-        'linearize_d': False
-
-    }
+        'linearize_d': False,
+        'nshells': 2,
+        'anisotropy': False,
+        'initial_shell_spring_constant': False,
+        'sawtooth_PE': False,
+        'central_atom_id': 1, #This should be set
+        'linear_d_terms': True,
+            }
 
 def estimate_species_chi0_J0(species):
     IE = tf.constant([element(sym).ionenergies[1]
@@ -409,6 +415,7 @@ def create_model(configs):
         except:
             atomic_energy = []
 
+    
     train_data, test_data, species_identity, nsamples = data_preparation(
         data_dir=configs['data_dir'],
         species=configs['species'], 
@@ -459,6 +466,10 @@ def create_model(configs):
                           list(train_data)[0])
     if initial_epoch == 0:
         model.save_weights(checkpoint_path.format(epoch=0))
+    # save training configuration to a YAML file
+    with open(f'{model_outdir}/train_config.yaml', 'w') as file:
+        yaml.dump(configs, file, sort_keys=False)
+
     #'''
    # model.save(checkpoint_path.format(epoch=0))
     

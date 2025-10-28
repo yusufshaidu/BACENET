@@ -533,7 +533,7 @@ def charge_loss(x):
     loss = tf.reduce_mean((charge_ref - charge_pred)**2)
     return loss
 
-def valence_with_two_shells(Z):
+def valence_with_two_shells(Z, nshells=1):
     """Return valence electrons including the last two shells for element Z."""
     el = element(Z)
     conf = el.ec.conf  # dict {orbital: occupancy}, e.g. {'1s':2, '2s':2, ...}
@@ -541,9 +541,69 @@ def valence_with_two_shells(Z):
     # get principal quantum numbers present
     ns = [int(orb[0]) for orb in conf.keys()]  # first char = principal n
     nmax = max(ns)
+    list_nmax = [nmax-i for i in range(nmax)]
 
     # select orbitals with n = nmax and n = nmax-1
-    selected_orbitals = [orb for orb in conf if int(orb[0]) in (nmax, nmax-1)]
+    selected_orbitals = [orb for orb in conf if int(orb[0]) in list_nmax[:nshells]]
     #selected_orbitals = [orb for orb in conf if int(orb[0]) in (nmax,)]
+    total_electron_in_shell = sum(conf[orb] for orb in selected_orbitals)
+    #print(total_electron_in_shell)
+    for orb, electrons in conf.items():
+        l = orb[-1]  # orbital type: s, p, d, f
+        max_e = {'s': 2, 'p': 6, 'd': 10, 'f': 14}.get(l, 0)
 
-    return sum(conf[orb] for orb in selected_orbitals)
+        # skip filled orbitals
+        if electrons >= max_e:
+            continue
+        _electrons = electrons
+        _orb = orb
+
+    if _orb not in selected_orbitals:
+        total_electron_in_shell += _electrons
+        #print(total_electron_in_shell)
+    return total_electron_in_shell
+
+def unfilled_orbitals(Z):
+    """
+    Return a list of unfilled orbitals or partially filled shells
+    for an element, based on its ground-state electron configuration.
+
+    Parameters
+    ----------
+    Z : int or str
+        Atomic number or element symbol.
+
+    Returns
+    -------
+    list of int
+        Approximate count of unfilled orbitals (by energy level).
+    """
+    el = element(Z)
+    conf = el.ec.conf  # OrderedDict: {'1s': 2, '2s': 2, '2p': 6, ...}
+    ns = [int(orb[0]) for orb in conf.keys()]
+    nmax = max(ns)
+
+    unfilled = []
+    for orb, electrons in conf.items():
+        l = orb[-1]  # orbital type: s, p, d, f
+        max_e = {'s': 2, 'p': 6, 'd': 10, 'f': 14}.get(l, 0)
+
+        # skip filled orbitals
+        if electrons >= max_e:
+            continue
+
+        n = int(orb[0])
+
+        # sum electrons in the same principal shell
+        #total_in_shell = sum(e for o, e in conf.items() if int(o[0]) == n)
+        total_in_shell = electrons
+
+        # handle unfilled shells differently depending on energy level
+        if n < nmax:
+            # use total electrons in higher level + this shell
+            _, last_e = list(conf.items())[-1]
+            total_in_shell += last_e
+        else:
+            unfilled.append(total_in_shell)
+
+    return total_in_shell
