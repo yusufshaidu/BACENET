@@ -16,6 +16,7 @@ setup(
         "keras<=2.15.0",
         "keras-swa>=0.0.8",
         "ase>=3.20",
+        "mendeleev",
         "pyyaml>=5.1",
     ],
     entry_points={

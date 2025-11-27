@@ -97,13 +97,17 @@ def default_config():
         'initial_global_step': 0,
         'gaussian_width_scale': 1.0,
         'max_width': 3.0,
-        'linearize_d': False,
+        'linearize_d': 0,
         'nshells': 2,
         'anisotropy': False,
         'initial_shell_spring_constant': False,
         'sawtooth_PE': False,
         'central_atom_id': 1, #This should be set
-        'linear_d_terms': True,
+        'linear_d_terms': False,
+        'd0': 0.001,
+        'P_in_cell': False,
+        'learn_species_nelectrons': False,
+        'learnable_gaussian_width': False
             }
 
 def estimate_species_chi0_J0(species):
@@ -262,6 +266,14 @@ def create_model(configs):
     for key in _configs:
         if key not in configs.keys():
             configs[key] = _configs[key]
+    # save training configuration to a YAML file
+    model_outdir = os.path.abspath(configs['outdir'])
+    configs['outdir'] = model_outdir
+    if not os.path.exists(model_outdir):
+        os.makedirs(model_outdir, exist_ok=True)
+    with open(f'{model_outdir}/train_config.yaml', 'w') as file:
+        yaml.dump(configs, file, sort_keys=False)
+
     species_chi0, species_J0 = estimate_species_chi0_J0(configs['species'])
     if configs['scale_J0'] is None:
         configs['scale_J0'] = tf.ones_like(species_chi0)
@@ -273,9 +285,6 @@ def create_model(configs):
     print(f"the values of chi0 used are {configs['scale_chi0']*species_chi0}")
     print(f"the values of J0 used are {configs['scale_J0']*species_J0}")
 
-    model_outdir = configs['outdir']
-    if not os.path.exists(model_outdir):
-        os.makedirs(model_outdir, exist_ok=True)
 
     lr_schedule = configs['initial_lr']
     # Learning rate schedule
@@ -467,8 +476,8 @@ def create_model(configs):
     if initial_epoch == 0:
         model.save_weights(checkpoint_path.format(epoch=0))
     # save training configuration to a YAML file
-    with open(f'{model_outdir}/train_config.yaml', 'w') as file:
-        yaml.dump(configs, file, sort_keys=False)
+    #with open(f'{model_outdir}/train_config.yaml', 'w') as file:
+   #     yaml.dump(configs, file, sort_keys=False)
 
     #'''
    # model.save(checkpoint_path.format(epoch=0))

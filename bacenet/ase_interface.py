@@ -38,7 +38,7 @@ class bacenet_Calculator(Calculator):
 #        stdout_name='weighted_mBP.out')
 
     def __init__(self, 
-                 config=None,efield=None,
+                 config=None,efield=None,central_atom_id=0,
                  **kwargs):
         """Construct ACE-like descriptors Behler Parrinello  calculator.
 
@@ -56,11 +56,15 @@ class bacenet_Calculator(Calculator):
         self._properties = ['energy', 'forces', 'stress','charges', 'zstar', 'shell_displacements']
         with open(config) as f:
             configs = yaml.safe_load(f)
-
+        
         _configs = train.default_config()
         for key in _configs:
             if key not in configs.keys():
                 configs[key] = _configs[key]
+        if central_atom_id > 0:
+            configs['central_atom_id'] = central_atom_id
+            #configs['P_in_cell'] = False
+
         species_chi0, species_J0 = train.estimate_species_chi0_J0(configs['species'])
         if configs['scale_J0'] is None:
             configs['scale_J0'] = tf.ones_like(species_chi0)
@@ -86,16 +90,22 @@ class bacenet_Calculator(Calculator):
 
         atomic_energy = configs['atomic_energy']
         if len(atomic_energy)==0:
-            with open (os.path.join(configs['model_outdir'],'atomic_energy.json')) as df:
+            #with open (os.path.join(configs['model_outdir'],'atomic_energy.json')) as df:
+            try:
+                #model_outdir = os.path.abspath(configs['outdir'])
+                model_outdir = configs['outdir']
+            except:
+                model_outdir = os.path.abspath(configs['model_outdir'])
+            with open (os.path.join(model_outdir,'atomic_energy.json')) as df:
                 self.atomic_energy_dic = json.load(df)
 
         #print(atomic_energy)
         self.atomic_energy = np.array([self.atomic_energy_dic[key] for key in configs['species']])
         self.species_identity = np.array([atomic_number(key) for key in configs['species']])
         configs['batch_size'] = 1
-        model_outdir = configs['model_outdir']
-        ckpts = [os.path.join(configs['model_outdir']+"/models", x.split('.index')[0]) 
-                 for x in os.listdir(configs['model_outdir']+"/models") if x.endswith('index')]
+        #model_outdir = configs['model_outdir']
+        ckpts = [os.path.join(model_outdir+"/models", x.split('.index')[0]) 
+                 for x in os.listdir(model_outdir+"/models") if x.endswith('index')]
         ckpts.sort()
     #    ckpts = [os.path.join(model_outdir+"/models", x.split('.weights.h5')[0])
     #         for x in os.listdir(model_outdir+"/models") if x.endswith('h5')]
@@ -125,6 +135,7 @@ class bacenet_Calculator(Calculator):
 
         #self.model.load_weights(ckpts[-1]).expect_partial()
         self.configs = configs
+
     def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
         """
         atoms: Atoms object
@@ -139,28 +150,7 @@ class bacenet_Calculator(Calculator):
         """
         properties = self._properties
         Calculator.calculate(self, atoms, properties, system_changes)
-
         configs = self.configs
-        '''
-        data, test_data, \
-                species_identity, _ = \
-                data_preparation([atoms], 
-                                 configs['species'],
-                                 'ase',
-                                 configs['energy_key'], 
-                                 configs['force_key'],
-                                 configs['rc_rad'],
-                                 [True]*3, 
-                                 1,
-                                 test_fraction=0,
-                                 atomic_energy=self.atomic_energy,
-                                 atomic_energy_file=os.path.join(configs['model_outdir'],'atomic_energy.json'),
-                                 model_version=configs['model_version'],
-                                 model_dir='./',
-                                 evaluate_test=-1,
-                                 max_workers=1)
-        '''
-        #print(self.ckpt)
         # C6 are in Ha * au^6
         to_eV = 27.211324570273 * 0.529177**6
         C6_spec = {ss:element(ss).c6_gb * to_eV for ss in configs['species']}
@@ -175,53 +165,26 @@ class bacenet_Calculator(Calculator):
         data = {}
         for key in _data.keys():
             #add the batch dimension
-            data[key] = tf.expand_dims(tf.reshape(_data[key], [-1]), axis=0)
+            values = tf.convert_to_tensor(_data[key], dtype=tf.float32)
+            data[key] = tf.expand_dims(tf.reshape(values, [-1]), axis=0)
 #            print(key)
 
-        #inputs = unpack_data(list(data)[0])
-        #inputs = list(data)[0]
-        #print(data)
-        outs = self.model_call(data)
+        _outs = self.model_call.predict(data, batch_size=1, verbose=0)
+        outs = _outs[-1]
         e0 = np.sum([self.atomic_energy_dic[s] for s in atoms.get_chemical_symbols()])
-        energy = outs['energy'].numpy()[0] + e0
-        forces = tf.squeeze(outs['forces']).numpy()
-        stress = tf.squeeze(outs['stress']).numpy()
-        charges = tf.squeeze(outs['charges']).numpy()
-        Vj = tf.squeeze(outs['Vj']).numpy()
-        Pi_a = tf.squeeze(outs['Pi_a']).numpy()
-        E1 = tf.squeeze(outs['E1']).numpy()
-        E2 = tf.squeeze(outs['E2']).numpy()
-        E_d1 = tf.squeeze(outs['E_d1']).numpy()
-        E_d2 = tf.squeeze(outs['E_d2']).numpy()
-        shell_disp = tf.squeeze(outs['shell_disp']).numpy()
-       # print(zstar)
-#        print(np.linalg.norm(tf.squeeze(outs['shell_disp']).numpy(), axis=-1))
-        #print(tf.squeeze(outs['shell_disp']).numpy())
-        #zstar = tf.squeeze(outs['Zstar']).numpy()
-        #atoms.set_array('zstar',zstar)
 
-        '''
-        configs['species_identity'] = species_identity
-        if configs['coulumb']:
-            e_ref, e_pred, metrics, force_ref, force_pred,nat,charges,stress = self.model.predict(data)
-        else:
-            e_ref, e_pred, metrics, force_ref, force_pred,nat,stress = self.model.predict(data)
-            charges = np.zeros_like(atoms.get_chemical_symbols())
-        '''
-
-#        print(e_pred, force_pred)
         #there is the batch axis
         self.results = {
-            "energy":energy,
-            "forces":forces,
-            "stress":stress,
-            "charges":charges,
-            "shell_displacements":shell_disp,
-            "Pi_a": Pi_a,
-            "E1": E1,
-            "E2": E2,
-            "E_d1": E_d1,
-            "E_d2": E_d2,
-            "Vj": Vj,
+            "energy":outs['energy'][0] + e0,
+            "forces":outs['forces'][0],
+            "stress":outs['stress'][0],
+            "charges":outs['charges'][0],
+            "shell_displacements":outs['shell_disp'][0],
+            "Pi_a": outs['Pi_a'][0],
+            "E1": outs['E1'][0],
+            "E2": outs['E2'][0],
+            "E_d1": outs['E_d1'][0],
+            "E_qd": outs['E_qd'][0],
+            "E_d2": outs['E_d2'][0],
+            "Vj": outs['Vj'][0],
             }
-        #system_changes

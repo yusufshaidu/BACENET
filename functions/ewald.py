@@ -14,7 +14,7 @@ constant_eps = 8.8541878128e-12
 CONV_FACT = 1e10 * constant_e / (4 * pi * constant_eps)
 SIGMA = 0.05
 N_fourier_comps = 10000
-P_CUTOFF = 6.0 #This defines the cutoff to for the local dipole moments
+P_CUTOFF = 3.5 #This defines the cutoff to for the local dipole moments
 
 class ewald:
     '''
@@ -39,8 +39,9 @@ class ewald:
         #self._pair_displacement = pair_displacement
         #self._first_atom_idx = first_atom_idx
 
-        self._gaussian_width = tf.convert_to_tensor(gaussian_width * gaussian_width_scaling, 
-                                                    dtype=tf.float32) # this could be learnable, maybe!
+        self._gaussian_width_a = tf.convert_to_tensor(gaussian_width[:,0],dtype=tf.float32) 
+        self._gaussian_width_b = tf.convert_to_tensor(gaussian_width[:,1],dtype=tf.float32) 
+        self._gaussian_width = tf.identity(self._gaussian_width_a) # defined for  standard qeq and for obtaining kmax
         self._sqrt_pi = tf.sqrt(pi)
         
 
@@ -52,7 +53,7 @@ class ewald:
 
         if self.pbc:
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(self._cell))
-            gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(self._gaussian_width))
+            gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(self._gaussian_width_a))
             self._gmax = gmax if gmax else 2 * gamma_max * tf.sqrt(-tf.math.log(accuracy))
             self._gmax *= 1.0001
         if efield is not None:
@@ -124,7 +125,8 @@ class ewald:
         #energy goes as 1/G^2 but note that the forces norm goes as 1/G
         c = lambda gmax, result: tf.greater(result, self._accuracy)
         b = lambda gmax, result: (gmax + 1.0, 
-                                  1.0 / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.) / (gmax**2*b_norm**2))
+                                  1.0 / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.) / (gmax*b_norm))
+                                  #1.0 / self.volume * tf.exp(-gmax**2*b_norm**2*sigma_min**2/2.) / (gmax**2*b_norm**2))
         return tf.while_loop(c, b, [gmax, result])[0]
     
     @tf.function(jit_compile=False,
@@ -196,7 +198,7 @@ class ewald:
         #compute the norm of all distances
         # the force on k due to atoms j is
         # rk-ri
-        rij = self._positions[:,None,:] - self._positions[None,:,:]
+        rij = self._positions[None,:,:] - self._positions[:,None,:]
         rij = tf.reshape(rij, [-1,3])
         sigma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width**2
         sigma_ij2 = tf.reshape(sigma_ij2, [-1])
@@ -210,10 +212,12 @@ class ewald:
         #g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/4.0, g_sq) # [N*N,K]
         #chunk_size = 128
         #Vij = self.accumulate_over_g(rij, sigma_ij2, g_vecs, g_sq, chunk_size)
-        g2_gamma2 = 0.25 * tf.einsum('i,j->ij',sigma_ij2, g_sq) # [N*N,K]
-        exp_ij = tf.exp(-g2_gamma2)
+        #g2_gamma2 = 0.25 * tf.einsum('i,j->ij',sigma_ij2, g_sq) # [N*N,K]
+        #exp_ij = tf.exp(-g2_gamma2)
+        # shape [K, N]
+        exp_ij = tf.exp(-0.25 * sigma_ij2[:,None] * g_sq[None,:]) / (g_sq[None,:] + 1e-12) # [N,N,K]
         #exp_ij_by_g_sq = exp_ij * 1.0 / (g_sq[None,:] + 1e-12)
-        g_sq_inv = 1.0 / (g_sq + 1e-12)
+        #g_sq_inv = 1.0 / (g_sq + 1e-12)
 
         # The cosine term: shape [N*N,K]
         #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
@@ -223,7 +227,7 @@ class ewald:
 
         # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/4)/g_sq[k] * cos_term[k]
         # Compute exp outer product and divide by k^2
-        Vij = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term, g_sq_inv)  # [N,N]
+        Vij = 2.0 * tf.einsum('ij,ij->i',exp_ij, cos_term)  # [N,N]
         
         # Multiply by prefactor (charges, 4π/V, Coulomb constant e²/4πε0 in eV·Å units) so that E = 1/2 \sum_ij Vij
         Vij *= CONV_FACT * (4.* pi / self.volume)
@@ -366,21 +370,33 @@ class ewald:
                 Vij_qz * conversion_fact,
                 Vij_zq * conversion_fact, 
                 Vij_zz * conversion_fact]
+    
     @tf.function(jit_compile=False,
+                 input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
                  )
-    def recip_space_term_with_shelld_quadratic_qd(self):
+    def recip_space_term_with_shelld_quadratic_qd(self,
+                                                  z_charge):
         '''
         calculates the interaction contribution to the electrostatic energy
         '''
 
-        sigma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width[None,:]**2
+        alpha_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_a[None,:]**2
+        beta_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_b[None,:]**2
+        alpha_beta_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_b[None,:]**2
+        #beta_alpha_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_a[None,:]**2
 
         g_sq = self.g_norm * self.g_norm  # [K]
 
         # Prepare factors for summation
         # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
         # shape [K, N]
-        exp_ij = tf.exp(-0.25 * sigma_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_aa = tf.exp(-0.25 * alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_bb = tf.exp(-0.25 * beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_ab = tf.exp(-0.25 * alpha_beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        #exp_ij_ba = tf.exp(-0.25 * beta_alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_ba = tf.transpose(exp_ij_ab, [1,0,2])
 
         # The cosine term: shape [N*N,K]
         #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
@@ -390,21 +406,177 @@ class ewald:
         rij = self._positions[:,None,:] - self._positions[None,:,:] #N,N,3
         #cos_term = tf.cos(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
         #sin_term = tf.sin(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
-        exp_cos_ij = exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)) # N,N,K
-        exp_sin_ij = exp_ij * tf.sin(tf.matmul(rij, g_vecs_transpose)) # N,N,K
-        Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij, axis=2)  # [N, N]
+        r_dot_k = tf.matmul(rij, g_vecs_transpose)
+        exp_cos_ij_aa = exp_ij_aa * tf.cos(r_dot_k) # N,N,K
+        exp_cos_ij_bb = exp_ij_bb * tf.cos(r_dot_k) # N,N,K
+        exp_sin_ij_ab = exp_ij_ab * tf.sin(r_dot_k) # N,N,K
+        exp_sin_ij_ba = exp_ij_ba * tf.sin(r_dot_k) # N,N,K
+        
+        Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij_aa, axis=2)  # [N, N]
 
         #alway summing over K
-        Vija_qz =  -4.0 * tf.reduce_sum(exp_sin_ij[:,:,:,None] * 
-                                        self.g_vecs[None,None, :, :], axis=2)
+        Vija_qz =  2.0 * tf.reduce_sum(exp_sin_ij_ab[:,:,:,None] * 
+                                        self.g_vecs[None,None, :, :], axis=2) * z_charge[None,:,None]
+        Vija_zq =  -2.0 * tf.reduce_sum(exp_sin_ij_ba[:,:,:,None] * 
+                                       self.g_vecs[None,None, :, :], axis=2) * z_charge[:,None,None]
 
+        zz = z_charge[None,:] * z_charge[:, None] #N,N
         g_ab = self.g_vecs[:, :, None] * self.g_vecs[:, None, :] # K,3,3
-        Vijab_zz =  2.0 * tf.reduce_sum(exp_cos_ij[:,:,:, None,None] * g_ab[None,None,:,:,:], axis=2) # N,N,3,3
+        Vijab_zz =  2.0 * tf.reduce_sum(exp_cos_ij_bb[:,:,:, None,None] * g_ab[None,None,:,:,:], axis=2) # N,N,3,3
+        Vijab_zz *= zz[:,:,None,None]
+
         conversion_fact = CONV_FACT * (4.* pi / self.volume)
         return [Vij_qq * conversion_fact,
                 Vija_qz * conversion_fact,
+                Vija_zq * conversion_fact,
                 Vijab_zz * conversion_fact]
-     
+
+    @tf.function(jit_compile=False,
+                 input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
+                 )
+    def recip_space_term_with_shelld_quadratic_qqdd_1(self,
+                                                  z_charge):
+        '''
+        calculates the interaction contribution to the electrostatic energy
+        '''
+
+        alpha_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_a[None,:]**2
+        beta_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_b[None,:]**2
+        alpha_beta_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_b[None,:]**2
+        #beta_alpha_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_a[None,:]**2
+
+        g_sq = self.g_norm * self.g_norm  # [K]
+
+        # Prepare factors for summation
+        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
+        # shape [K, N]
+        exp_ij_aa = tf.exp(-0.25 * alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_bb = tf.exp(-0.25 * beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_ab = tf.exp(-0.25 * alpha_beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        #exp_ij_ba = tf.exp(-0.25 * beta_alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_ba = tf.transpose(exp_ij_ab, [1,0,2])
+
+        # The cosine term: shape [N*N,K]
+        #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
+        g_vecs_transpose = tf.transpose(self.g_vecs)
+
+        #rij = tf.reshape(self._positions[:,None,:] - self._positions[None,:,:], [-1,3])
+        rij = self._positions[:,None,:] - self._positions[None,:,:] #N,N,3
+        #cos_term = tf.cos(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
+        #sin_term = tf.sin(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
+        r_dot_k = tf.matmul(rij, g_vecs_transpose)
+        exp_cos_ij_aa = exp_ij_aa * tf.cos(r_dot_k) # N,N,K
+        exp_cos_ij_bb = exp_ij_bb * tf.cos(r_dot_k) # N,N,K
+        exp_sin_ij_ab = exp_ij_ab * tf.sin(r_dot_k) # N,N,K
+        exp_cos_ij_ab = exp_ij_ab * tf.cos(r_dot_k) # N,N,K
+        exp_sin_ij_ba = exp_ij_ba * tf.sin(r_dot_k) # N,N,K
+        exp_cos_ij_ba = exp_ij_ba * tf.cos(r_dot_k) # N,N,K
+        
+        Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij_aa, axis=2)  # [N, N]
+
+        #alway summing over K
+        Vija_qz =  2.0 * tf.reduce_sum(exp_sin_ij_ab[:,:,:,None] * 
+                                        self.g_vecs[None,None, :, :], axis=2) * z_charge[None,:,None]
+        Vija_zq =  -2.0 * tf.reduce_sum(exp_sin_ij_ba[:,:,:,None] * 
+                                       self.g_vecs[None,None, :, :], axis=2) * z_charge[:,None,None]
+        
+        g_ab = self.g_vecs[:, :, None] * self.g_vecs[:, None, :] # K,3,3
+
+        Vijab_qz =  tf.reduce_sum(exp_cos_ij_ab[:,:,:,None, None] * 
+                                  g_ab[None,None, :, :,:], axis=2) * z_charge[None,:,None,None]
+        Vijab_zq =  tf.reduce_sum(exp_cos_ij_ba[:,:,:,None,None] * 
+                                         g_ab[None,None,:,:,:], axis=2) * z_charge[:,None,None,None]
+
+        zz = z_charge[None,:] * z_charge[:, None] #N,N
+        Vijab_zz =  2.0 * tf.reduce_sum(exp_cos_ij_bb[:,:,:, None,None] * g_ab[None,None,:,:,:], axis=2) # N,N,3,3
+        Vijab_zz *= zz[:,:,None,None]
+
+        conversion_fact = CONV_FACT * (4.* pi / self.volume)
+        return [Vij_qq * conversion_fact,
+                Vija_qz * conversion_fact,
+                Vija_zq * conversion_fact,
+                Vijab_zz * conversion_fact,
+                Vijab_qz * conversion_fact,
+                Vijab_zq * conversion_fact]
+
+    @tf.function(jit_compile=False,
+                 input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
+                 )
+    def recip_space_term_with_shelld_quadratic_qqdd_2(self,
+                                                  z_charge):
+        '''
+        calculates the interaction contribution to the electrostatic energy
+        '''
+
+        alpha_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_a[None,:]**2
+        beta_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_b[None,:]**2
+        alpha_beta_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_b[None,:]**2
+        #beta_alpha_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_a[None,:]**2
+
+        g_sq = self.g_norm * self.g_norm  # [K]
+
+        # Prepare factors for summation
+        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
+        # shape [K, N]
+        exp_ij_aa = tf.exp(-0.25 * alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_bb = tf.exp(-0.25 * beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_ab = tf.exp(-0.25 * alpha_beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        #exp_ij_ba = tf.exp(-0.25 * beta_alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
+        exp_ij_ba = tf.transpose(exp_ij_ab, [1,0,2])
+
+        # The cosine term: shape [N*N,K]
+        #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
+        g_vecs_transpose = tf.transpose(self.g_vecs)
+
+        #rij = tf.reshape(self._positions[:,None,:] - self._positions[None,:,:], [-1,3])
+        rij = self._positions[:,None,:] - self._positions[None,:,:] #N,N,3
+        #cos_term = tf.cos(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
+        #sin_term = tf.sin(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
+        r_dot_k = tf.matmul(rij, g_vecs_transpose)
+        exp_sin_ij_aa = exp_ij_aa * tf.sin(r_dot_k) # N,N,K
+        exp_cos_ij_aa = exp_ij_aa * tf.cos(r_dot_k) # N,N,K
+        exp_cos_ij_bb = exp_ij_bb * tf.cos(r_dot_k) # N,N,K
+        exp_sin_ij_ab = exp_ij_ab * tf.sin(r_dot_k) # N,N,K
+        exp_cos_ij_ab = exp_ij_ab * tf.cos(r_dot_k) # N,N,K
+        exp_sin_ij_ba = exp_ij_ba * tf.sin(r_dot_k) # N,N,K
+        exp_cos_ij_ba = exp_ij_ba * tf.cos(r_dot_k) # N,N,K
+        g_ab = self.g_vecs[:, :, None] * self.g_vecs[:, None, :] # K,3,3
+        
+        Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij_aa, axis=2)  # [N, N]
+        Vija_qq =  -2.0 * tf.reduce_sum(exp_sin_ij_aa[:,:,:,None] * 
+                                        self.g_vecs[None,None, :, :], axis=2)
+        Vijab_qq =  -tf.reduce_sum(exp_cos_ij_aa[:,:,:,None, None] * 
+                                  g_ab[None,None, :, :,:], axis=2)
+
+        #alway summing over K
+        Vija_qz =  2.0 * tf.reduce_sum(exp_sin_ij_ab[:,:,:,None] * 
+                                        self.g_vecs[None,None, :, :], axis=2) * z_charge[None,:,None]
+        Vija_zq =  -2.0 * tf.reduce_sum(exp_sin_ij_ba[:,:,:,None] * 
+                                       self.g_vecs[None,None, :, :], axis=2) * z_charge[:,None,None]
+        
+
+        Vijab_qz =  tf.reduce_sum(exp_cos_ij_ab[:,:,:,None, None] * 
+                                  g_ab[None,None, :, :,:], axis=2) * z_charge[None,:,None,None]
+        Vijab_zq =  tf.reduce_sum(exp_cos_ij_ba[:,:,:,None,None] * 
+                                         g_ab[None,None,:,:,:], axis=2) * z_charge[:,None,None,None]
+
+        zz = z_charge[None,:] * z_charge[:, None] #N,N
+        Vijab_zz =  2.0 * tf.reduce_sum(exp_cos_ij_bb[:,:,:, None,None] * g_ab[None,None,:,:,:], axis=2) # N,N,3,3
+        Vijab_zz *= zz[:,:,None,None]
+
+        conversion_fact = CONV_FACT * (4.* pi / self.volume)
+        return [Vij_qq * conversion_fact,
+                Vija_qz * conversion_fact,
+                Vija_zq * conversion_fact,
+                Vijab_zz * conversion_fact,
+                Vijab_qz * conversion_fact,
+                Vijab_zq * conversion_fact,
+                Vija_qq * conversion_fact,
+                Vijab_qq * conversion_fact]
 
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -474,81 +646,27 @@ class ewald:
         # the force on k due to atoms j is
 
         # rk-ri for core-core, shell-core and shell-shell
-
         
         sigma_ij2 = tf.reshape(self._gaussian_width[:,None]**2 + self._gaussian_width**2, [-1])
-        
         g_sq = self.g_norm * self.g_norm  # [K]
 
-        # Prepare factors for summation
-        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
-        # shape [K, N]
-        #g2_gamma2 = tf.einsum('ij,l->ijl', sigma_ij2/4.0, g_sq) # [N*N,K]
-        #chunk_size = 128
-        #Vij = self.accumulate_over_g(rij, sigma_ij2, g_vecs, g_sq, chunk_size)
-        '''
-        Vij = tf.zeros(self._n_atoms * self._n_atoms, dtype=tf.float32)
-        #for k in tf.range(tf.shape(g_sq)[0]):
-
-        for k in tf.range(200):
-            g =  g_sq[k]
-            g_v = g_vecs[k,:]
-            g2_gamma2 = sigma_ij2 / 4.0 * g # [N*N,K]
-            exp_ij = tf.exp(-g2_gamma2)
-            exp_ij_by_g_sq = exp_ij * 1.0 / (g + 1e-12)
-
-            # The cosine term: shape [N*N,K]
-            cos_term = tf.cos(tf.einsum('ij, j->i', rij, g_v))
-            #rij_dot_g = tf.squeeze(tf.matmul(rij, g_v[:,None]))
-            #cos_term = tf.cos(rij_dot_g)
-            #cos_term = tf.cos(tf.reduce_sum(rij[:,:,None,:] * g_vecs[None,None,:,:], axis=-1))
-
-            # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/4)/g_sq[k] * cos_term[k]
-            # Compute exp outer product and divide by k^2
-            Vij += exp_ij_by_g_sq * cos_term  # [N*N]
-        ''' 
-
-        #g2_gamma2 = 0.25 * tf.einsum('i,j->ij',sigma_ij2, g_sq) # [N*N,K]
-        #exp_ij = tf.exp(-g2_gamma2)
-        exp_ij = tf.exp(-0.25 * sigma_ij2[:,None] * g_sq[None,:]) # [N*N,K]
-        #exp_ij_by_g_sq = exp_ij * 1.0 / (g_sq[None,:] + 1e-12)
-        g_sq_inv = 1.0 / (g_sq + 1e-12)
-
-        # The cosine term: shape [N*N,K]
-        #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
+        exp_ij = tf.exp(-0.25 * sigma_ij2[:,None] * g_sq[None,:]) / (g_sq[None,:] + 1e-12) # [N*N,K]
         g_vecs_transpose = tf.transpose(self.g_vecs)
 
         rij = tf.reshape(self._positions[:,None,:] - self._positions[None,:,:], [-1,3])
-        #rij_dot_g = tf.matmul(rij, g_vecs_transpose) # [N*N,K]
-        #cos_term = tf.cos(tf.matmul(rij, g_vecs_transpose)) #[N*N,K]
-        Vij_qq = 2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)) * g_sq_inv[None,:], axis=-1)  # [N*N, K]
-
-        rij = tf.reshape(positions_plus_d[:,None,:] - self._positions[None,:,:], [-1,3])
-        #rij_dot_g = tf.matmul(rij, g_vecs_transpose)
-        #cos_term = tf.cos(rij_dot_g)
-        _Vij_dj_zq =  2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)) * g_sq_inv[None,:], axis=-1)
-        Vij_zq = (Vij_qq - _Vij_dj_zq)  # [N*N]
+        Vij_qq = 2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)), axis=-1)  # [N*N, K]
 
         rij = tf.reshape(self._positions[:,None,:] - positions_plus_d[None,:,:], [-1,3])
-        #rij_dot_g = tf.matmul(rij, g_vecs_transpose)
-        #cos_term = tf.cos(rij_dot_g)
-        _Vij_dj_qz =  2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)) * g_sq_inv[None,:], axis=-1)
+        _Vij_dj_zq =  2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)), axis=-1)
+        Vij_zq = (Vij_qq - _Vij_dj_zq)  # [N*N]
+
+        rij = tf.reshape(positions_plus_d[:,None,:] - self._positions[None,:,:], [-1,3])
+        _Vij_dj_qz =  2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)), axis=-1)
         Vij_qz = (Vij_qq - _Vij_dj_qz)  # [N*N]
 
-        rij = tf.reshape(positions_plus_d[:,None,:] - positions_plus_d[None,:,:], [-1,3])
-        #rij_dot_g = tf.matmul(rij, g_vecs_transpose)
-        #cos_term = tf.cos(rij_dot_g)
+        rij = tf.reshape(positions_plus_d[None,:, :] - positions_plus_d[:,None,:], [-1,3])
         Vij_zz =  (Vij_qq  - _Vij_dj_qz - _Vij_dj_zq  + 
-                   2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)) * g_sq_inv[None,:], axis=-1))  # [N*N]
-
-        #cos_term = tf.cos(tf.reduce_sum(rij[:,:,None,:] * g_vecs[None,None,:,:], axis=-1))
-
-        # Build energy contribution for each g as exp(-g^2 * gamma_ij**2/4)/g_sq[k] * cos_term[k]
-        # Compute exp outer product and divide by k^2
-        #Vij_qq = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term, g_sq_inv)  # [N*N]
-        #Vij_qz = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term - cos_plus_dj_term, g_sq_inv)  # [N*N]
-        #Vij_zz = 2.0 * tf.einsum('ij,ij,j->i',exp_ij, cos_term - 2 * cos_plus_dj_term + cos_plus_didj_term, g_sq_inv)  # [N*N]
-        #divide Vij_qq by 2 because of the factor of 2 multiplied above
+                   2.0 * tf.reduce_sum(exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose)), axis=-1))  # [N*N]
 
         # Multiply by prefactor (charges, 4pi/V, Coulomb constant e^2/4piepsilon_0 in eV-Å units) so that E = 1/2 \sum_ij Vij
         conversion_fact = CONV_FACT * (4.* pi / self.volume)
@@ -593,72 +711,55 @@ class ewald:
         g_vecs_transpose = tf.transpose(self.g_vecs)
 
         rij = tf.reshape(self._positions[:,None,:] - positions_plus_d[None,:,:], [-1,3])
-        #rij_dot_g = tf.matmul(rij, g_vecs_transpose)
-        #Fij will be used through to avoid storing too many intermediate large tensors
-        Fij = 2.0 * tf.matmul(exp_ij * tf.sin(tf.matmul(rij, g_vecs_transpose)), 
-                              g_sq_inv_g_alp) #[N**2, 3]
-  
-        rij = tf.reshape(positions_plus_d[:,None,:] - self._positions[None,:,:], [-1,3])
-        #rij_dot_g = tf.matmul(rij, g_vecs_transpose)
-        #sin_term = tf.sin(rij_dot_g)
-        #sin_term_exp = exp_ij * sin_term
-        Fij -=  tf.matmul(exp_ij * tf.sin(tf.matmul(rij, g_vecs_transpose)), 
-                              g_sq_inv_g_alp) #[N**2, 3]
+        rij2 = tf.reshape(positions_plus_d[:,None,:] - positions_plus_d[None,:,:], [-1,3])
+        #Fij = 2.0 * tf.matmul(exp_ij * tf.sin(tf.matmul(rij, g_vecs_transpose)), 
+        zz = tf.reshape(z_charge[:,None] * z_charge[None,:],[-1])
+        qz = tf.reshape(q_charge[:,None] * z_charge[None,:],[-1])
 
-        zq = tf.expand_dims(z_charge[:,None] * q_charge[None,:], axis=-1)
-        Fi_qz = 0.5 * tf.reduce_sum(tf.reshape(-Fij, [self._n_atoms, self._n_atoms, 3]) * zq, axis=1)
+        sin_1 = tf.sin(tf.matmul(rij, g_vecs_transpose)) 
+        sin_2 = tf.sin(tf.matmul(rij2, g_vecs_transpose))
+        cos_1 = tf.sqrt(1.0 - sin_1 * sin_1 + 1e-4)
+        cos_2 = tf.sqrt(1.0 - sin_2 * sin_2 + 1e-4)
+        Fij_a = 2.0 * tf.matmul(exp_ij * ((sin_2 - sin_1) * zz[:,None] -
+                                           sin_1 * qz[:,None]), 
+                                           g_sq_inv_g_alp) # N^2 x 3
 
-        rij = tf.reshape(positions_plus_d[:,None,:] - positions_plus_d[None,:,:], [-1,3])
-        #rij_dot_g = tf.matmul(rij, g_vecs_transpose)
-        #sin_term = tf.sin(rij_dot_g)
-        #sin_term_exp = exp_ij * sin_term
-        #Vij_zz  =  [N^2,K] x [K,3]
-        Fij = (4.0 * tf.matmul(exp_ij * tf.sin(tf.matmul(rij, g_vecs_transpose)), 
-                              g_sq_inv_g_alp) - Fij) #[N**2, 3]
-
-        zz = tf.expand_dims(z_charge[:,None] * z_charge[None,:], axis=-1)
-        #terms = [N,N,3] x [N,N]
-        Fi_zz = 0.5 * tf.reduce_sum(tf.reshape(Fij, [self._n_atoms, self._n_atoms, 3]) * zz, axis=1) #[N,3]
-
+        Fi_a = tf.reduce_sum(tf.reshape(Fij_a, [self._n_atoms, self._n_atoms, 3]), axis=1) #N,3
         conversion_fact = CONV_FACT * (4.* pi / self.volume)
-        F_di = Ei * shell_displacement + (Fi_qz + Fi_zz) * conversion_fact
+        Fi_a *= conversion_fact
+        Fi_a += Ei * shell_displacement
+
 
         # compute jacobian
-        #dagonal i=j
-        g_sq_inv_g_alp_beta = tf.reshape(g_sq_inv_g_alp[:,:,None] * self.g_vecs[:,None,:] + 1e-6, [-1,9]) #[K,3,3]
-        #exp_ii = tf.exp(-0.5 * (self._gaussian_width**2)[:,None] * g_sq[None,:]) # [N,K]
-        #exp_ii = tf.exp(-g2_gamma2) # [N,K]
-        #ri_dot_g = tf.matmul(shell_displacement, g_vecs_transpose) # [N,K]
-        cos_kdi_exp = (tf.cos(tf.matmul(shell_displacement, g_vecs_transpose)) * 
-                       tf.exp(-0.5 * (self._gaussian_width**2)[:,None] * g_sq[None,:])) #[N,K]
-
-        charges2 = z_charge * (z_charge + q_charge) 
-        # Identity matrix delta_ab
-        delta = tf.eye(3)   # shape (3,3)
-        # Expand and multiply
-        J = tf.reshape(Ei[:, :, None] * delta[None, :, :], [-1,9])
-        J += 2.0 * conversion_fact * tf.matmul(cos_kdi_exp, g_sq_inv_g_alp_beta) * charges2[:,None] # [N,9]
+        delta_ij = tf.reshape(tf.eye(self._n_atoms), [-1])   # shape (3,3)
+        g_sq_inv_g_alp_beta = tf.reshape(g_sq_inv_g_alp[:,:,None] * self.g_vecs[:,None,:] + 1e-6, [-1,9]) #[K,9]
         
-        #in the presence of field
-        Fia_efield = self.sawtooth_potential_fourier_derivative(self._positions, z_charge, N=N_fourier_comps)
-        J += tf.reshape(Fia_efield[:,:,None] * tf.eye(3)[None :, :], [-1,9])
-
+        #Jij_ab = 2.0 * tf.matmul(exp_ij * ((cos_2  - (cos_2 - cos_1) * delta_ij[:,None]) * zz[:,None] +
+        #                                   cos_1 * qz[:,None] * delta_ij[:,None]),
+        #                                   g_sq_inv_g_alp_beta) # N^2 , 9
         #'''
-        ############ off diagonal i != j
+        exp_ij = tf.exp(-0.5 * self._gaussian_width[:,None]**2 * g_sq[None,:]) # [N,K]
+        cos_1 = tf.cos(tf.matmul(shell_displacement, g_vecs_transpose)) # N,K
+        z_charge2 = z_charge * z_charge
+        qz2 = z_charge * q_charge
+        Ji_ab = 2.0 * tf.matmul(exp_ij * cos_1 * (z_charge2 + qz2)[:,None],
+                                           g_sq_inv_g_alp_beta) # N, 9
+        #'''
+        #Jij_ab *= conversion_fact
 
-        #cos_term = tf.cos(tf.matmul(rij, g_vecs_transpose))
-        cos_term_exp = exp_ij * tf.cos(tf.matmul(rij, g_vecs_transpose))
-        Fij_zz = 2.0 * conversion_fact * tf.reshape(tf.matmul(cos_term_exp, g_sq_inv_g_alp_beta), 
-                                                    [self._n_atoms,self._n_atoms,3,3]) * zz[:,:,:,None] # [N, N,3,3]
-        delta_ij = tf.eye(self._n_atoms)
-        Jijab = tf.reshape(J, [-1,3,3])[:,None,:,:] * delta_ij[:,:,None,None] + Fij_zz * (1.0 - delta_ij[:,:,None,None]) # [N,N,3,3]
+        #Jij_ab += tf.reshape(Ei[:,None,:,None] * 
+        #                    tf.eye(self._n_atoms)[:,:,None,None] * 
+        #                     tf.eye(3)[None,None,:, :], [-1,9])
+        Ji_ab += tf.reshape(Ei[:,:,None] * 
+                             tf.eye(3)[None,:, :], [-1,9])
+
+        #Jij_ab = tf.reshape(Jij_ab, [self._n_atoms,self._n_atoms,3,3])
+        Ji_ab = tf.reshape(Ji_ab, [self._n_atoms,3,3])
         
-        #'''
-        #Jiab = tf.reshape(J, [-1,3,3]) + 1.0e-6
+        return (Fi_a, Ji_ab)
         #we transpose Jijab to Jiajb
-        return tf.reshape(F_di, [self._n_atoms*3]), tf.reshape(tf.transpose(Jijab,[0,2,1,3]), [self._n_atoms*3,self._n_atoms*3])
-        #return tf.reshape(F_di, [self._n_atoms, 3]), tf.reshape(Jiab,[self._n_atoms,3,3])
-        #return tf.reshape(F_di, [self._n_atoms,3,1]), J
+        #return (tf.reshape(Fi_a, [-1]), 
+        #        tf.reshape(tf.transpose(Jij_ab,[0,2,1,3]), [self._n_atoms*3,self._n_atoms*3]))
     
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -666,29 +767,29 @@ class ewald:
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(), dtype=tf.int32),
                 tf.TensorSpec(shape=(), dtype=tf.float32),
                 ]
                  )
-    def shell_optimization_newton(self, x, z_charge, q_charge, Ei,
+    def shell_optimization_newton(self, x, z_charge, q_charge, Ei, field_term,
                                    max_iter=1, tol=1e-6):
         
         # xnew = xold - \sum_{alpha} J_{i\alpha\beta} F_{i\beta} 
-        '''
+        #field_term = tf.reshape(field_term, [-1])
+
+        @tf.function
         def cond(i, x, dx):
             return tf.logical_and(
                 tf.less(i, max_iter),
-                tf.greater(tf.norm(dx), tol)
+                tf.greater(tf.norm(dx / (x + 1e-12)), tol)
                 )
-
+        @tf.function
         def body(i, x, dx):
             Fx, J = self.recip_space_term_with_opt_shell_func(z_charge, q_charge, Ei, x)
-            #A = tf.matmul(tf.transpose(J), J)
-            #B = tf.matmul(tf.transpose(J), Fx[:,None])
-            #dx = tf.reshape(tf.linalg.solve(A + 1e-6 * tf.eye(3*self._n_atoms), -B),[-1,3])
-            #need to regularize jacobian
-            #dx = tf.reshape(tf.linalg.solve(J + 1e-3 * tf.eye(3)[None,:,:], -Fx[:,:,None]),[-1,3])
-            dx = tf.reshape(tf.linalg.solve(J + 1e-3 * tf.eye(self._n_atoms*3), -Fx[:,None]),[-1,3])
+            Fx += field_term
+            dx = tf.reshape(tf.linalg.solve(J, -Fx[:,:,None]),[-1,3])
+            #dx = tf.reshape(tf.linalg.solve(J, -Fx[:,None]),[-1,3])
             x_new = x + dx
             return i + 1, x_new, dx
 
@@ -697,13 +798,13 @@ class ewald:
         dx = tf.ones_like(x, tf.float32)
 
         _, x_final, _ = tf.while_loop(cond, body, [i, x, dx])
-        '''
         #we are doing only a single step for now
-        Fx, J = self.recip_space_term_with_opt_shell_func(z_charge, q_charge, Ei, x)
-        dx = tf.reshape(tf.linalg.solve(J + 1e-3 * tf.eye(self._n_atoms*3), -Fx[:,None]),[-1,3])
-        return x + dx
-
-        #return x_final
+        #Fx, J = self.recip_space_term_with_opt_shell_func(z_charge, q_charge, Ei, x)
+        #Fx += field_term
+        #x_final = x + tf.reshape(tf.linalg.solve(J + 1e-3 * tf.eye(self._n_atoms*3), -Fx[:,None]),[-1,3])
+        #x_final = x + tf.reshape(tf.linalg.solve(J, -Fx[:,:,None]),[-1,3])
+        #x_final = x + tf.reshape(tf.linalg.solve(J, -Fx[:,None]),[-1,3])
+        return x_final
 
     @tf.function(jit_compile=False,
                 input_signature=[
@@ -815,308 +916,87 @@ class ewald:
         x = tf.linalg.solve(Fij, -b[:,None])
         return tf.reshape(x, [-1,3])
     
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                ]
-                 )
-    def compute_weights(self, first_atom_idx, 
-                        second_atom_idx, 
-                        central_atom_id,
-                        atomic_numbers):
-
-        atomic_numbers = tf.gather(atomic_numbers, first_atom_idx)
-
-        central_atoms_index = (atomic_numbers == central_atom_id)
-        neighbors_idx = second_atom_idx[central_atoms_index]
-        atom_idx = first_atom_idx[central_atoms_index]
-    
-        unique_id, inverse_idx, unique_counts = tf.unique_with_counts(neighbors_idx)
-        unique_id_central, inverse_idx_central, _ = tf.unique_with_counts(atom_idx)
-
-        N_central = tf.shape(unique_id_central)[0]
-        #N_all = tf.shape(unique_id)[0] + N_central
-        tf_full = tf.range(self._n_atoms)
-
-        # Build pairwise equality mask between tf_full and neighbors_idx
-        eq_mask = tf.cast(tf.equal(tf_full[:, None], neighbors_idx[None, :]), tf.float32)  # [N_all, n_pairs]
-
-        # For each pair, associate its central-atom column
-        col_ids = inverse_idx_central  # [n_pairs]
-        scatter_mask = tf.transpose(eq_mask)  # [n_pairs, N_all]
-
-        # Now unsorted_segment_sum over pairs sharing the same central atom
-        weights_uc_T = tf.math.unsorted_segment_sum(scatter_mask, col_ids, N_central)  # [N_central, N_all]
-        weights_uc = tf.reshape(tf.transpose(weights_uc_T), [self._n_atoms,N_central])  # [N_all, N_central]
-        #unique_counts are the weights for each unique_id. 
-        #We can use the inverse_idx to brocast back to the original index of the central atom neighbors
-        weights = tf.gather(unique_counts, inverse_idx)
-        weights = 1.0 / tf.cast(weights, tf.float32) # this should be greater than 0
-        return central_atoms_index, weights, weights_uc
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                ]
-                 )
-    def polarization_linearized_periodic_component(self, Rij, 
-                                          shell_displacement, 
-                                          z_charge, q_charge,
-                                         first_atom_idx,
-                                         second_atom_idx,
-                                         central_atom_id,
-                                         atomic_numbers):
-        '''this is based on sin fourier series of a linear potential in the 
-        P_ia{\sum_{j in Neigh(i)} qj Rij - Zj dj}
-        '''
-        #compute weights
-        central_atoms_index, weights, _ = self.compute_weights(first_atom_idx,
-                                         second_atom_idx,
-                                         central_atom_id,
-                                         atomic_numbers)
-
-        shell_displacement = tf.cast(shell_displacement, dtype=tf.float32)
-        shell_disp_j = tf.gather(shell_displacement, second_atom_idx)[central_atoms_index]
-        z_charge_j = tf.gather(z_charge, second_atom_idx)[central_atoms_index]
-        q_charge_j = tf.gather(q_charge, second_atom_idx)[central_atoms_index]
-        Rij = Rij[central_atoms_index]
-
-        all_rij_norm = tf.linalg.norm(Rij, axis=-1) #npair
-        mask = all_rij_norm < P_CUTOFF
-        mask_float = tf.cast(mask, tf.float32)
-        #Rij = tf.where(tf.tile(mask[:,None],[1,3]), Rij, tf.zeros_like(Rij))
-        #shell_disp_j = tf.where(tf.tile(mask[:,None],[1,3]), shell_disp_j, tf.zeros_like(shell_disp_j))
-        #q_charge_j = tf.where(mask, q_charge_j, tf.zeros_like(q_charge_j))
-        #z_charge_j = tf.where(mask, z_charge_j, tf.zeros_like(z_charge_j))
-        Rij *= mask_float[:,None]
-        shell_disp_j *= mask_float[:,None]
-        q_charge_j *= mask_float
-        z_charge_j *= mask_float
-
-        qz_charge = z_charge_j + q_charge_j
-
-        num_segments, inverse_idx = tf.unique(first_atom_idx[central_atoms_index])
-        num_segments = tf.shape(num_segments)[0]
-
-        Pi_q = tf.math.unsorted_segment_sum(data=qz_charge[:,None] * Rij * weights[:,None],
-                                            segment_ids=inverse_idx,
-                                            num_segments=num_segments)
-        Pi_z = -tf.math.unsorted_segment_sum(data=z_charge_j[:,None] * (Rij + shell_disp_j) * weights[:,None],
-                                            segment_ids=inverse_idx,
-                                            num_segments=num_segments)
-
-        # we should add the self correction in the main function
-        i_idx = (atomic_numbers == central_atom_id)
-        positions_i = self._positions[i_idx]
-        shell_disp_i = shell_displacement[i_idx]
-        z_charge_i = z_charge[i_idx]
-
-        P_self = -z_charge_i[:,None] * shell_disp_i
-
-        return (tf.reshape(Pi_q, [-1,3]), 
-                tf.reshape(Pi_z + P_self, [-1,3]))  #shape (Nats,3)
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                ]
-                 )
-    def polarization_linearized_periodic(self, Rij, 
-                                          shell_displacement, 
-                                          z_charge, q_charge,
-                                         first_atom_idx,
-                                         second_atom_idx,
-                                         central_atom_id,
-                                         atomic_numbers):
-        '''this is based on sin fourier series of a linear potential in the 
-        P_ia{\sum_{j in Neigh(i)} qj Rij - Zj dj}
-        '''
-        #compute weights
-        central_atoms_index, weights, _ = self.compute_weights(first_atom_idx,
-                                         second_atom_idx,
-                                         central_atom_id,
-                                         atomic_numbers)
-
-        shell_displacement = tf.cast(shell_displacement, dtype=tf.float32)
-        shell_disp_j = tf.gather(shell_displacement, second_atom_idx)[central_atoms_index]
-        z_charge_j = tf.gather(z_charge, second_atom_idx)[central_atoms_index]
-        q_charge_j = tf.gather(q_charge, second_atom_idx)[central_atoms_index]
-        Rij = Rij[central_atoms_index]
-
-        all_rij_norm = tf.linalg.norm(Rij, axis=-1) #npair
-        mask = all_rij_norm < P_CUTOFF
-        mask_float = tf.cast(mask, tf.float32)
-        #Rij = tf.where(tf.tile(mask[:,None],[1,3]), Rij, tf.zeros_like(Rij))
-        #shell_disp_j = tf.where(tf.tile(mask[:,None],[1,3]), shell_disp_j, tf.zeros_like(shell_disp_j))
-        #q_charge_j = tf.where(mask, q_charge_j, tf.zeros_like(q_charge_j))
-        #z_charge_j = tf.where(mask, z_charge_j, tf.zeros_like(z_charge_j))
-        Rij *= mask_float[:,None]
-        shell_disp_j *= mask_float[:,None]
-        q_charge_j *= mask_float
-        z_charge_j *= mask_float
-
-        qz_charge = z_charge_j + q_charge_j
-        num_segments, inverse_idx = tf.unique(first_atom_idx[central_atoms_index])
-        num_segments = tf.shape(num_segments)[0]
-
-        Pi_q = tf.math.unsorted_segment_sum(data=qz_charge[:,None] * Rij * weights[:,None],
-                                            segment_ids=inverse_idx,
-                                            num_segments=num_segments)
-        Pi_z = -tf.math.unsorted_segment_sum(data=z_charge_j[:,None] * (Rij + shell_disp_j) * weights[:,None],
-                                            segment_ids=inverse_idx,
-                                            num_segments=num_segments)
-
-        # we should add the self correction in the main function
-        i_idx = (atomic_numbers == central_atom_id)
-        positions_i = self._positions[i_idx]
-        shell_disp_i = shell_displacement[i_idx]
-        z_charge_i = z_charge[i_idx]
-
-        P_self = -z_charge_i[:,None] * shell_disp_i
-        return tf.reshape(Pi_q + Pi_z + P_self, [-1,3]) #shape (Nats,3)
     
     @tf.function(jit_compile=False,
                 input_signature=[
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 ]
                  )
-    def potential_linearized_periodic(self,Rij,
-                                      z_charge, 
-                                      atomic_numbers, 
-                                      central_atom_id,
-                                      first_atom_idx,
-                                      second_atom_idx):
-        '''this is based on sin fourier series of a linear potential in the 
-        dE/dq_k = -\sum_{ij in Neigh(i)} delta_jk Rij Wij
-        dE/dd_ka = \sum_{ij in Neigh(i)} delta_jk Wij efield_a
+    def polarization_linearized_sin(self, z_charge, q_charge, shell_disp):
+        '''this is based on sin fourier series of a linear potential in the
         '''
-        central_atoms_index, weights, _ = self.compute_weights(first_atom_idx,
-                                         second_atom_idx,
-                                         central_atom_id,
-                                         atomic_numbers)
-
-        z_charge_j = tf.gather(z_charge, second_atom_idx)[central_atoms_index]
-        Rij = Rij[central_atoms_index]
-
-        all_rij_norm = tf.linalg.norm(Rij, axis=-1) #npair
-        mask = all_rij_norm < P_CUTOFF
-        mask_float = tf.cast(mask, tf.float32)
-
-        Rij *= mask_float[:,None]
-        z_charge_j *= mask_float
-
-        num_segments, inverse_idx = tf.unique(first_atom_idx[central_atoms_index])
-        num_segments = tf.shape(num_segments)[0]
-
-        #delta_ij = tf.eye(num_rows=tf.shape(inverse_idx)[0], num_columns=self._n_atoms)
-        delta_jk = tf.cast(tf.equal(tf.range(self._n_atoms)[None, :],
-                                    second_atom_idx[central_atoms_index][:,None]), tf.float32)
-
-
-        Vi_alpha = -tf.math.unsorted_segment_sum(Rij[:,None,:] * weights[:,None,None] * delta_jk[:,:,None], 
-                                                      inverse_idx, num_segments=num_segments) # N_central, 
-        Vi = tf.reduce_sum(tf.reduce_sum(Vi_alpha, axis=0) * self.efield[None,:], axis=1) # N
-        
-        dVi_alpha = tf.math.unsorted_segment_sum(weights[:,None] * delta_jk * z_charge_j[:,None], 
-                                                      inverse_idx, num_segments=num_segments)
-        dVi_alpha = tf.reduce_sum(dVi_alpha, axis=0) # N,3
-
-        z_charge_i = tf.where(atomic_numbers==central_atom_id, 
-                              z_charge, tf.zeros_like(z_charge))
-        dVi = (dVi_alpha + z_charge_i)[:,None] * self.efield[None,:] # N,3
-
-        return Vi, dVi #shape (Nats,3)
+        alph1_sq = self._gaussian_width_a * self._gaussian_width_a
+        alph2_sq = self._gaussian_width_b * self._gaussian_width_b
+        G = 2.0 * pi / self.cell_length
+        G_sq = G * G
+        positions = self._positions
+        G_dot_R = G[None,:] * positions
+        alpha1_g_sq = alph1_sq[:,None] * G_sq[None,:]
+        alpha2_g_sq = alph2_sq[:,None] * G_sq[None,:]
+        _sin_term = tf.sin(G_dot_R)
+        _cos_term = tf.cos(G_dot_R)
+        Piq = tf.reduce_sum(q_charge[:,None] * tf.exp(-alpha1_g_sq / 4) * 
+                             _sin_term / G[None,:], axis=0)
+        Pie = tf.reduce_sum(-z_charge[:,None] * 
+               tf.exp(-alpha2_g_sq / 4) * 
+               _cos_term * shell_disp, axis=0)
+        Pie += 0.5 * tf.reduce_sum(z_charge[:,None] * tf.exp(-alpha2_g_sq / 4) * 
+                _sin_term * G[None,:] * shell_disp * shell_disp, axis=0)
+        return Piq, Pie
 
     @tf.function(jit_compile=False,
                 input_signature=[
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
                 ]
                  )
-    def total_energy_linearized_periodic(self, Rij,
-                                          shell_displacement,
-                                          z_charge, q_charge,
-                                          first_atom_idx,
-                                         second_atom_idx,
-                                         central_atom_id,
-                                         atomic_numbers):
-        '''this is based on sin fourier series of a linear potential in the 
-        P_ia{\sum_{j in Neigh(i)} qj Rij - Zj dj}
-        E = -efiled * P
+    def total_energy_sin(self, z_charge, q_charge,
+                                    shell_disp):
+        Piq, Pie = self.polarization_linearized_sin(z_charge, 
+                                                    q_charge, 
+                                                    shell_disp)
+        return -tf.reduce_sum((Piq + Pie) * self._efield)
+
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
+                 )
+    def potential_linearized_sin(self, z_charge):
+        '''this is based on sin fourier series of a linear potential in the
+        P_a = {\sum_{j} qj (Rj + dj) - Zj dj}
         '''
-        #compute weights
-        central_atoms_index, weights, _ = self.compute_weights(first_atom_idx,
-                                         second_atom_idx,
-                                         central_atom_id,
-                                         atomic_numbers)
-
-        shell_displacement = tf.cast(shell_displacement, dtype=tf.float32)
-        shell_disp_j = tf.gather(shell_displacement, second_atom_idx)[central_atoms_index]
-        z_charge_j = tf.gather(z_charge, second_atom_idx)[central_atoms_index]
-        q_charge_j = tf.gather(q_charge, second_atom_idx)[central_atoms_index]
-        Rij = Rij[central_atoms_index]
-
-        all_rij_norm = tf.linalg.norm(Rij, axis=-1) #npair
-        mask = all_rij_norm < P_CUTOFF
-        mask_float = tf.cast(mask, tf.float32)
-        #Rij = tf.where(tf.tile(mask[:,None],[1,3]), Rij, tf.zeros_like(Rij))
-        #shell_disp_j = tf.where(tf.tile(mask[:,None],[1,3]), shell_disp_j, tf.zeros_like(shell_disp_j))
-        #q_charge_j = tf.where(mask, q_charge_j, tf.zeros_like(q_charge_j))
-        #z_charge_j = tf.where(mask, z_charge_j, tf.zeros_like(z_charge_j))
-
-        Rij *= mask_float[:,None]
-        shell_disp_j *= mask_float[:,None]
-        q_charge_j *= mask_float
-        z_charge_j *= mask_float
-
-        qz_charge = z_charge_j + q_charge_j
-        num_segments, inverse_idx = tf.unique(first_atom_idx[central_atoms_index])
-        num_segments = tf.shape(num_segments)[0]
-
-        Pi_q = tf.math.unsorted_segment_sum(data=qz_charge[:,None] * Rij * weights[:,None],
-                                            segment_ids=inverse_idx,
-                                            num_segments=num_segments)
-        Pi_z = -tf.math.unsorted_segment_sum(data=z_charge_j[:,None] * (Rij + shell_disp_j) * weights[:,None],
-                                            segment_ids=inverse_idx,
-                                            num_segments=num_segments)
-
-        # we should add the self correction in the main function
-        i_idx = (atomic_numbers == central_atom_id)
-        positions_i = self._positions[i_idx]
-        shell_disp_i = shell_displacement[i_idx]
-        z_charge_i = z_charge[i_idx]
-        P_self = -z_charge_i[:,None] * shell_disp_i
-
-        return -tf.reduce_sum((Pi_q + Pi_z + P_self) * self.efield[None,:]) #shape (Nats,3)
+        alph1_sq = self._gaussian_width_a * self._gaussian_width_a
+        alph2_sq = self._gaussian_width_b * self._gaussian_width_b
+        G = 2.0 * pi / self.cell_length
+        G_sq = G * G
+        positions = self._positions
+        G_dot_R = G[None,:] * positions
+        alpha1_g_sq = alph1_sq[:,None] * G_sq[None,:]
+        _sin_term = tf.sin(G_dot_R)
+        _cos_term = tf.cos(G_dot_R)
+        Vi = -tf.reduce_sum(tf.exp(-alpha1_g_sq / 4) * _sin_term * self.efield[None,:] / G[None,:], axis=1)
+        dVi = z_charge[:,None] * tf.exp(-alpha1_g_sq / 4) * _cos_term * self.efield[None,:]
+        dVie = -z_charge[:,None] * tf.exp(-alpha1_g_sq / 4) * _sin_term * self.efield[None,:] * G[None,:]
+        return Vi, dVi, dVie
     
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
+                 )
+    def potential_linearized_periodic_ref1(self, z_charge):
+        '''this is based on sin fourier series of a linear potential in the
+        P_a = {\sum_{j} qj (Rj + dj) - Zj dj}
+        '''
+        Vi = -tf.reduce_sum(self._positions * self.efield[None,:], axis=1)
+        dVi = z_charge[:,None] * self.efield[None,:]
+        dVie = -tf.tile(self.efield[None,:], [self._n_atoms,1])
+        return Vi, dVi, dVie
+
     @tf.function(jit_compile=False,
                 input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -1124,94 +1004,401 @@ class ewald:
                  )
     def potential_linearized_periodic_ref0(self, z_charge):
         '''this is based on sin fourier series of a linear potential in the
-        P_ia = {\sum_{j} qj Rj - Zj dj}
+        P_a = {\sum_{j} qj Rj - Zj dj}
         '''
         Vi = -tf.reduce_sum(self._positions * self.efield[None,:], axis=1)
         dVi = z_charge[:,None] * self.efield[None,:]
         return Vi, dVi #shape (Nats,3)
-
-
-    ##########
-    #Sawtooth potentials
+    
     @tf.function(jit_compile=False,
                 input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 ]
-                 )
-    def sawtooth_potential_fourier_linearized_qd(self, z_charge):
-        '''this is based on sin fourier series of a linear potential in the 
-        '''
-        N = N_fourier_comps
-        sigma = SIGMA
-        G = 2.0 * pi / self.cell_length
+                )
+    def _atom_centered_dV_qs(self, 
+                        z_charge, 
+                        central_atom_id,
+                        atomic_numbers):
 
-        counts = tf.range(N+1, dtype=tf.float32)
-        coeffs = 2 * counts + 1
-        g_dot_r = self._positions * G[None,:]
-        smoothing = tf.exp(-0.5 * (G[:,None] * coeffs[None,:] * sigma)**2) #[3, ncoeffs]
+        cell = self._cell
+        i_idx = (atomic_numbers == central_atom_id)
+        positions_i = self._positions[i_idx]
+        unique_type, _, counts = tf.unique_with_counts(atomic_numbers)
+        composition = tf.cast(counts / tf.reduce_min(counts), tf.int32)
 
-        terms_sin = tf.math.sin(coeffs[None,None,:] * g_dot_r[:,:,None])
-        terms_cos = tf.math.cos(coeffs[None,None,:] * g_dot_r[:,:,None])
+        #initialize P
+        dViq = tf.zeros(self._n_atoms, dtype=tf.float32)
+        dVie = tf.zeros((self._n_atoms,3), dtype=tf.float32)
+        dViqe = tf.zeros((self._n_atoms,3), dtype=tf.float32)
 
-        terms_cos *= ((-1.0) ** (counts)[None,None,:] * smoothing[None,:,:] / coeffs[None,None,:])
-        terms_sin_1 = terms_sin * ((-1.0) ** (counts)[None,None,:] * smoothing[None,:,:] / coeffs[None,None,:]**2)
-        terms_sin_2 = terms_sin * ((-1.0) ** (counts)[None,None,:] * smoothing[None,:,:])
-        # implement Efield
-        efield = self.efield[None,:]  # (None,3)
-        efield_G = (self.efield * G)[None,:]  # (None,3)
-        efield_over_G = (self.efield / G)[None,:]  # (None,3)
+        atomic_number_rep = atomic_numbers #shape = nat
+        z_charge_rep = z_charge #shape = nat
+        position_replicas = self._positions # nat, 3
+        # for the E-field matrix elements, there is no contribution from neighboring cells but the weight can be zero or 1 
+        for pos in positions_i:
+            #for n_jtype, jtype in zip(composition, unique_type):
+            for n_jj in tf.stack([composition, unique_type], axis=1):
+                #n_jtype, jtype = n_jj
+                n_jtype, jtype = n_jj[0], n_jj[1]
+
+
+                idx_cast1 = (atomic_number_rep == jtype)
+                Rij_jtype = tf.where(tf.tile(idx_cast1[:,None], [1,3]), 
+                                     position_replicas - pos, 
+                                     tf.ones_like(position_replicas) * 100.0) 
+                #Nat,3 # replace other positions with large 100. This is greater than typical interatomic distances
+                Rij_norm_jtype = tf.linalg.norm(Rij_jtype, axis=-1)
+                z_charge_jtype = z_charge_rep
+
+                idx_cast2 = tf.less_equal(tf.abs(Rij_norm_jtype - tf.reduce_min(Rij_norm_jtype)), 0.2)
+                w_jtype = tf.where(idx_cast2, tf.ones_like(Rij_norm_jtype), tf.zeros_like(Rij_norm_jtype)) # nat
+                dViq -= tf.reduce_sum(w_jtype[:,None] * Rij_jtype * self.efield[None,:], axis=1)
+                dVie += w_jtype[:,None] * z_charge_jtype[:,None] * self.efield[None,:]
+                dViqe -= w_jtype[:,None] * self.efield[None,:]
+        return dViq, dVie, dViqe
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                ]
+                )
+    def atom_centered_dV_qs(self, 
+                        z_charge, 
+                        central_atom_id,
+                        atomic_numbers):
+        """
+        This function just check that the above function is implemented correctly
+        """
+        cell = self._cell
+        r = tf.range(-1, 2)
+        X, Y, Z = tf.meshgrid(r, r, r, indexing='ij')
+        replicas = tf.stack([tf.reshape(X, [-1]),
+                       tf.reshape(Y, [-1]),
+                       tf.reshape(Z, [-1])], axis=1)
+        #R_vector = tf.matmul(replicas, cell) # shape = 27,3
+        R_vector = tf.matmul(tf.cast(replicas,tf.float32), cell) # shape = 27,3
+
+        i_idx = (atomic_numbers == central_atom_id)
+        positions_i = self._positions[i_idx]
+        unitcell_idx = tf.range(self._n_atoms)
+
+        unique_type, _, counts = tf.unique_with_counts(atomic_numbers)
+        composition = tf.cast(counts / tf.reduce_min(counts), tf.int32)
+
+        #initialize P
+        dViq = tf.zeros(self._n_atoms, dtype=tf.float32)
+        dVie = tf.zeros((self._n_atoms,3), dtype=tf.float32)
+        dViqe = tf.zeros((self._n_atoms,3), dtype=tf.float32)
+
+        unitcell_idx = tf.tile(unitcell_idx[:,None], [1,27])
+        atomic_number_rep = tf.tile(atomic_numbers[:,None], [1,27]) #shape = nat,27
+        z_charge_rep = tf.tile(z_charge[:,None], [1,27]) #shape = nat,27
+        position_replicas = R_vector[None,:,:] + self._positions[:,None,:] # nat, 27, 3
+        #Rij = position_replicas - positions_i[:,None,:]
+         
+        for pos in positions_i:
+            #for n_jtype, jtype in zip(composition, unique_type):
+            for n_jj in tf.stack([composition, unique_type], axis=1):
+                #n_jtype, jtype = n_jj
+                n_jtype, jtype = n_jj[0], n_jj[1]
+
+
+                idx_cast1 = (atomic_number_rep == jtype)
+                Rij_jtype = position_replicas[idx_cast1] - pos
+                Rij_norm_jtype = tf.linalg.norm(Rij_jtype, axis=-1)
+
+                z_charge_jtype = z_charge_rep[idx_cast1]
+                unitcell_idx_jtype = unitcell_idx[idx_cast1]
+
+                idx_cast2 = tf.less_equal(tf.abs(Rij_norm_jtype - tf.reduce_min(Rij_norm_jtype)), 0.2)
+                #idx_cast2 = (Rij_norm_jtype == tf.reduce_min(Rij_norm_jtype))
+                Rij_jtype = Rij_jtype[idx_cast2] # M,3
+                z_charge_jtype = z_charge_jtype[idx_cast2] #M,
+
+                unitcell_idx_jtype = unitcell_idx_jtype[idx_cast2]
+                delta_jk = tf.cast(tf.equal(tf.range(self._n_atoms)[:, None],
+                                            unitcell_idx_jtype[None,:]), tf.float32) #nat,M
+
         
-        counts2 = coeffs * coeffs
-        G2 = G * G
-        alpha2 = self._gaussian_width * self._gaussian_width
-        args = 0.25 * counts2[None,None,:]  * G2[None,:,None] * alpha2[:,None,None]
-        exp = tf.exp(-args)
-        
-        Vi = -4.0 / pi * tf.reduce_sum(terms_sin_1 * efield_over_G[:,:,None] * exp, axis=(1,2)) # N,
-        Vi_z = 4.0 / pi * z_charge[:,None] * tf.reduce_sum(terms_cos * efield[:,:,None] * exp, axis=2) # N,
-        Vi_zd = -4.0 / pi * z_charge[:,None] * tf.reduce_sum(terms_sin_2 * efield_G[:,:,None] * exp, axis=2) # N,
+                w_jtype = tf.cast(n_jtype, tf.float32) / tf.cast(tf.shape(Rij_jtype)[0], tf.float32)
 
-        return Vi, Vi_z, Vi_zd # shape ([Nats, ],[N,3],[N,3])
+
+                dViq -= tf.reduce_sum(w_jtype * Rij_jtype[None,:,:] * delta_jk[:,:,None] * self.efield[None,None,:], axis=(1,2))
+                dVie += tf.reduce_sum(w_jtype * (z_charge_jtype)[None,:,None] * 
+                                      delta_jk[:,:,None] * self.efield[None,None,:], axis=1)
+                dViqe -= tf.reduce_sum(w_jtype * delta_jk[:,:,None] * self.efield[None,None,:], axis=1)
+        return dViq, dVie, dViqe
 
     @tf.function(jit_compile=False,
                 input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
                 ]
-                 )
-    def _sawtooth_potential_fourier_linearized_qd(self, z_charge):
-        '''this is based on sin fourier series of a linear potential in the 
-        '''
-        N = N_fourier_comps
-        sigma = SIGMA
-        G = 2.0 * pi / self.cell_length
+                )
+    def _atom_centered_dV(self, 
+                        z_charge, 
+                        central_atom_id,
+                        atomic_numbers):
 
-        counts = tf.range(1, N+1, dtype=tf.float32)
-        coeffs = counts
-        g_dot_r = self._positions * G[None,:]
-        smoothing = tf.exp(-0.5 * (G[:,None] * coeffs[None,:] * sigma)**2) #[3, ncoeffs]
+        cell = self._cell
+        i_idx = (atomic_numbers == central_atom_id)
+        positions_i = self._positions[i_idx]
+        unique_type, _, counts = tf.unique_with_counts(atomic_numbers)
+        composition = tf.cast(counts / tf.reduce_min(counts), tf.int32)
 
-        terms_sin = tf.math.sin(coeffs[None,None,:] * g_dot_r[:,:,None])
-        terms_cos = tf.math.cos(coeffs[None,None,:] * g_dot_r[:,:,None])
+        #initialize P
+        dViq = tf.zeros(self._n_atoms, dtype=tf.float32)
+        dVie = tf.zeros((self._n_atoms,3), dtype=tf.float32)
 
-        terms_cos *= ((-1.0) ** (counts)[None,None,:] * smoothing[None,:,:])
-        terms_sin_1 = terms_sin * ((-1.0) ** (counts)[None,None,:] * smoothing[None,:,:] / coeffs[None,None,:])
-        terms_sin_2 = terms_sin * ((-1.0) ** (counts)[None,None,:] * smoothing[None,:,:] * coeffs[None,None,:])
-        # implement Efield
-        efield = self.efield[None,:]  # (None,3)
-        efield_G = (self.efield * G)[None,:]  # (None,3)
-        efield_GG = (self.efield * G * G)[None,:]  # (None,3)
+        atomic_number_rep = atomic_numbers #shape = nat
+        z_charge_rep = z_charge #shape = nat
+        position_replicas = self._positions # nat, 3
+        # for the E-field matrix elements, there is no contribution from neighboring cells but the weight can be zero or 1 
+        for pos in positions_i:
+            #for n_jtype, jtype in zip(composition, unique_type):
+            for n_jj in tf.stack([composition, unique_type], axis=1):
+                #n_jtype, jtype = n_jj
+                n_jtype, jtype = n_jj[0], n_jj[1]
+
+
+                idx_cast1 = (atomic_number_rep == jtype)
+                Rij_jtype = tf.where(tf.tile(idx_cast1[:,None], [1,3]), 
+                                     position_replicas - pos, 
+                                     tf.ones_like(position_replicas) * 100.0) 
+                #Nat,3 # replace other positions with large 100. This is greater than typical interatomic distances
+                Rij_norm_jtype = tf.linalg.norm(Rij_jtype, axis=-1)
+                z_charge_jtype = z_charge_rep
+
+                idx_cast2 = tf.less_equal(tf.abs(Rij_norm_jtype - tf.reduce_min(Rij_norm_jtype)), 0.2)
+                w_jtype = tf.where(idx_cast2, tf.ones_like(Rij_norm_jtype), tf.zeros_like(Rij_norm_jtype)) # nat
+                dViq -= tf.reduce_sum(w_jtype[:,None] * Rij_jtype * self.efield[None,:], axis=1)
+                dVie += w_jtype[:,None] * z_charge_jtype[:,None] * self.efield[None,:]
+        return dViq, dVie, tf.zeros_like(dVie)
+
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                ]
+                )
+    def atom_centered_total_energy(self, shell_displacement,
+                                    z_charge, q_charge,
+                                    central_atom_id,
+                                    atomic_numbers):
+        Piq, Pie = self.atom_centered_polarization(shell_displacement,
+                                    z_charge, q_charge,
+                                    central_atom_id,
+                                    atomic_numbers)
+        return -tf.reduce_sum((Piq + Pie) * self._efield)
+
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                ]
+                )
+    def atom_centered_polarization_qs(self, shell_displacement,
+                                    z_charge, q_charge,
+                                    central_atom_id,
+                                    atomic_numbers):
+
+        cell = self._cell
+        r = tf.range(-1, 2)
+        X, Y, Z = tf.meshgrid(r, r, r, indexing='ij')
+        replicas = tf.stack([tf.reshape(X, [-1]),
+                       tf.reshape(Y, [-1]),
+                       tf.reshape(Z, [-1])], axis=1)
+        R_vector = tf.matmul(tf.cast(replicas,tf.float32), cell) # shape = 27,3
+
+        i_idx = (atomic_numbers == central_atom_id)
+        positions_i = self._positions[i_idx]
+
+        unique_type, _, counts = tf.unique_with_counts(atomic_numbers)
+        composition = tf.cast(counts / tf.reduce_min(counts), tf.int32)
+
+        #initialize P
+        Piq = tf.zeros(3, dtype=tf.float32)
+        Pie = tf.zeros(3, dtype=tf.float32)
+
+        atomic_number_rep = tf.tile(atomic_numbers[:,None], [1,27]) #shape = nat,27
+        q_charge_rep = tf.tile(q_charge[:,None], [1,27]) #shape = nat,27
+        z_charge_rep = tf.tile(z_charge[:,None], [1,27]) #shape = nat,27
+        shell_disp_rep = tf.tile(shell_displacement[:,None,:], [1,27,1]) #shape = nat,27
+        position_replicas = R_vector[None,:,:] + self._positions[:,None,:] # nat, 27, 3
+        #Rij = position_replicas - positions_i[:,None,:]
+         
+        for pos in positions_i:
+            for n_jj in tf.stack([composition, unique_type], axis=1):
+                n_jtype, jtype = n_jj[0], n_jj[1]
+                idx_cast1 = (atomic_number_rep == jtype)
+                Rij_jtype = position_replicas[idx_cast1] - pos
+                Rij_norm_jtype = tf.linalg.norm(Rij_jtype, axis=-1)
+
+                q_charge_jtype = q_charge_rep[idx_cast1]
+                z_charge_jtype = z_charge_rep[idx_cast1]
+                shell_disp_rep_jtype = shell_disp_rep[idx_cast1]
+                idx_cast2 = tf.less_equal(tf.abs(Rij_norm_jtype - tf.reduce_min(Rij_norm_jtype)), 0.2)
+                #idx_cast2 = (Rij_norm_jtype == tf.reduce_min(Rij_norm_jtype))
+                Rij_jtype = Rij_jtype[idx_cast2]
+                #Rij_norm_jtype = Rij_norm_jtype[idx_cast2]
+                q_charge_jtype = q_charge_jtype[idx_cast2]
+                z_charge_jtype = z_charge_jtype[idx_cast2]
+                shell_disp_rep_jtype = shell_disp_rep_jtype[idx_cast2]
+
+                w_jtype = tf.cast(n_jtype, tf.float32) / tf.cast(tf.shape(Rij_jtype)[0], tf.float32)
+                Piq += tf.reduce_sum(w_jtype * (z_charge_jtype)[:,None] * Rij_jtype, axis=0)
+                Pie += tf.reduce_sum(w_jtype * (q_charge_jtype - z_charge_jtype)[:,None] * (Rij_jtype + shell_disp_rep_jtype), axis=0)
+        return Piq, Pie
+    
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                ]
+                )
+    def atom_centered_dV(self, 
+                        z_charge, 
+                        central_atom_id,
+                        atomic_numbers):
+        """
+        This function just check that the above function is implemented correctly
+        """
+        cell = self._cell
+        r = tf.range(-1, 2)
+        X, Y, Z = tf.meshgrid(r, r, r, indexing='ij')
+        replicas = tf.stack([tf.reshape(X, [-1]),
+                       tf.reshape(Y, [-1]),
+                       tf.reshape(Z, [-1])], axis=1)
+        #R_vector = tf.matmul(replicas, cell) # shape = 27,3
+        R_vector = tf.matmul(tf.cast(replicas,tf.float32), cell) # shape = 27,3
+
+        i_idx = (atomic_numbers == central_atom_id)
+        positions_i = self._positions[i_idx]
+        unitcell_idx = tf.range(self._n_atoms)
+
+        unique_type, _, counts = tf.unique_with_counts(atomic_numbers)
+        composition = tf.cast(counts / tf.reduce_min(counts), tf.int32)
+
+        #initialize P
+        dViq = tf.zeros(self._n_atoms, dtype=tf.float32)
+        dVie = tf.zeros((self._n_atoms,3), dtype=tf.float32)
+
+        unitcell_idx = tf.tile(unitcell_idx[:,None], [1,27])
+        atomic_number_rep = tf.tile(atomic_numbers[:,None], [1,27]) #shape = nat,27
+        z_charge_rep = tf.tile(z_charge[:,None], [1,27]) #shape = nat,27
+        position_replicas = R_vector[None,:,:] + self._positions[:,None,:] # nat, 27, 3
+        #Rij = position_replicas - positions_i[:,None,:]
+         
+        for pos in positions_i:
+            for n_jj in tf.stack([composition, unique_type], axis=1):
+                #n_jtype, jtype = n_jj
+                n_jtype, jtype = n_jj[0], n_jj[1]
+                idx_cast1 = (atomic_number_rep == jtype)
+                Rij_jtype = position_replicas[idx_cast1] - pos
+                Rij_norm_jtype = tf.linalg.norm(Rij_jtype, axis=-1)
+
+                z_charge_jtype = z_charge_rep[idx_cast1]
+                unitcell_idx_jtype = unitcell_idx[idx_cast1]
+
+                idx_cast2 = tf.less_equal(tf.abs(Rij_norm_jtype - tf.reduce_min(Rij_norm_jtype)), 0.2)
+                #idx_cast2 = (Rij_norm_jtype == tf.reduce_min(Rij_norm_jtype))
+                Rij_jtype = Rij_jtype[idx_cast2] # M,3
+                z_charge_jtype = z_charge_jtype[idx_cast2] #M,
+
+                unitcell_idx_jtype = unitcell_idx_jtype[idx_cast2]
+                delta_jk = tf.cast(tf.equal(tf.range(self._n_atoms)[:, None],
+                                            unitcell_idx_jtype[None,:]), tf.float32) #nat,M
+
         
-        counts2 = coeffs * coeffs
-        G2 = G * G
-        alpha2 = self._gaussian_width * self._gaussian_width
-        args = 0.25 * counts2[None,None,:]  * G2[None,:,None] * alpha2[:,None,None]
-        exp = tf.exp(-args)
-        
-        Vi = 2.0 / pi * tf.reduce_sum(terms_sin_1 * efield[:,:,None] * exp, axis=(1,2)) # N,
-        Vi_z = -2.0 / pi * z_charge[:,None] * tf.reduce_sum(terms_cos * efield_G[:,:,None] * exp, axis=2) # N,
-        Vi_zd = 2.0 / pi * z_charge[:,None] * tf.reduce_sum(terms_sin_2 * efield_GG[:,:,None] * exp, axis=2) # N,
+                w_jtype = tf.cast(n_jtype, tf.float32) / tf.cast(tf.shape(Rij_jtype)[0], tf.float32)
+                Rij_jtype = tf.reduce_sum(position_replicas[idx_cast1][idx_cast2][...,:,None] - pos[...,None,:], axis=1)
+                
+                dViq -= tf.reduce_sum(
+                        tf.reduce_sum(w_jtype * Rij_jtype[None,:,:] * 
+                                      delta_jk[:,:,None],axis=1) * 
+                        self.efield[None,:], axis=1)
+                
+                dVie += tf.reduce_sum(w_jtype * (z_charge_jtype)[None,:,None] * 
+                                      delta_jk[:,:,None], axis=1) * self.efield[None,:]
+                                      #delta_jk[:,:,None] * self.efield[None,None,:], axis=1)
+        return dViq, dVie, tf.zeros_like(dVie)
 
-        return Vi, Vi_z, Vi_zd # shape ([Nats, ],[N,3],[N,3])
+    @tf.function(jit_compile=False,
+                input_signature=[
+                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                ]
+                )
+    def atom_centered_polarization(self, shell_displacement,
+                                    z_charge, q_charge,
+                                    central_atom_id,
+                                    atomic_numbers):
 
+        cell = self._cell
+        r = tf.range(-1, 2)
+        X, Y, Z = tf.meshgrid(r, r, r, indexing='ij')
+        replicas = tf.stack([tf.reshape(X, [-1]),
+                       tf.reshape(Y, [-1]),
+                       tf.reshape(Z, [-1])], axis=1)
+        R_vector = tf.matmul(tf.cast(replicas,tf.float32), cell) # shape = 27,3
 
+        i_idx = (atomic_numbers == central_atom_id)
+        positions_i = self._positions[i_idx]
+
+        unique_type, _, counts = tf.unique_with_counts(atomic_numbers)
+        composition = tf.cast(counts / tf.reduce_min(counts), tf.int32)
+
+        #initialize P
+        Piq = tf.zeros(3, dtype=tf.float32)
+        Pie = tf.zeros(3, dtype=tf.float32)
+
+        atomic_number_rep = tf.tile(atomic_numbers[:,None], [1,27]) #shape = nat,27
+        q_charge_rep = tf.tile(q_charge[:,None], [1,27]) #shape = nat,27
+        z_charge_rep = tf.tile(z_charge[:,None], [1,27]) #shape = nat,27
+        shell_disp_rep = tf.tile(shell_displacement[:,None,:], [1,27,1]) #shape = nat,27
+        position_replicas = R_vector[None,:,:] + self._positions[:,None,:] # nat, 27, 3
+        #Rij = position_replicas - positions_i[:,None,:]
+         
+        for pos in positions_i:
+            for n_jj in tf.stack([composition, unique_type], axis=1):
+                n_jtype, jtype = n_jj[0], n_jj[1]
+                idx_cast1 = (atomic_number_rep == jtype)
+                Rij_jtype = position_replicas[idx_cast1] - pos
+                Rij_norm_jtype = tf.linalg.norm(Rij_jtype, axis=-1)
+
+                q_charge_jtype = q_charge_rep[idx_cast1]
+                z_charge_jtype = z_charge_rep[idx_cast1]
+                shell_disp_rep_jtype = shell_disp_rep[idx_cast1]
+                idx_cast2 = tf.less_equal(tf.abs(Rij_norm_jtype - tf.reduce_min(Rij_norm_jtype)), 0.2)
+                #idx_cast2 = (Rij_norm_jtype == tf.reduce_min(Rij_norm_jtype))
+                Rij_jtype = Rij_jtype[idx_cast2]
+                #Rij_norm_jtype = Rij_norm_jtype[idx_cast2]
+                q_charge_jtype = q_charge_jtype[idx_cast2]
+                z_charge_jtype = z_charge_jtype[idx_cast2]
+                shell_disp_rep_jtype = shell_disp_rep_jtype[idx_cast2]
+
+                w_jtype = tf.cast(n_jtype, tf.float32) / tf.cast(tf.shape(Rij_jtype)[0], tf.float32)
+
+                #Rij_jtype = position_replicas[idx_cast1][idx_cast2][...,:,None] - pos[...,None,:]
+                #Rij_jtype = tf.reduce_sum(Rijab_jtype, axis=1)
+                #Rij_shell_jtype = tf.reduce_sum(Rijab_jtype + shell_disp_rep_jtype[...,:,None], axis=1)
+                Rij_shell_jtype = Rij_jtype + shell_disp_rep_jtype
+
+                Piq += tf.reduce_sum(w_jtype * (q_charge_jtype + z_charge_jtype)[:,None] * Rij_jtype, axis=0)
+                Pie -= tf.reduce_sum(w_jtype * z_charge_jtype[:,None] * Rij_shell_jtype, axis=0)
+        return Piq, Pie
 
