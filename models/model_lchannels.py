@@ -236,7 +236,7 @@ class BACENET(tf.keras.Model):
         if self.learnable_gaussian_width:
             #acts = ['softplus', 'softplus']
             #if self._max_width > 0:
-            acts = ['tanh', 'tanh']
+            acts = ['sigmoid', 'sigmoid']
             self.gaussian_width_net = Networks(self.nelement, # pass one-hot encoder
                 [64,2], # return two width per species, one for q and the other for Z 
                 acts, 
@@ -1064,11 +1064,11 @@ class BACENET(tf.keras.Model):
                     idx += 1
                     if self._anisotropy:
                         if self.linear_d_terms:
-                            E_d1 = tf.reshape(tf.math.tanh(_atomic_energies[:,idx:idx+3]), [nat,3]) # eV/A
+                            E_d1 = tf.reshape(tf.math.tanh(_atomic_energies[:,idx:idx+3]), [nat,3]) * 0.1 # eV/A
                             idx += 3
-                            E_d2 = tf.reshape(tf.math.softplus(_atomic_energies[:,idx:idx+3]), [nat,3])  # eV/A^2
+                            E_d2 = tf.reshape(tf.math.sigmoid(_atomic_energies[:,idx:idx+3]), [nat,3]) * 5  # eV/A^2
                             idx += 3
-                            E_qd = tf.reshape(tf.math.tanh(_atomic_energies[:,idx:]), [nat,3])  # V/A
+                            E_qd = tf.reshape(tf.math.tanh(_atomic_energies[:,idx:]), [nat,3]) * 0.1  # V/A
                         else:
                             E_d2 = tf.reshape(tf.nn.softplus(_atomic_energies[:,idx:]), [nat,3]) # eV/A^2
                             E_d1 = tf.zeros((nat,3))
@@ -1076,16 +1076,15 @@ class BACENET(tf.keras.Model):
 
                     else:
                         if self.linear_d_terms:
-                            E_d1 = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2
+                            E_d1 = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) * 0.1 # eV/A [-0.1,0.1]
                             idx += 1
-                            E_d2 = tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2
+                            E_d2 = tf.tile(tf.nn.sigmoid(_atomic_energies[:,idx])[:,None], [1,3]) * 5 # eV/A^2 [0,5]
                             idx += 1
-                            E_qd = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2
+                            E_qd = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) * 0.1 # eV/A [-0.1,0.1]
                         else:
-                            E_d2 = tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2
+                            E_d2 = tf.tile(tf.nn.sigmoid(_atomic_energies[:,idx])[:,None], [1,3]) * 5 # eV/A^2 [0,5]
                             E_d1 = tf.zeros((nat,3))
                             E_qd = tf.zeros((nat,3))
-
 
                 #include atomic electronegativity(chi0) and hardness (J0)
                 E1 += chi0
@@ -1154,9 +1153,10 @@ class BACENET(tf.keras.Model):
                            E_d2 + field_kernel_qe, E_qd, atomic_q0,charges, field_kernel_e)
 
                         #update charges
-                        _b += 0.5 * tf.reduce_sum((tf.transpose(Vij_zq,perm=(1,0,2)) + Vij_qz) * shell_disp[None,:,:], axis=(1,2)) #N
                         shell_d2 = shell_disp[:,:,None] * shell_disp[:,None,:]
+                        _b += 0.5 * tf.reduce_sum((tf.transpose(Vij_zq,perm=(1,0,2)) + Vij_qz) * shell_disp[None,:,:], axis=(1,2)) #N
                         _b += 0.5 * tf.reduce_sum((tf.transpose(Vij_zq2,perm=(1,0,2,3)) + Vij_qz2) * shell_d2[None,...], axis=(1,2,3)) #N
+                        _b += 0.5 * tf.reduce_sum(E_qd * shell_disp, axis=1) #sum over cartessian directions
                         charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
                         
                         dq = charges - atomic_q0
@@ -1420,8 +1420,8 @@ class BACENET(tf.keras.Model):
                                      tf.zeros(shape))
 
             if self.learnable_gaussian_width:
-                #minimum = 0.5 and maximum = 2.5, self._species_gaussian_width in [-1,1]
-                self._species_gaussian_width = 1.5 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
+                #minimum = 0.2 and maximum = 1.2, self._species_gaussian_width in [0,1]
+                self._species_gaussian_width = 0.25 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
                 #if self._max_width > 0.0:
                 #    self._species_gaussian_width = 0.5  + (self._max_width 
                 #                                           - 0.5) * self._species_gaussian_width 
@@ -1450,7 +1450,7 @@ class BACENET(tf.keras.Model):
                 #override self.species_nelectrons
                 self.species_nelectrons = tf.reshape(
                         self.species_nelectrons_net(_species_one_hot_encoder), 
-                                                     [-1]) + 2.0 # min is 2
+                                                     [-1]) + 1.0 # min is 1
 
             self._species_nelectrons = tf.cast(self.species_nelectrons, dtype=tf.float32)
             batch_species_nelec = tf.gather(self._species_nelectrons, species_indices)
