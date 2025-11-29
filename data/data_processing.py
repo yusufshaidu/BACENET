@@ -16,7 +16,7 @@ import json
 import ase
 from ase.neighborlist import neighbor_list
 from data.tfr_data_processing import write_tfr, get_tfrs
-from functions.ewald import ewald
+from models.ewald import ewald
 import warnings
 
 from concurrent.futures import ProcessPoolExecutor, as_completed

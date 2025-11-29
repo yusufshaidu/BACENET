@@ -9,9 +9,16 @@ import itertools, os
 from networks.networks import Networks
 import functions.helping_functions as help_fn
 from functions.tf_linop import AOperator
+from models.descriptors import *
+from models.coulomb_functions import (_compute_Aij, _compute_Fia, _compute_Fiajb, 
+                                      _compute_charges_disp, _compute_shell_disp_qqdd2, 
+                                      _compute_shell_disp_qqdd1,_compute_charges,
+                                      _compute_coulumb_energy,
+                                      _compute_coulumb_energy_pqeq_qd,
+                                      _compute_coulumb_energy_pqeq )
 
 from data.unpack_tfr_data import unpack_data
-from functions.ewald import ewald
+from models.ewald import ewald
 
 import warnings
 import logging
@@ -274,604 +281,6 @@ class BACENET(tf.keras.Model):
         x = tf.cast(x, tf.float32)
         return 0.5*(1.0-tf.sign(x))
 
-    @tf.function(jit_compile=True)
-    def custom_segment_sum(self, data, segment_ids, num_segments):
-        result_shape = tf.concat([[num_segments], tf.shape(data)[1:]], axis=0)
-        zeros = tf.zeros(result_shape, dtype=data.dtype)
-        indices = tf.expand_dims(segment_ids, axis=-1)  # shape (N, 1)
-        return tf.tensor_scatter_nd_add(zeros, indices, data)
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                ]
-                 )
-    def _angular_terms(self, rij_unit, lxlylz):
-        '''
-        Compute vectorized three-body angular terms.
-        '''
-        # Compute powers: shape = [npairs, n_lxlylz, 3]
-        rij_lxlylz = (tf.expand_dims(rij_unit, axis=1) + 1e-12) ** tf.expand_dims(lxlylz, axis=0)
-        # Multiply x^lx * y^ly * z^lz
-        #g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1)              # [npairs, n_lxlylz]
-        g_ij_lxlylz = rij_lxlylz[:,:,0] * rij_lxlylz[:,:,1] * rij_lxlylz[:,:,2]  
-        return g_ij_lxlylz
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                ]
-                 )
-    def _to_three_body_terms(self,rij_unit, radial_ij, first_atom_idx, nat):
-        """
-        Computes vectorized three-body symmetry function components.
-
-        Args:
-            z: scalar (int) orbital angular momentum order
-            rij_unit: Tensor, shape = [npair, 3] — unit vectors between atom pairs
-            radial_ij: Tensor, shape = [npair, nspec * nrad, nzeta] — radial features
-            first_atom_idx: Tensor, shape = [npair] — maps each neighbor pair to a central atom index
-            lambda_weights: Tensor, shape = [n_lambda] — weights for lambda values
-            nat: scalar (int), number of atoms in batch
-
-        Returns:
-            Tensor of shape [nat, nzeta * nspec * nrad * n_lambda]
-        """
-         # --- Angular terms ---
-        g_ij_lxlylz = self._angular_terms(rij_unit, self.lxlylz[0])
-        # shape: [npair, n_lxlylz]
-        #radial_ij -> shape: [npair, nspec * nrad, nzeta] #0 to zeta
-
-        radial_ij_expanded = radial_ij
-        # shape: [npair, nspec * nrad, n_lxlylz]
-
-        g_ilxlylz = radial_ij_expanded * tf.expand_dims(g_ij_lxlylz, axis=1)
-        #sum over neighbors
-        g_ilxlylz = tf.math.unsorted_segment_sum(data=g_ilxlylz,
-                                            segment_ids=first_atom_idx, num_segments=nat) #shape = (nat, nrad*nspec, nzeta)
-        # Multiply g_ilxlylz^2 and transpose
-        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1]) * self.fact_norm[0][:,None,None] #n_lxlylz, nat, nspec * nrad
-
-        gi3 = tf.math.unsorted_segment_sum(_gi3, self.lxlylz_sum[0], num_segments=(self.zeta[0]+1))
-        # shape: [nzeta, nat, nspec * nrad]
-
-        gi3 = tf.transpose(gi3, perm=(1,0,2)) #nat,nzeta,nrad*nspec
-        # shape: [nat,nzeta,,nspec * nrad, n_lambda]
-        return tf.reshape(gi3, [nat, -1])
-        # final shape: [nat, nzeta * nspec * nrad]
-        
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                ]
-                 )
-    def _to_body_order_terms(self,rij_unit, radial_ij, first_atom_idx, nat):
-        '''
-        compute  up to four-body computation
-
-        '''
-        g_ij_lxlylz = self._angular_terms(rij_unit,self.lxlylz[0])
-        shapes = tf.shape(g_ij_lxlylz)
-        npairs = shapes[0]
-        n_lxlylz = shapes[1]
-        # shape: [npair, n_lxlylz]
-        r_start = 1
-        r_end = r_start + 1 + self.zeta[0]
-        radial_ij_expanded = tf.gather(radial_ij[:,:,r_start:r_end], self.lxlylz_sum[0], axis=2)
-        # shape: [npair, nspec * nrad, n_lxlylz]
-
-        g_ilxlylz = radial_ij_expanded * tf.expand_dims(g_ij_lxlylz, axis=1)
-        # shape: [npair, nspec * nrad, n_lxlylz]
-
-        g_ilxlylz = tf.math.unsorted_segment_sum(g_ilxlylz, first_atom_idx,num_segments=nat)
-        # shape: [nat, nspec * nrad, n_lxlylz]
-
-        # Multiply g_ilxlylz^2 and transpose
-        _gi3 = tf.transpose(g_ilxlylz * g_ilxlylz, [2,0,1]) * self.fact_norm[0][:,None,None]
-        # shape: [n_lxlylz, nat, nspec * nrad]
-
-        gi3 = tf.math.unsorted_segment_sum(_gi3, self.lxlylz_sum[0], num_segments=(1+self.zeta[0]))
-        # shape: [nzeta, nat, nspec * nrad]
-        gi3 = tf.transpose(gi3, perm=(1,0,2)) #nat,nzeta,nrad*nspec
-        gi3 = tf.reshape(gi3, [nat, -1])
-        if self.body_order == 3:
-            return [gi3]
-
-        ########
-        g_ij_lxlylz = self._angular_terms(rij_unit,self.lxlylz[1])
-        shapes = tf.shape(g_ij_lxlylz)
-        npairs = shapes[0]
-        n_lxlylz = shapes[1]
-        # shape: [npair, n_lxlylz]
-        r_start = r_end
-        r_end = r_start + 1 + self.zeta[1]
-        radial_ij_expanded = tf.gather(radial_ij[:,:,r_start:r_end], self.lxlylz_sum[1], axis=2)
-        # shape: [npair, nspec * nrad, n_lxlylz]
-
-        g_ilxlylz = radial_ij_expanded * tf.expand_dims(g_ij_lxlylz, axis=1)
-        # shape: [npair, nspec * nrad, n_lxlylz]
-        g_ilxlylz = tf.math.unsorted_segment_sum(g_ilxlylz, first_atom_idx,num_segments=nat)
-
-        g_i_l1l2 = tf.expand_dims(g_ilxlylz,-1) * tf.expand_dims(g_ilxlylz,-2)
-        g_i_l1l2 = tf.reshape(g_i_l1l2, [nat, -1, n_lxlylz*n_lxlylz]) #nat, nrad*nspec,n_lxlylz*n_lxlylz
-
-        #rad_ij contains 2*zata + 1 radial functions
-        
-        r_end = r_start + 2*self.zeta[1] + 1
-
-        lxlylz_sum2 = tf.reshape(self.lxlylz_sum[1][None,:] + self.lxlylz_sum[1][:,None], [-1])
-        fact_norm2 = tf.reshape(self.fact_norm[1][None,:] * self.fact_norm[1][:, None], [-1])
-        radial_ij_expanded = tf.gather(radial_ij[:,:,r_start:r_end], lxlylz_sum2, axis=2) # npair, nspec*nrad, n_lxlylz * n_lxlylz
-
-        g_ij_l1_plus_l2 = tf.expand_dims(g_ij_lxlylz,-1) * tf.expand_dims(g_ij_lxlylz,-2) # npair,n_lxlylz,n_lxlylz
-        g_ij_l1_plus_l2 = tf.reshape(g_ij_l1_plus_l2, [-1, n_lxlylz*n_lxlylz])
-
-        g_ij_ll = radial_ij_expanded * tf.expand_dims(g_ij_l1_plus_l2, 1)
-
-        #contribution after summing over j
-        g_i_l1_plus_l2 = tf.math.unsorted_segment_sum(data=g_ij_ll,
-                                        segment_ids=first_atom_idx,num_segments=nat)#nat x nrad*nspec,n_lxlylz,n_lxlylz
-        
-        g_i_l1l2_ijk = tf.transpose(g_i_l1l2 * g_i_l1_plus_l2, [2,0,1]) * fact_norm2[:,None,None] #n_lxlylz * n_lxlylz, nat, nrad*nspec
-
-        nzeta2 = (1+self.zeta[1]) * (1+self.zeta[1])
-
-        g_i_l1l2 = tf.math.unsorted_segment_sum(data=g_i_l1l2_ijk,
-                                        segment_ids=lxlylz_sum2, num_segments=nzeta2) # nzeta2, nat, nrad*nspec
-        g_i_l1l2 = tf.transpose(g_i_l1l2, perm=[1,0,2])
-
-        gi4 = tf.reshape(g_i_l1l2, [nat, -1])
-        if self.body_order == 4:
-            return [gi3,gi4] # there are three combinations for th for body terms
-        
-        g_ij_lxlylz = self._angular_terms(rij_unit,self.lxlylz[2])
-        shapes = tf.shape(g_ij_lxlylz)
-        npairs = shapes[0]
-        n_lxlylz = shapes[1]
-        
-        r_start = r_end
-        r_end = r_start + self.zeta[2] + 1
-
-        radial_ij_expanded = tf.gather(radial_ij[:,:,r_start:r_end], self.lxlylz_sum[2], axis=2)
-        # shape: [npair, nspec * nrad, n_lxlylz]
-
-        g_ilxlylz = radial_ij_expanded * tf.expand_dims(g_ij_lxlylz, axis=1)
-        # shape: [npair, nspec * nrad, n_lxlylz]
-        g_ilxlylz = tf.math.unsorted_segment_sum(g_ilxlylz, first_atom_idx,num_segments=nat)
-
-        g_i_l1l2l3 = g_ilxlylz[:,:,:,None,None] * g_ilxlylz[:,:,None,:,None] * g_ilxlylz[:,:,None,None,:]
-
-        g_i_l1l2l3 = tf.reshape(g_i_l1l2l3, [nat, -1, n_lxlylz*n_lxlylz*n_lxlylz]) #nat, nrad*nspec,n_lxlylz*n_lxlylz*n_lxlylz
-
-        r_end = r_start + 3*self.zeta[2] + 1
-
-        lxlylz_sum3 = tf.reshape(self.lxlylz_sum[2][:,None,None] + 
-                                 self.lxlylz_sum[2][None,:,None] + 
-                                 self.lxlylz_sum[2][None,None,:], [-1])
-
-        fact_norm3 = tf.reshape(self.fact_norm[2][:, None,None] * self.fact_norm[2][None,:,None] * self.fact_norm[2][None,None,:], [-1])
-        radial_ij_expanded = tf.gather(radial_ij[:,:,r_start:r_end], lxlylz_sum3, axis=2) # npair, nspec*nrad, n_lxlylz * n_lxlylz*n_lxlylz
-
-        g_ij_l123 = g_ij_lxlylz[:,:,None,None] * g_ij_lxlylz[:,None,:,None] * g_ij_lxlylz[:,None,None,:]# npair,n_lxlylz,n_lxlylz,n_lxlylz
-        g_ij_l123 = tf.reshape(g_ij_l123, [-1, n_lxlylz*n_lxlylz*n_lxlylz]) #
-
-        g_ij_lll = radial_ij_expanded * tf.expand_dims(g_ij_l123, 1)
-
-        #contribution after summing over j
-        g_i_l123 = tf.math.unsorted_segment_sum(data=g_ij_lll,
-                                        segment_ids=first_atom_idx,num_segments=nat)#nat x nrad*nspec,n_lxlylz**3
-
-        g_i_l1l2l3_ijk = tf.transpose(g_i_l1l2l3 * g_i_l123, [2,0,1]) * fact_norm3[:,None,None] #n_lxlylz**3, nat, nrad*nspec
-        _zeta5 = self.zeta[2] + 1
-        nzeta3 = _zeta5 * _zeta5 * _zeta5
-        g_i_l1l2l3 = tf.math.unsorted_segment_sum(data=g_i_l1l2l3_ijk,
-                                        segment_ids=lxlylz_sum3, num_segments=nzeta3) # nzeta3, nat, nrad*nspec
-        g_i_l1l2l3 = tf.transpose(g_i_l1l2l3, perm=[1,0,2])
-
-        gi5 = tf.reshape(g_i_l1l2l3, [nat, -1])
-        return [gi3,gi4,gi5] # including 5 body order
-
-    """
-    @tf.function(jit_compile=False,
-             input_signature=[
-               tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-               tf.TensorSpec(shape=(None,),    dtype=tf.float32),
-               tf.TensorSpec(shape=(None,),    dtype=tf.float32),
-               tf.TensorSpec(shape=(None,),    dtype=tf.float32),
-               tf.TensorSpec(shape=(),        dtype=tf.float32),
-             ])
-    def compute_charges(self, Vij, E1, E2, atomic_q0, total_charge):
-        # Determine original size N and pad vectors
-        N = tf.shape(E2)[0]
-        E2_padded = tf.concat([E2, [-1.0]], axis=0)  # length N+1
-        E1_padded = tf.concat([-E1, [total_charge]], axis=0)  # length N+1 (rhs)
-        x0 = tf.concat([atomic_q0, [0.0]], axis=0)   # initial guess, length N+1
-
-        # Define a custom LinearOperator for A = [[Vij + diag(E2), 1]; [1^T, 0]] implicitly
-        class AOperator(tf.linalg.LinearOperator):
-            def __init__(self, Vij, E2):
-                # Shape is (N+1) x (N+1)
-                super().__init__(dtype=Vij.dtype, 
-                                 shape=[N+1, N+1],
-                                 is_self_adjoint=True,
-                                 is_positive_definite=True)
-                self.Vij = Vij
-                self.E2 = E2  # original length N
-
-            def _matmul(self, x):
-                # x has shape [..., N+1]
-                x0_part = x[..., :N]   # first N components
-                xN_part = x[..., N]    # last component (shape [...])
-                # Compute first N entries of A*x: Vij @ x0 + E2*x0 + xN
-                Ax0 = tf.linalg.matvec(self.Vij, x0_part)  # Vij * x0
-                Ax0 = Ax0 + self.E2 * x0_part              # add diag(E2)*x0
-                Ax0 = Ax0 + tf.expand_dims(xN_part, -1)    # add xN for each of first N
-                # Compute last entry of A*x: sum of first N components of x
-                AxN = tf.reduce_sum(x0_part, axis=-1)      # shape [...]
-                # Concatenate to shape [..., N+1]
-                return tf.concat([Ax0, tf.expand_dims(AxN, -1)], axis=-1)
-
-        A_op = AOperator(Vij, E2)
-
-        # Solve A * charges = E1_padded using conjugate gradient
-        # (uses atomic_q0_padded as initial guess x0)
-        cg_result = tf.linalg.experimental.conjugate_gradient(
-            operator=A_op,
-            rhs=E1_padded,
-            x=x0,
-            tol=1e-6,
-            max_iter=N+1)
-        # Extract the solution vector (length N+1). 
-        charges = cg_result.x[..., tf.newaxis][:-1]  # make it a column vector
-        return charges
-
-    """ 
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                ]
-                 )
-    def compute_Aij(self, Vij, E2):
-        '''construct Aij'''
-
-        #this is removed after padding Vij with 1's at the last row and columns
-        # Aij has exactly zero at N+1,N+1 elements a needed
-       
-        N = tf.shape(E2)[0]
-        E2_padded = tf.concat([E2, [-1.0]], axis=0)  # shape [N+1]
-        Aij = tf.concat([Vij, tf.ones(N,tf.float32)[:,None]], 1)
-        Aij = tf.concat([Aij, tf.ones(N+1,tf.float32)[None,:]], 0)
-        Aij += tf.linalg.diag(E2_padded)
-        return Aij # (N+1,N+1)
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                ]
-                 )
-    def compute_Fia(self, Vij_qz, E_qd):
-        '''construct Aij'''
-
-        #this is removed after padding Vij with 1's at the last row and columns
-        # Aij has exactly zero at N+1,N+1 elements a needed
-       
-        N = tf.shape(Vij_qz)[0]
-
-        delta_ij = tf.eye(N)
-
-        Fija = 0.5 * Vij_qz # N,N,3
-        E_qd = E_qd[:,None,:] * delta_ij[:,:,None] # N,N,3      
-        Fija += E_qd * 0.5
-        Fija = tf.pad(tf.reshape(Fija,[N, N*3]), [[0,1],[0,0]])
-
-        return tf.reshape(Fija,[N+1,3*N]) # N+1, N * 3
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                ]
-                 )
-    def compute_Fiajb(self, Vij_zz,E_di):
-        '''construct Aij'''
-
-        #this is removed after padding Vij with 1's at the last row and columns
-        # Aij has exactly zero at N+1,N+1 elements a needed
-       
-        N = tf.shape(E_di)[0]
-        #Eijab = E_di delta_ij delta_ab
-        Eijab = E_di[:,None,:,None] * tf.eye(N)[:,:,None,None] * tf.eye(3)[None,None,:,:]
-        #Eijab = E_di[:,None,:,:] * tf.eye(N)[:,:,None,None]
-        Fiajb = tf.transpose(Vij_zz + Eijab, perm=(0,2,1,3)) # N,N,3,3
-        return tf.reshape(Fiajb, [3*N, 3*N]) # 3*N, 3*N
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(), dtype=tf.float32),
-                ]
-                 )
-    def compute_charges_disp(self, Vij, Vij_qz, Vij_zq, Vij_zz, 
-                             E1, E2,E_d2, E_d1, E_qd,
-                             atomic_q0,total_charge):
-        '''compute charges and shell displacements through the solution of linear system'''
-
-        #collect all block matrices
-        Vij_qz = Vij_qz + tf.transpose(Vij_zq, perm=(1,0,2))
-        N = tf.shape(atomic_q0)[0]
-        Aij = self.compute_Aij(Vij, E2) #shape = (N+1,N+1)
-        Fija = self.compute_Fia(Vij_qz, E_qd) # shape = (N+1,3N)
-        Fiajb = self.compute_Fiajb(Vij_zz, E_d2) # shape = (3N,3N)
-        upper_layer = tf.concat([Aij, Fija], axis=1)
-        lower_layer = tf.concat([tf.transpose(Fija), Fiajb], axis=1)
-        Mat = tf.concat([upper_layer, lower_layer], axis=0)
-        E1_padded = tf.concat([-E1, [total_charge]], axis=0)
-        b = tf.concat([E1_padded, -tf.reshape(E_d1, [-1])], axis=0)
-
-        charges_disp = tf.squeeze(tf.linalg.solve(Mat, b[:,None]))
-
-        '''
-        lin_op_A = tf.linalg.LinearOperatorFullMatrix(
-            Aij,
-            is_self_adjoint=True,
-            is_positive_definite=True,  # Optional: set to True if you know it is
-            is_non_singular=True        # Optional: set to True if you know it is
-        )
-        outs = tf.linalg.experimental.conjugate_gradient(
-            lin_op_A,
-            E1,
-            preconditioner=None,
-            x=atomic_q0,
-            tol=1e-05,
-            max_iter=500,
-            name='conjugate_gradient'
-            )
-        #outs[0]= max_iter, outs[2]=residual,outs[3]=basis vectors, outs[4]=preconditioner 
-        charges = outs[1]
-        '''
-        charges = charges_disp[:N]
-        shell_disp = tf.reshape(charges_disp[N+1:], [N,3])
-        return charges, shell_disp
-    
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                ]
-                 )
-    def compute_shell_disp_qqdd2(self, Vij, Vij_qz, Vij_zq, Vij_zz, 
-                                 Vij_qz2, Vij_zq2, Vij_qq2, Vij_qq3, E_d1,
-                           E_d2, E_qd, atomic_q0,charges, field_kernel_e, field_kernel_qe):
-        '''comput charges through the solution of linear system'''
-        dq = charges - atomic_q0
-        nat = tf.shape(dq)[0]
-        
-        charge_ij = charges[:,None] * charges[None,:]
-        A_ia = 0.5 * tf.reduce_sum((tf.transpose(Vij_qz,perm=(1,0,2)) + Vij_zq) * charges[None,:,None], axis=1) #N,3
-        A_ia += 0.5 * tf.reduce_sum((tf.transpose(Vij_qq2,perm=(1,0,2)) - Vij_qq2) * charge_ij[:,:,None], axis=1) #N,3
-
-        A_iab = tf.reduce_sum((tf.transpose(Vij_qz2,perm=(1,0,2,3)) + Vij_zq2) * charges[None,:,None,None], axis=1) #N,3,3
-        A_iab += 0.5 * tf.reduce_sum((tf.transpose(Vij_qq3,perm=(1,0,2,3)) + Vij_qq3) * charge_ij[:,:,None,None], axis=1) #N,3,3
-        A_ijab = Vij_zz + A_iab * tf.eye(nat)[:,:,None,None]
-        A_ijab += E_d2[:,None,:,None] * tf.eye(nat)[:,:,None,None] * tf.eye(3)[None,None,:,:]
-        #A_ijab -= 2.0 * 0.5 * (tf.transpose(Vij_qz2,perm=(1,0,3,2)) + Vij_zq2) * charges[None,:,None,None] #N,N,3,3
-        A_ijab -= (tf.transpose(Vij_qz2,perm=(1,0,3,2)) + Vij_zq2) * charges[None,:,None,None] #N,N,3,3
-        A_ijab -= (tf.transpose(Vij_zq2,perm=(1,0,3,2)) + Vij_qz2) * charges[:,None,None,None] #N,N,3,3
-        A_ijab -= 2. * Vij_qq3 * charge_ij[:,:,None,None]
-
-        A_iajb = tf.reshape(tf.transpose(A_ijab, [0,2,1,3]), [nat*3, nat*3])
-        A_ia += E_d1 +  0.5 * E_qd * dq[:,None] + field_kernel_e + charges[:,None] * field_kernel_qe
-        A_ia = tf.reshape(A_ia, [-1])
-        shell_disp = tf.reshape(tf.linalg.solve(A_iajb, -A_ia[:,None]), [nat,3])
-        return shell_disp
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                ]
-                 )
-    def compute_shell_disp_qqdd1(self, V11, V21, V12, V22, V3, E_d1,
-                           E_d2, E_qd, atomic_q0,charges, field_kernel_e):
-        '''comput charges through the solution of linear system'''
-        dq = charges - atomic_q0
-        nat = tf.shape(dq)[0]
-        A_ia = 0.5 * tf.reduce_sum((tf.transpose(V11,perm=(1,0,2)) + V21) * charges[None,:,None], axis=1) #N,3
-        A_iab = tf.reduce_sum((tf.transpose(V12,perm=(1,0,2,3)) + V22) * charges[None,:,None,None], axis=1) #N,3,3
-        A_ijab = (V3 + 
-                  A_iab * tf.eye(nat)[:,:,None,None] + 
-                  E_d2[:,None,:,None] * tf.eye(nat)[:,:,None,None] * tf.eye(3)[None,None,:,:])
-        A_iajb = tf.reshape(tf.transpose(A_ijab, [0,2,1,3]), [nat*3, nat*3])
-        A_ia += E_d1 +  0.5 * E_qd * dq[:,None] + field_kernel_e
-        A_ia = tf.reshape(A_ia, [-1])
-        shell_disp = tf.reshape(tf.linalg.solve(A_iajb, -A_ia[:,None]), [nat,3])
-        return shell_disp
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(), dtype=tf.float32),
-                ]
-                 )
-    def compute_charges(self, Vij, E1, E2, atomic_q0,total_charge):
-        '''comput charges through the solution of linear system'''
-
-        #this is removed after padding Vij with 1's at the last row and columns
-        # Aij has exactly zero at N+1,N+1 elements a needed
-       
-        N = tf.shape(E2)[0]
-        E2_padded = tf.concat([E2, [-1.0]], axis=0)  # shape [N+1]
-        Aij = tf.concat([Vij, tf.ones(N,tf.float32)[:,None]], 1)
-        Aij = tf.concat([Aij, tf.ones(N+1,tf.float32)[None,:]], 0)
-        Aij += tf.linalg.diag(E2_padded)
-
-        #Aij = 0.5 * (Aij + tf.transpose(Aij))
-
-        #total charge should be read from structures
-        E1_padded = tf.concat([-E1, [total_charge]], axis=0)
-        #since we are fitting dq rather than q, total charges must be replaced with zero
-        #E1_padded = tf.concat([-E1, [0.0]], axis=0)
-        #atomic_q0 = tf.pad(atomic_q0, [[0,1]], constant_values=0.0)
-        #atomic_q0 = tf.concat([atomic_q0, [0.0]], axis=0)
-        
-        charges = tf.linalg.solve(Aij, E1_padded[:,None])
-        '''
-        lin_op_A = tf.linalg.LinearOperatorFullMatrix(
-            Aij,
-            is_self_adjoint=True,
-            is_positive_definite=True,  # Optional: set to True if you know it is
-            is_non_singular=True        # Optional: set to True if you know it is
-        )
-        outs = tf.linalg.experimental.conjugate_gradient(
-            lin_op_A,
-            E1,
-            preconditioner=None,
-            x=atomic_q0,
-            tol=1e-05,
-            max_iter=500,
-            name='conjugate_gradient'
-            )
-        #outs[0]= max_iter, outs[2]=residual,outs[3]=basis vectors, outs[4]=preconditioner 
-        charges = outs[1]
-        '''
-        return tf.reshape(charges, [-1])[:-1]
-    #"""
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                ]
-                 )
-    def compute_coulumb_energy(self,charges, atomic_q0, E1, E2, Vij):
-        '''compute the coulumb energy
-        Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2
-        '''
-        q = charges
-        dq = q - atomic_q0
-        dq2 = dq * dq
-        q_outer = q[:,None] * q[None,:]
-        E = E1 * dq + 0.5 * (E2 * dq2 + tf.reduce_sum(Vij * q_outer, axis=-1))
-        return tf.reduce_sum(E)
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-                ]
-                 )
-    def compute_coulumb_energy_pqeq_qd(self,charges, atomic_q0, 
-                                    E1, E2, shell_disp, Vij_qq, Vij_qz, Vij_zq, Vij_zz):
-        '''compute the coulumb energy
-        Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2 + \
-                \sum_i\sum_j\sum_a Vija_qz shell_disp_ia qizj/2 + \sum_i\sum_j \sum_ab Vijab_zz shell_disp_ia * shell_disp_jb zizj
-        '''
-        #q = charges
-        shell_disp_outer = shell_disp[:,None,:,None] * shell_disp[None,:,None,:] # N,N,3,3
-
-        dq = charges - atomic_q0
-        dq2 = dq * dq
-        q_outer = charges[:,None] * charges[None,:]
-
-        E = E1 * dq
-        qi_dj = charges[:,None,None] * shell_disp[None,:,:] #N,N,3
-        qj_di = charges[None,:,None] * shell_disp[:,None,:] #N,N,3
-        E += 0.5 * (E2 * dq2 + tf.reduce_sum(
-            Vij_qq * q_outer + 
-            tf.reduce_sum(Vij_qz * qi_dj + Vij_zq * qj_di, axis=2) + 
-            tf.reduce_sum(Vij_zz * shell_disp_outer, axis=(2,3)),
-            axis=-1
-            )
-                             )
-        return tf.reduce_sum(E)
-
-    @tf.function(jit_compile=False,
-                input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-                ]
-                 )
-    def compute_coulumb_energy_pqeq(self,charges, atomic_q0, nuclei_charge, 
-                                    E1, E2, Vij_qq, Vij_qz, Vij_zq, Vij_zz):
-        '''compute the coulumb energy
-        Energy = \sum_i E_1i q_i + E_2i q^2/2 + \sum_i\sum_j Vij qiqj / 2 + \
-                \sum_i\sum_j Vij_qz qizj/2 + \sum_i\sum_j Vij_zz zizj
-        '''
-        #q = charges
-        dq = charges - atomic_q0
-        dq2 = dq * dq
-        q_outer = charges[:,None] * charges[None,:]
-        qz_outer = charges[:,None] * nuclei_charge[None,:]
-        zq_outer = charges[None, :] * nuclei_charge[:,None]
-        zz_outer = nuclei_charge[:,None] * nuclei_charge[None,:]
-        #if self.learn_oxidation_states:
-        #    E = E1 * tf.abs(dq)
-        #else:
-        E = E1 * dq
-
-        E += 0.5 * (E2 * dq2 + tf.reduce_sum(
-            Vij_qq * q_outer + Vij_qz * qz_outer + Vij_zq * zq_outer + Vij_zz * zz_outer, axis=-1
-            )
-                             )
-        return tf.reduce_sum(E)
-
     @tf.function(jit_compile=False,
                  reduce_retracing=True,
                 input_signature=[(
@@ -1010,19 +419,21 @@ class BACENET(tf.keras.Model):
 
             if self.body_order == 3:
                 radial_ij_extended = tf.gather(radial_ij[:,:,:(1+self.zeta[0])], self.lxlylz_sum[0], axis=2)
-                Gi3 = self._to_three_body_terms(rij_unit, radial_ij_extended, first_atom_idx,nat)
+                #Gi3 = self._to_three_body_terms(rij_unit, radial_ij_extended, first_atom_idx,nat)
+                Gi3 = to_three_body_terms(rij_unit, radial_ij_extended, first_atom_idx,nat)
                 #Gi = self._to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
                 #Gi3 = Gi[0]
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
             elif self.body_order == 4:
                 #Gi3,Gi4 = self._to_four_body_terms(rij_unit, radial_ij, first_atom_idx, nat)
-                Gi = self._to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
+                Gi = to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat, self.body_order)
                 Gi3,Gi4 = Gi
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi4], axis=1)
             elif self.body_order == 5:
                 #Gi3,Gi4,Gi5 = self._to_five_body_terms(rij_unit, radial_ij, first_atom_idx, nat)
-                Gi = self._to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
+                #Gi = self._to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
+                Gi = to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat, self.body_order)
                 Gi3,Gi4,Gi5 = Gi
                 #self._to_five_body_terms(rij_unit, radial_ij, first_atom_idx, nat)
                 atomic_descriptors = tf.concat([atomic_descriptors, Gi3], axis=1)
@@ -1136,10 +547,10 @@ class BACENET(tf.keras.Model):
                         _E_d1 = (E_d1 + field_kernel_e - 0.5 * E_qd * atomic_q0[:,None])
                         Vij, Vij_qz, Vij_zq, Vij_zz = _ewald.recip_space_term_with_shelld_quadratic_qd(nuclei_charge)
                         #E_d1 = field_kernel_e
-                        charges, shell_disp = self.compute_charges_disp(Vij, Vij_qz, Vij_zq, Vij_zz,
+                        charges, shell_disp = _compute_charges_disp(Vij, Vij_qz, Vij_zq, Vij_zz,
                              _b, E2, E_d2, _E_d1, E_qd + field_kernel_qe, # field_kernel_qe comes from placing Z at the nuclei position and q-Z at the shell
                              atomic_q0, total_charge)
-                        ecoul = self.compute_coulumb_energy_pqeq_qd(charges, atomic_q0,
+                        ecoul = _compute_coulumb_energy_pqeq_qd(charges, atomic_q0,
                                     E1, E2, shell_disp, Vij, Vij_qz, Vij_zq, Vij_zz)
                         dq = charges - atomic_q0
                         ecoul += tf.reduce_sum((E_d1  + 0.5 * E_qd * dq[:,None] + 0.5 *  E_d2 * shell_disp) * shell_disp) 
@@ -1147,9 +558,9 @@ class BACENET(tf.keras.Model):
                         #Vij = _ewald.recip_space_term() # in d=0 approximation determine charges
                         Vij, Vij_qz, Vij_zq, Vij_zz, Vij_qz2, Vij_zq2 = _ewald.recip_space_term_with_shelld_quadratic_qqdd_1(nuclei_charge)
                         # compute charges at d = 0
-                        charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+                        charges = _compute_charges(Vij, _b, E2, atomic_q0, total_charge)
                         # determine d
-                        shell_disp = self.compute_shell_disp_qqdd1(Vij_qz, Vij_zq, Vij_qz2, Vij_zq2, Vij_zz, E_d1,
+                        shell_disp = _compute_shell_disp_qqdd1(Vij_qz, Vij_zq, Vij_qz2, Vij_zq2, Vij_zz, E_d1,
                            E_d2 + field_kernel_qe, E_qd, atomic_q0,charges, field_kernel_e)
 
                         #update charges
@@ -1157,7 +568,7 @@ class BACENET(tf.keras.Model):
                         _b += 0.5 * tf.reduce_sum((tf.transpose(Vij_zq,perm=(1,0,2)) + Vij_qz) * shell_disp[None,:,:], axis=(1,2)) #N
                         _b += 0.5 * tf.reduce_sum((tf.transpose(Vij_zq2,perm=(1,0,2,3)) + Vij_qz2) * shell_d2[None,...], axis=(1,2,3)) #N
                         _b += 0.5 * tf.reduce_sum(E_qd * shell_disp, axis=1) #sum over cartessian directions
-                        charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+                        charges = _compute_charges(Vij, _b, E2, atomic_q0, total_charge)
                         
                         dq = charges - atomic_q0
                         
@@ -1181,7 +592,7 @@ class BACENET(tf.keras.Model):
                         shell_disp = cg_result.x # make it a column vector
                         shell_disp = tf.reshape(shell_disp, [nat,3])
                         '''
-                        ecoul = self.compute_coulumb_energy_pqeq_qd(charges, atomic_q0,
+                        ecoul = _compute_coulumb_energy_pqeq_qd(charges, atomic_q0,
                                     E1, E2, shell_disp, Vij, Vij_qz, Vij_zq, Vij_zz)
                         #add additional terms to energy
                         #shell_d2 = shell_disp[:,:,None] * shell_disp[:,None,:]
@@ -1193,9 +604,9 @@ class BACENET(tf.keras.Model):
                         V_mat = _ewald.recip_space_term_with_shelld_quadratic_qqdd_2(nuclei_charge)
                         Vij, Vij_qz, Vij_zq, Vij_zz, Vij_qz2, Vij_zq2, Vij_qq2, Vij_qq3 = V_mat
                         
-                        charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+                        charges = _compute_charges(Vij, _b, E2, atomic_q0, total_charge)
                         dq = charges - atomic_q0
-                        shell_disp = self.compute_shell_disp_qqdd2(Vij, Vij_qz, Vij_zq, Vij_zz,
+                        shell_disp = _compute_shell_disp_qqdd2(Vij, Vij_qz, Vij_zq, Vij_zz,
                                  Vij_qz2, Vij_zq2, Vij_qq2, Vij_qq3, E_d1,
                            E_d2, E_qd, atomic_q0,charges, field_kernel_e,field_kernel_qe)
                         
@@ -1204,7 +615,7 @@ class BACENET(tf.keras.Model):
                         Vij_zz += (-2. * Vij_qq3 * charge_ij[:,:,None,None] -
                                    2.0 * Vij_qz2 * charges[None,:,None,None] -
                                    2.0 * Vij_zq2 * charges[:,None,None,None])
-                        ecoul = self.compute_coulumb_energy_pqeq_qd(charges, atomic_q0,
+                        ecoul = _compute_coulumb_energy_pqeq_qd(charges, atomic_q0,
                                     E1, E2, shell_disp, Vij, Vij_qz, Vij_zq, Vij_zz)
                         #add additional terms
                         shell_d2 = shell_disp[:,:,None] * shell_disp[:,None,:]
@@ -1222,13 +633,13 @@ class BACENET(tf.keras.Model):
                         #Vij = _ewald.recip_space_term() # in d=0 approximation
                         #determine charges
                         _b += 0.5 * tf.reduce_sum((Vij_qz + tf.transpose(Vij_zq)) * nuclei_charge[None,:], axis=1)
-                        charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+                        charges = _compute_charges(Vij, _b, E2, atomic_q0, total_charge)
 
                         shell_disp = _ewald.shell_optimization_newton(shell_disp, nuclei_charge, 
                                                                       charges, E_d2, field_kernel_e,
                                                                       max_iter=1, tol=1e-3)
                         Vij, Vij_qz, Vij_zq, Vij_zz = _ewald.recip_space_term_with_shelld(shell_disp)
-                        ecoul = self.compute_coulumb_energy_pqeq(charges, atomic_q0, nuclei_charge,
+                        ecoul = _compute_coulumb_energy_pqeq(charges, atomic_q0, nuclei_charge,
                                     E1, E2, Vij, Vij_qz, Vij_zq, Vij_zz)
                         ecoul += tf.reduce_sum(0.5 *  E_d2 * shell_disp * shell_disp) 
                 if self._P_in_cell:

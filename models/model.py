@@ -10,7 +10,7 @@ from networks.networks import Networks
 import functions.helping_functions as help_fn
 
 from data.unpack_tfr_data import unpack_data
-from functions.ewald import ewald
+from models.ewald import ewald
 
 import warnings
 import logging

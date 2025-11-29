@@ -116,10 +116,10 @@ class bacenet_Calculator(Calculator):
         epoch = ckpts_idx[-1]
         idx=f"{epoch:04d}"
         self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.ckpt"
-        #print(f'##################################################################')
-        #print(f'calculation are performed with the model:')
-        #print(f'{self.ckpt}')
-        #print(f'##################################################################')
+        print(f'##################################################################')
+        print(f'calculation are performed with the model:')
+        print(f'{self.ckpt}')
+        print(f'##################################################################')
 
 
         #self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"
