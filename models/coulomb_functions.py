@@ -85,9 +85,9 @@ def _compute_charges_disp(Vij, Vij_qz, Vij_zq, Vij_zz,
     #collect all block matrices
     Vij_qz = Vij_qz + tf.transpose(Vij_zq, perm=(1,0,2))
     N = tf.shape(atomic_q0)[0]
-    Aij = self.compute_Aij(Vij, E2) #shape = (N+1,N+1)
-    Fija = self.compute_Fia(Vij_qz, E_qd) # shape = (N+1,3N)
-    Fiajb = self.compute_Fiajb(Vij_zz, E_d2) # shape = (3N,3N)
+    Aij = _compute_Aij(Vij, E2) #shape = (N+1,N+1)
+    Fija = _compute_Fia(Vij_qz, E_qd) # shape = (N+1,3N)
+    Fiajb = _compute_Fiajb(Vij_zz, E_d2) # shape = (3N,3N)
     upper_layer = tf.concat([Aij, Fija], axis=1)
     lower_layer = tf.concat([tf.transpose(Fija), Fiajb], axis=1)
     Mat = tf.concat([upper_layer, lower_layer], axis=0)

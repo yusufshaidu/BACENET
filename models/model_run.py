@@ -432,7 +432,7 @@ class BACENET(tf.keras.Model):
 
             if self.learnable_gaussian_width:
                 #minimum = 0.2 and maximum = 1.2, self._species_gaussian_width in [0,1]
-                self._species_gaussian_width = 0.25 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
+                self._species_gaussian_width = 1.25 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
                 #if self._max_width > 0.0:
                 #    self._species_gaussian_width = 0.5  + (self._max_width 
                 #                                           - 0.5) * self._species_gaussian_width 
