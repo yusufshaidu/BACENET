@@ -200,7 +200,7 @@ class BACENET(tf.keras.Model):
         if self.learnable_gaussian_width:
             #acts = ['softplus', 'softplus']
             #if self._max_width > 0:
-            acts = ['sigmoid', 'sigmoid']
+            acts = ['tanh', 'tanh']
             self.gaussian_width_net = Networks(self.nelement, # pass one-hot encoder
                 [64,2], # return two width per species, one for q and the other for Z 
                 acts, 
@@ -431,8 +431,8 @@ class BACENET(tf.keras.Model):
                                      tf.zeros(shape))
 
             if self.learnable_gaussian_width:
-                #minimum = 0.2 and maximum = 1.2, self._species_gaussian_width in [0,1]
-                self._species_gaussian_width = 1.25 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
+                #minimum = 0.5 and maximum = 2.1, self._species_gaussian_width in [-1,1]
+                self._species_gaussian_width = 1.1 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
                 #if self._max_width > 0.0:
                 #    self._species_gaussian_width = 0.5  + (self._max_width 
                 #                                           - 0.5) * self._species_gaussian_width 
