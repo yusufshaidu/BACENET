@@ -1,5 +1,7 @@
 import tensorflow as tf
 
+
+
 @tf.function(jit_compile=False,
             input_signature=[
             tf.TensorSpec(shape=(None,None), dtype=tf.float32),
@@ -183,10 +185,12 @@ def _compute_shell_disp_qqdd1(V11, V21, V12, V22, V3, E_d1,
     dq = charges - atomic_q0
     nat = tf.shape(dq)[0]
     A_ia = 0.5 * tf.reduce_sum((tf.transpose(V11,perm=(1,0,2)) + V21) * charges[None,:,None], axis=1) #N,3
-    A_iab = tf.reduce_sum((tf.transpose(V12,perm=(1,0,2,3)) + V22) * charges[None,:,None,None], axis=1) #N,3,3
+    A_iab = tf.reduce_sum((tf.transpose(V12, perm=(1,0,2,3)) + V22) * charges[None,:,None,None], axis=1) #N,3,3
+
     A_ijab = (V3 + 
               A_iab * tf.eye(nat)[:,:,None,None] + 
               E_d2[:,None,:,None] * tf.eye(nat)[:,:,None,None] * tf.eye(3)[None,None,:,:])
+    
     A_iajb = tf.reshape(tf.transpose(A_ijab, [0,2,1,3]), [nat*3, nat*3])
     A_ia += E_d1 +  0.5 * E_qd * dq[:,None] + field_kernel_e
     A_ia = tf.reshape(A_ia, [-1])
@@ -338,4 +342,98 @@ def _compute_coulumb_energy_pqeq(charges, atomic_q0, nuclei_charge,
         )
                          )
     return tf.reduce_sum(E)
+
+@tf.function(jit_compile=False,
+             input_signature=[
+            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.int32),
+            ])
+def run_scf(Vij, Vij_qz, Vij_zq, Vij_zz, Vij_qz2, Vij_zq2,
+    E_d1, E_d2, E_qd, E2,
+    atomic_q0, total_charge,
+    field_kernel_qe, field_kernel_e,b,
+    tol=1e-6, max_iter=50):
+    """
+    Performs SCF loop for charges and shell displacements.
+    """
+
+    # Initial conditions
+    nat = tf.shape(E_d1)[0]
+    charges0 = atomic_q0
+    shell_disp0 = tf.zeros((nat,3))
+    count0 = tf.constant(0)
+    conv0 = tf.constant(False)
+    def scf_cond(charges_old, shell_disp_old, count, converged):
+        return tf.logical_and(
+            tf.logical_not(converged),
+            count < max_iter
+        )
+
+    def scf_body(charges_old, shell_disp_old, count, converged):
+
+        # --- Start SCF iteration ---
+        bb = tf.identity(b)
+
+        # 1. Compute new shell displacement d(q)
+        shell_disp = _compute_shell_disp_qqdd1(
+            Vij_qz, Vij_zq, Vij_qz2, Vij_zq2, Vij_zz,
+            E_d1, E_d2 + field_kernel_qe, E_qd,
+            atomic_q0, charges_old, field_kernel_e
+        )
+
+        # 2. Quadratic displacement tensor (outer product)
+        shell_d2 = shell_disp[:, :, None] * shell_disp[:, None, :]
+
+        # 3. Update b with Z–q and Z–Z couplings
+        bb += 0.5 * tf.reduce_sum(
+            (tf.transpose(Vij_zq, perm=(1, 0, 2)) + Vij_qz) * shell_disp[None, :, :],
+            axis=(1, 2)
+        )
+        bb += 0.5 * tf.reduce_sum(
+            (tf.transpose(Vij_zq2, perm=(1, 0, 2, 3)) + Vij_qz2) * shell_d2[None, ...],
+            axis=(1, 2, 3)
+        )
+
+        # 4. Add q–d terms
+        bb += 0.5 * tf.reduce_sum(E_qd * shell_disp, axis=1)
+
+        # 5. Solve for new charges
+        charges = _compute_charges(Vij, b, E2, atomic_q0, total_charge)
+
+        # --- Convergence check ---
+        res = tf.linalg.norm(charges - charges_old) + tf.linalg.norm(shell_disp - shell_disp_old)
+
+        converged = res < tol
+
+        return (
+            charges,
+            shell_disp,
+            count + 1,
+            converged
+        )
+
+    # Execute SCF
+    charges_final, shell_final, _, _ = tf.while_loop(
+        scf_cond,
+        scf_body,
+        loop_vars=[charges0, shell_disp0, count0, conv0],
+        maximum_iterations=max_iter
+    )
+
+    return charges_final, shell_final
 

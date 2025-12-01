@@ -13,6 +13,7 @@ from data.unpack_tfr_data import unpack_data
 import tensorflow as tf
 from models.model import BACENET
 from models.model_lchannels import BACENET as BACENET_lc
+from models.model_run import BACENET as BACENET_run
 
 from data.data_processing import data_preparation, atomic_number, _process_file
 
@@ -75,8 +76,8 @@ class bacenet_Calculator(Calculator):
         configs['species_J0'] = species_J0
         
         if efield is not None:
-            print('applying electric field of: ',efield)
-            self.efield = efield
+            #print('applying electric field of: ',efield)
+            #self.efield = efield
             configs['efield'] = tf.cast(efield, tf.float32)
 
         if configs['include_vdw']:
@@ -86,7 +87,8 @@ class bacenet_Calculator(Calculator):
 
         _model_call = BACENET
         if configs['model_version'] != 'linear':
-            _model_call = BACENET_lc
+            #_model_call = BACENET_lc
+            _model_call = BACENET_run
 
         atomic_energy = configs['atomic_energy']
         if len(atomic_energy)==0:

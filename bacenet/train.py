@@ -21,6 +21,7 @@ import argparse
 from data.data_processing import data_preparation
 from models import model
 from models import model_lchannels
+from models import model_run
 import logging
 import yaml
 
@@ -123,7 +124,8 @@ def estimate_species_chi0_J0(species):
 def get_compiled_model(configs,optimizer,example_input):
     model_version = configs['model_version']
     if model_version != 'linear':
-        _model = model_lchannels.BACENET(configs=configs)
+        #_model = model_lchannels.BACENET(configs=configs)
+        _model = model_run.BACENET(configs=configs)
     else:
         _model = model.BACENET(configs=configs)
 
@@ -157,7 +159,8 @@ def make_or_restore_model(model_outdir,configs,optimizer,
         last_ckpt_idx = int(latest_checkpoint.split('-')[-1].split('.')[0])
         print("Restoring from", latest_checkpoint)
         if model_version != 'linear':
-            _model = model_lchannels.BACENET(configs=configs)
+            #_model = model_lchannels.BACENET(configs=configs)
+            _model = model_run.BACENET(configs=configs)
         else:
             _model = model.BACENET(configs=configs)
 
