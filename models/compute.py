@@ -33,64 +33,19 @@ constant_e = 1.602176634e-19
 class Compute:
     def __init__(self, configs):
 
-        #network section
-        self.rcut = configs['rc_rad']
-        self.Nrad = int(configs['Nrad'])
-        self.zeta = configs['zeta'] # this is a list of l max per body order
-        self.body_order = configs['body_order']
-        self.species_correlation = configs['species_correlation']
-        self.species = configs['species']
-        self.nspecies = len(self.species)
-        self.species_layer_sizes = configs['species_layer_sizes']
+        self.configs = configs
+        self.setup()
 
-        self.nspec_embedding = self.species_layer_sizes[-1]
-        self.spec_size = configs['spec_size']
-        self.feature_size = configs['feature_size']
-        
-        self.n_bessels = configs['n_bessels'] if not None else self.Nrad
-        self.n_bessels = int(self.n_bessels)
-
-        #dispersion parameters and electrostatics
-        self.include_vdw = configs['include_vdw']
-        self.rmin_u = configs['rmin_u']
-        self.rmax_u = configs['rmax_u']
-        self.rmin_d = configs['rmin_d']
-        self.rmax_d = configs['rmax_d']
-        # the number of elements in the periodic table
-        self.nelement = configs['nelement']
-
-        self.efield = configs['efield']
-        if self.efield is not None:
-            self.efield = tf.cast(self.efield, tf.float32)
-            self.apply_field = True
-        else:
-            self.efield = tf.cast([0.0,0.0,0.0], tf.float32)
-            self.apply_field = False
-        print('field', self.efield)
-        
-        self.accuracy = configs['accuracy']
-        self.pbc = configs['pbc']
-        self.central_atom_id = configs['central_atom_id']
-
-        self.gaussian_width_scale = configs['gaussian_width_scale']
-        
-        self.zeta = configs['zeta']
-
-        self.number_radial_components = 1
-        for i, z in enumerate(self.zeta):
-            self.number_radial_components += (i+1) * z + 1 # 1 for 2body, l_3 + 1 for 3body, 2 l_4 + 1 for 4body, 3 l_5 + 1 for 5 body
-
-        self.atomic_nets = configs['atomic_nets']
-        self.radial_funct_net = configs['radial_funct_net']
-
-
-        if configs['body_order'] == 3:
+        #-----------------networks
+        self.atomic_nets = self.configs['atomic_nets']
+        self.radial_funct_net = self.configs['radial_funct_net']
+        #---------------descriptors
+        if self.configs['body_order'] == 3:
             self.to_body_order_terms = to_three_body_order_terms
-        elif configs['body_order'] == 4:
+        elif self.configs['body_order'] == 4:
             self.to_body_order_terms = to_four_body_order_terms
-        elif configs['body_order'] == 5:
+        elif self.configs['body_order'] == 5:
             self.to_body_order_terms = to_five_body_order_terms
-
 
         self.lxlylz = []
         self.lxlylz_sum = []
@@ -103,6 +58,78 @@ class Compute:
             self.lxlylz.append(lxlylz)
             self.lxlylz_sum.append(lxlylz_sum)
             self.fact_norm.append(fact_norm)
+
+    def setup(self):
+        configs = self.configs
+        # -------------------------
+        # === BASIC GEOMETRY ===
+        # -------------------------
+        self.rcut = float(configs["rc_rad"])
+        self.Nrad = int(configs["Nrad"])
+        self.zeta = configs["zeta"]    # List of l_max per body order
+        self.body_order = int(configs["body_order"])
+
+        # -------------------------
+        # === SPECIES INFORMATION ===
+        # -------------------------
+        self.species = configs["species"]
+        self.nspecies = len(self.species)
+
+        # species embedding network sizes
+        self.species_layer_sizes = configs["species_layer_sizes"]
+        self.nspec_embedding = int(self.species_layer_sizes[-1])
+
+        # species correlation mode
+        self.species_correlation = configs["species_correlation"]
+
+        # size of species features per atom
+        self.spec_size = int(configs["spec_size"])
+
+        # -------------------------
+        # === FEATURE DIMENSIONS ===
+        # -------------------------
+        self.feature_size = int(configs["feature_size"])
+
+        # number of Bessel radial components
+        self.n_bessels = int(configs.get("n_bessels", self.Nrad))
+
+        # -------------------------
+        # === DISPERSION PARAMETERS ===
+        # -------------------------
+        self.include_vdw = bool(configs["include_vdw"])
+        self.rmin_u = float(configs["rmin_u"])
+        self.rmax_u = float(configs["rmax_u"])
+        self.rmin_d = float(configs["rmin_d"])
+        self.rmax_d = float(configs["rmax_d"])
+
+        self.nelement = int(configs["nelement"])
+        self.linear_d_terms = configs['linear_d_terms']
+
+        # external field
+        efield = configs.get("efield", None)
+        if efield is not None:
+            self.efield = tf.cast(efield, tf.float32)
+            self.apply_field = True
+        else:
+            self.efield = tf.constant([0.0, 0.0, 0.0], dtype=tf.float32)
+            self.apply_field = False
+
+        print("Electric field:", self.efield.numpy())
+
+        # -------------------------
+        # === SIMULATION SETTINGS ===
+        # -------------------------
+        self.accuracy = configs["accuracy"]
+        self.pbc = bool(configs["pbc"])
+        self.central_atom_id = int(configs["central_atom_id"])
+        self.gaussian_width_scale = float(configs["gaussian_width_scale"])
+
+        # -------------------------
+        # === RADIAL INDEXING ===
+        # -------------------------
+        self.number_radial_components = 1
+        for i, z in enumerate(self.zeta):
+            self.number_radial_components += (i + 1) * z + 1
 
     @tf.function(jit_compile=False,
                 input_signature=[(
@@ -542,8 +569,12 @@ class Compute:
             E1 = tf.nn.softplus(_atomic_energies[:,idx])
             idx += 1
             E2 = tf.nn.softplus(_atomic_energies[:,idx])
-            #E_d1 = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) * 0.1 # eV/A [-0.1,0.1]
-            E_d1 = tf.zeros_like(positions)
+            #E_d1 = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A
+            if self.linear_d_terms:
+                idx += 1
+                E_d1 = tf.tile(_atomic_energies[:,idx][:,None], [1,3]) # eV/A
+            else:
+                E_d1 = tf.zeros_like(positions)
             idx += 1
             E_d2 = 1.0 + tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2 [2,infty]
             #idx += 1
@@ -745,7 +776,13 @@ class Compute:
             idx += 1
             E2 = tf.nn.softplus(_atomic_energies[:,idx])
             #E_d1 = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) * 0.1 # eV/A [-0.1,0.1]
-            E_d1 = tf.zeros_like(positions)
+            if self.linear_d_terms:
+                idx += 1
+                #E_d1 = tf.tile(tf.math.tanh(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A
+                E_d1 = tf.tile(_atomic_energies[:,idx][:,None], [1,3]) # eV/A
+            else:
+                E_d1 = tf.zeros_like(positions)
+
             idx += 1
             E_d2 = 1.0 + tf.tile(tf.nn.softplus(_atomic_energies[:,idx])[:,None], [1,3]) # eV/A^2 [2,infty]
             #idx += 1

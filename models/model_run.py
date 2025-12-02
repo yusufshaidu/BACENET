@@ -35,6 +35,7 @@ class BACENET(tf.keras.Model):
     def __init__(self, configs):
         super().__init__()
 
+        self._training_state = None  # mutable mapping
         # 1. Store configs
         self.configs = configs
         self._parse_basic_configs()
@@ -42,8 +43,8 @@ class BACENET(tf.keras.Model):
         self._parse_species_configs()
         self._compute_feature_dimensions()
 
-        self._build_species_encoder()
         # 2. Build networks
+        self._build_species_encoder()
         self._build_atomic_network()
         self._build_radial_network()
         self._build_optional_networks()
@@ -95,6 +96,7 @@ class BACENET(tf.keras.Model):
         # Regularization
         self.l1 = float(cfg['l1_norm'])
         self.l2 = float(cfg['l2_norm'])
+        self.train_writer = tf.summary.create_file_writer(cfg['outdir']+'/train')
 
     # ---------------------------------------------------------------------
     # 2. ELECTROSTATICS & DISPERSION CONFIGS
@@ -567,7 +569,7 @@ class BACENET(tf.keras.Model):
             #    q_loss = self._qcost * tf.reduce_mean(q_loss)
             #    _loss += q_loss
             #else:
-            q_loss = 0.0
+            #q_loss = 0.0
         # Compute gradients
         trainable_vars = self.trainable_variables
         #assert trainable_vars == self.trainable_weights
@@ -600,7 +602,7 @@ class BACENET(tf.keras.Model):
         metrics.update({'loss': _loss})
         metrics.update({'energy loss': _ecost*emse_loss})
         metrics.update({'force loss': _fcost*fmse_loss})
-        metrics.update({'charge loss': q_loss})
+        #metrics.update({'charge loss': q_loss})
 
         #with writer.set_as_default():
         #'''
