@@ -103,6 +103,136 @@ class Compute:
             self.lxlylz.append(lxlylz)
             self.lxlylz_sum.append(lxlylz_sum)
             self.fact_norm.append(fact_norm)
+
+    @tf.function(jit_compile=False,
+                input_signature=[(
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                tf.TensorSpec(shape=(), dtype=tf.int32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                )])
+    def tf_predict_energy_forces(self,x):
+        '''
+        x = (batch_species_encoder,positions,
+                    nmax_diff, batch_nats,cells,C6,
+                first_atom_idx,second_atom_idx,shift_vectors,num_pairs)
+        '''
+        rc = tf.constant(self.rcut,dtype=tf.float32)
+        Nrad = tf.constant(self.Nrad, dtype=tf.int32)
+        #thetasN = tf.constant(self.thetaN, dtype=tf.int32)
+
+        nat = x[3]
+        nmax_diff = x[2]
+
+        species_encoder = tf.reshape(x[0][:nat*self.nspec_embedding],
+                                     [nat,self.nspec_embedding])
+
+        #width = tf.cast(x[1], dtype=tf.float32)
+        positions = tf.reshape(x[1][:nat*3], [nat,3])
+        positions = positions
+        cell = tf.reshape(x[4], [3,3])
+        #evdw = 0.0
+        num_pairs = x[9]
+        first_atom_idx = tf.cast(x[6][:num_pairs], tf.int32)
+        second_atom_idx = tf.cast(x[7][:num_pairs],tf.int32)
+        shift_vector = tf.cast(tf.reshape(x[8][:num_pairs*3],
+                                          [num_pairs,3]), tf.float32)
+        
+        #shouls be removed in the future
+        #gaussian_width = tf.reshape(x[10][:nat*2], [nat,2])
+        #C6 = x[5][:nat]
+        #chi0 = x[11][:nat]
+        #J0 = x[12][:nat]
+        #atomic_q0 = x[13][:nat]
+        #total_charge = x[14]
+        #nuclei_charge = x[15][:nat]
+        #atomic_number = x[16][:nat]
+
+
+        with tf.GradientTape(persistent=True) as tape0:
+            tape0.watch(positions)
+            tape0.watch(cell)
+        #    tape0.watch(_efield)
+
+            #based on ase 
+            #npairs x 3
+            all_rij = tf.gather(positions,second_atom_idx) - \
+                     tf.gather(positions,first_atom_idx) + \
+                    tf.tensordot(shift_vector,cell,axes=1)
+
+            all_rij_norm = tf.linalg.norm(all_rij, axis=-1) #npair
+            reg = 1e-12
+            species_encoder_i = tf.gather(species_encoder,first_atom_idx)
+            species_encoder_j = tf.gather(species_encoder,second_atom_idx)
+            #if self.species_correlation=='tensor':
+            #    species_encoder_extended = tf.expand_dims(species_encoder_i, -1) * tf.expand_dims(species_encoder_j, -2)
+            #else:
+            species_encoder_extended = species_encoder_i * species_encoder_j
+            species_encoder_ij = tf.reshape(species_encoder_extended, 
+                                                  [-1, self.spec_size]
+                                                   ) #npairs,spec_size
+
+            #since fcut =0 for rij > rc, there is no need for any special treatment
+            #species_encoder Nneigh and reshaped to nat x Nneigh x embedding
+            #fcuts is nat x Nneigh and reshaped to nat x Nneigh
+            #_Nneigh = tf.shape(all_rij_norm)
+            #neigh = _Nneigh[1]
+            kn_rad = tf.ones(self.n_bessels,dtype=tf.float32)
+            bf_radial0 = help_fn.bessel_function(all_rij_norm,
+                                            rc,kn_rad,
+                                            self.n_bessels) #
+
+            bf_radial1 = tf.reshape(bf_radial0, [-1,self.n_bessels])
+            bf_radial2 = self.radial_funct_net(bf_radial1)
+            bf_radial = tf.reshape(bf_radial2, [num_pairs, self.Nrad, self.number_radial_components])
+            radial_ij = tf.expand_dims(bf_radial, 2) * tf.expand_dims(tf.expand_dims(species_encoder_ij, 1), -1)
+            radial_ij = tf.reshape(radial_ij, [num_pairs, self.Nrad*self.spec_size,self.number_radial_components])
+            atomic_descriptors = tf.math.unsorted_segment_sum(data=radial_ij[:,:,0],
+                                                              segment_ids=first_atom_idx, num_segments=nat) 
+
+            #implement angular part: compute vect_rij dot vect_rik / rij / rik
+            #rij_unit = tf.einsum('ij,i->ij',all_rij, 1.0 / (all_rij_norm+reg)) #npair,3
+            rij_unit = all_rij / (tf.expand_dims(all_rij_norm + reg, -1))
+            Gi = self.to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
+            Gi = tf.concat(Gi, axis=1)
+            atomic_descriptors = tf.concat([atomic_descriptors, Gi], axis=1)
+            atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
+
+            #predict energy and forces
+            _atomic_energies = self.atomic_nets(atomic_descriptors) #nmax,ncomp aka head
+            total_energy = tf.reduce_sum(_atomic_energies)
+        #differentiating a scalar w.r.t tensors
+        pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
+        forces = tape0.gradient(total_energy, positions)
+        #needs tape to be persistent
+        dE_dh = tape0.gradient(total_energy, cell)
+        V = tf.abs(tf.tensordot(cell[0], tf.linalg.cross(cell[1], cell[2]),axes=1))
+            # Stress: stress_{ij} = (1/V) \sum_k dE/dh_{ik} * h_{jk}
+        stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / V
+        pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
+        forces = tf.concat([-forces, pad_rows], axis=0)
+        #unused terms
+        charges = tf.zeros(nat+nmax_diff)
+        E1 = tf.zeros(nat+nmax_diff)
+        E2 = tf.zeros(nat+nmax_diff)
+        Vj = tf.zeros(nat+nmax_diff)
+        C6 = tf.zeros(nat+nmax_diff)
+        Pi_a = tf.zeros(3)
+        return [total_energy, forces, C6, charges, stress, Pi_a, E1, E2, Vj]
+
     #--------------------------------------------------
     # standard charge equilibration 
     #--------------------------------------------------
@@ -240,39 +370,28 @@ class Compute:
                            )
             Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
 
-
-
-            field_kernel_q, field_kernel_e, field_kernel_qe = tf.cond(
-                tf.constant(self.apply_field),
-                lambda: _ewald.atom_centered_dV(
-                    nuclei_charge,
-                    self.central_atom_id,
-                    atomic_number,
-                ),
-                lambda: (
-                    tf.zeros_like(nuclei_charge),          # shape (nat,)
-                    tf.zeros((nat, 3), dtype=tf.float32),  # shape (nat,3)
-                    tf.zeros((nat, 3), dtype=tf.float32),  # shape (nat,3)
-                )
-                )
+            if self.apply_field:
+                field_kernel_q, field_kernel_e, field_kernel_qe = _ewald.atom_centered_dV(nuclei_charge,
+                                                                                     self.central_atom_id,
+                                                                                     atomic_number)
+            else:
+                field_kernel_q,field_kernel_e, field_kernel_qe = tf.zeros(nat), tf.zeros((nat,3)), tf.zeros((nat,3))
 
             _b += field_kernel_q
 
             charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
             ecoul = _compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
 
-            Piq_a, Pie_a = tf.cond(tf.constant(self.apply_field),
-                                   lambda: _ewald.atom_centered_polarization(tf.zeros((nat,3)),
+            if self.apply_field:
+                Piq_a, Pie_a = _ewald.atom_centered_polarization(shell_disp,
                                                              nuclei_charge,
                                                              charges,
                                                              self.central_atom_id,
                                                              atomic_number
-                                                             ),
-                                   lambda: (
-                                            tf.zeros(3),          # shape (3,)
-                                            tf.zeros(3),          # shape (3,)
-                                            )
-                                   )
+                                                             )
+            else:
+                Piq_a, Pie_a = tf.zeros(3), tf.zeros(3)
+
             Pi_a = Piq_a + Pie_a
             efield_energy = -tf.reduce_sum((Piq_a + Pie_a) * _efield)
             ecoul += efield_energy 
@@ -282,10 +401,6 @@ class Compute:
             total_energy += ecoul
 
         #differentiating a scalar w.r.t tensors
-        pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
-        charges = tf.concat([charges, pad_rows], axis=0)
-        Pi_a = -tape0.gradient(total_energy, _efield) #contains P0 - dE/d_eps
-        #total_energy -= tf.reduce_sum(Pi_a * _efield)
         forces = tape0.gradient(total_energy, positions)
         #needs tape to be persistent
         dE_dh = tape0.gradient(total_energy, cell)
@@ -294,7 +409,13 @@ class Compute:
         stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / V
         pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
         forces = tf.concat([-forces, pad_rows], axis=0)
-        shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
+
+        pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
+        charges = tf.concat([charges, pad_rows], axis=0)
+        E1 = tf.concat([E1, pad_rows], axis=0)
+        E2 = tf.concat([E2, pad_rows], axis=0)
+        Vj = tf.concat([Vj, pad_rows], axis=0)
+
         return [total_energy, forces, C6, charges, stress, Pi_a, E1, E2, Vj]
 
     @tf.function(jit_compile=False,
@@ -481,11 +602,6 @@ class Compute:
                                                charges)
             total_energy += ecoul
 
-        #differentiating a scalar w.r.t tensors
-        pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
-        charges = tf.concat([charges, pad_rows], axis=0)
-        #Pi_a = -tape0.gradient(total_energy, _efield) #contains P0 - dE/d_eps
-        #total_energy -= tf.reduce_sum(Pi_a * _efield)
         forces = tape0.gradient(total_energy, positions)
         #needs tape to be persistent
         dE_dh = tape0.gradient(total_energy, cell)
@@ -495,6 +611,16 @@ class Compute:
         pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
         forces = tf.concat([-forces, pad_rows], axis=0)
         shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
+        E_d1 = tf.concat([E_d1, pad_rows], axis=0)
+        E_d2 = tf.concat([E_d2, pad_rows], axis=0)
+        E_qd = tf.concat([E_qd, pad_rows], axis=0)
+
+        pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
+        charges = tf.concat([charges, pad_rows], axis=0)
+        E1 = tf.concat([E1, pad_rows], axis=0)
+        E2 = tf.concat([E2, pad_rows], axis=0)
+        Vj = tf.concat([Vj, pad_rows], axis=0)
+
         return [total_energy, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2,E_d1,E_qd, Vj]
 
     @tf.function(jit_compile=False,
@@ -698,10 +824,6 @@ class Compute:
                                                charges)
 
         #differentiating a scalar w.r.t tensors
-        pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
-        charges = tf.concat([charges, pad_rows], axis=0)
-        #Pi_a = -tape0.gradient(total_energy, self.efield) #contains P0 - dE/d_eps
-        #total_energy -= tf.reduce_sum(Pi_a * _efield)
         forces = tape0.gradient(total_energy, positions)
         #needs tape to be persistent
         dE_dh = tape0.gradient(total_energy, cell)
@@ -711,6 +833,17 @@ class Compute:
         pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
         forces = tf.concat([-forces, pad_rows], axis=0)
         shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
+        
+        E_d1 = tf.concat([E_d1, pad_rows], axis=0)
+        E_d2 = tf.concat([E_d2, pad_rows], axis=0)
+        E_qd = tf.concat([E_qd, pad_rows], axis=0)
+
+        pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
+        charges = tf.concat([charges, pad_rows], axis=0)
+        E1 = tf.concat([E1, pad_rows], axis=0)
+        E2 = tf.concat([E2, pad_rows], axis=0)
+        Vj = tf.concat([Vj, pad_rows], axis=0)
+
         return [total_energy, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2,E_d1,E_qd, Vj]
 
 

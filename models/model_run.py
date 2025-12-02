@@ -31,207 +31,211 @@ constant_e = 1.602176634e-19
 
 #tf.debugging.enable_check_numerics()
 class BACENET(tf.keras.Model):
-   
-    def __init__(self, configs):
-        #allows to use all the base class of tf.keras Model
-        super().__init__()
-        
-        #  This part needs to be cleaned up
-        self._training_state = None  # mutable mapping
-        self.is_training = configs['is_training']
-        self.starting_step = configs['initial_global_step']
-         
-        self.species_layer_sizes = configs['species_layer_sizes']
-        layer_sizes = configs['layer_sizes']
-        _activations = configs['activations']
-        _radial_layer_sizes = configs['radial_layer_sizes']
-        #features parameters
-        #network section
-        self.rcut = configs['rc_rad']
-        self.Nrad = int(configs['Nrad'])
-        self.n_bessels = configs['n_bessels'] if not None else self.Nrad
-        self.n_bessels = int(self.n_bessels)
 
-        #self.zeta = configs['zeta'] if type(configs['zeta'])==list \
-        #        else list(range(0,int(configs['zeta'])+1))
-        self.zeta = configs['zeta'] # this is a list of l max per body order
-        self.nzeta = 0
-        for z in self.zeta:
-            self.nzeta += z
-        #self.nzeta = self.zeta + 1
-        #print(f'we are sampling zeta as: {self.zeta} with count {self.nzeta}')
-        self.body_order = configs['body_order']
+    def __init__(self, configs):
+        super().__init__()
+
+        # 1. Store configs
+        self.configs = configs
+        self._parse_basic_configs()
+        self._parse_electrostatics_configs()
+        self._parse_species_configs()
+        self._compute_feature_dimensions()
+
+        self._build_species_encoder()
+        # 2. Build networks
+        self._build_atomic_network()
+        self._build_radial_network()
+        self._build_optional_networks()
+
+        # 3. Logging
+        #tf.print("Model initialization complete. Feature size =", self.feature_size)
+
+        self.configs['feature_size'] = self.feature_size 
+        self.configs['spec_size'] = self.spec_size 
+        self.configs['atomic_nets'] = self.atomic_nets 
+        self.configs['radial_funct_net'] = self.radial_funct_net 
+        self.model = Compute(self.configs) # call model
+
+    # ---------------------------------------------------------------------
+    # 1. PARSING CONFIGS AND BASIC PARAMETERS
+    # ---------------------------------------------------------------------
+
+    def _parse_basic_configs(self):
+        cfg = self.configs
+
+        self.is_training = cfg['is_training']
+        self.starting_step = cfg['initial_global_step']
+
+        # Cutoffs & radial settings
+        self.rcut = float(cfg['rc_rad'])
+        self.Nrad = int(cfg['Nrad'])
+
+        self.n_bessels = int(cfg['n_bessels']) if cfg['n_bessels'] is not None else self.Nrad
+
+        # body-order zeta list
+        self.zeta = cfg['zeta']
+        self.nzeta = sum(self.zeta)
+
+        self.body_order = cfg['body_order']
+        self.batch_size = cfg['batch_size']
+
+        # Network architecture settings
+        self.layer_sizes = cfg['layer_sizes']
+        self.species_layer_sizes = cfg['species_layer_sizes']
+        self.activations = cfg['activations']
+
+        # Optional loss settings
+        self.fcost = float(cfg['fcost'])
+        self.ecost = float(cfg['ecost'])
+        self.fcost_swa = float(cfg['fcost_swa'])
+        self.ecost_swa = float(cfg['ecost_swa'])
+        self._start_swa = cfg['start_swa_global_step']
+
+        # Regularization
+        self.l1 = float(cfg['l1_norm'])
+        self.l2 = float(cfg['l2_norm'])
+
+    # ---------------------------------------------------------------------
+    # 2. ELECTROSTATICS & DISPERSION CONFIGS
+    # ---------------------------------------------------------------------
+
+    def _parse_electrostatics_configs(self):
+        cfg = self.configs
+
+        self.include_vdw = cfg['include_vdw']
+        self.rmin_u = cfg['rmin_u']
+        self.rmax_u = cfg['rmax_u']
+        self.rmin_d = cfg['rmin_d']
+        self.rmax_d = cfg['rmax_d']
+
+        self.nelement = cfg['nelement']
+        self.coulumb = cfg['coulumb']
+        self.efield = cfg['efield']
+
+        self._P_in_cell = cfg['P_in_cell']
+        self._sawtooth_PE = cfg['sawtooth_PE']
+
+        self._linearize_d = cfg['linearize_d']
+        self._anisotropy = cfg['anisotropy']
+        self.linear_d_terms = cfg['linear_d_terms']
+        self._d0 = cfg['d0']
+        self.accuracy = cfg['accuracy']
+        self.pbc = cfg['pbc']
+
+    # ---------------------------------------------------------------------
+    # 3. SPECIES & CHARGES
+    # ---------------------------------------------------------------------
+
+    def _parse_species_configs(self):
+        cfg = self.configs
+
+        self.species = cfg['species']
+        self.species_identity = cfg['species_identity']
+        self.nspecies = len(self.species_identity)
+
+        # electrons per atom
+        if cfg['species_nelectrons'] is None:
+            if cfg['nshells'] == 0:
+                nelec = [2.0] * len(self.species)
+            elif cfg['nshells'] == -1:
+                nelec = [help_fn.unfilled_orbitals(s) for s in self.species]
+            else:
+                nelec = [help_fn.valence_with_two_shells(s, cfg['nshells'])
+                         for s in self.species]
+        else:
+            nelec = cfg['species_nelectrons']
+
+        self.species_nelectrons = tf.cast(nelec, tf.float32)
+
+        # electronegativity parameters
+        self.species_chi0 = cfg['species_chi0'] * cfg['scale_chi0']
+        self.species_J0 = cfg['species_J0'] * cfg['scale_J0']
+
+        self.oxidation_states = cfg['oxidation_states']
+        if self.oxidation_states is None:
+            self.oxidation_states = tf.zeros([len(self.species)], tf.float32)
+
+        self.learn_oxidation_states = True
+        self.gaussian_width_scale = cfg['gaussian_width_scale']
+        self.pqeq = cfg['pqeq']
+
+    # ---------------------------------------------------------------------
+    # 4. COMPUTE FEATURE SIZE
+    # ---------------------------------------------------------------------
+
+    def _compute_feature_dimensions(self):
+        # Base size (3-body)
         base_size = self.Nrad * (self.zeta[0] + 1)
         self.feature_size = self.Nrad + base_size
-        if self.body_order >= 4 and self.body_order < 8:
-            #self.feature_size += self.Nrad * (2*self.nzeta * (self.nzeta+1)) #4 * nzeta * (nzeta+1)/2
-            i = 1
-            for b in range(4, self.body_order+1):
-                self.feature_size += self.Nrad * (1 + self.zeta[i])**(b - 2)
-                i += 1
-        self.species_correlation = configs['species_correlation']
-        self.species_identity = configs['species_identity'] # atomic number
-        self.nspecies = len(self.species_identity)
-        self.species = configs['species']
 
-        
+        if self.body_order >= 4 and self.body_order < 8:
+            idx = 1
+            for b in range(4, self.body_order + 1):
+                self.feature_size += self.Nrad * (1 + self.zeta[idx]) ** (b - 2)
+                idx += 1
+
+
+        # species embedding expansion
         self.nspec_embedding = self.species_layer_sizes[-1]
-        #if self.species_correlation == 'tensor':
-        #    self.spec_size = self.nspec_embedding*self.nspec_embedding
-        #else:
         self.spec_size = self.nspec_embedding
         self.feature_size *= self.spec_size
-                
-        logging.info(f'input dimension for the network features is {self.feature_size}')
-        
-        #optimization parameters
-        self.batch_size = configs['batch_size']
-        self.fcost = float(configs['fcost'])
-        self.ecost = float(configs['ecost'])
-        #if self._train_counter >= configs['start_swa'] and configs['start_swa'] > -1:
-        self.fcost_swa = float(configs['fcost_swa'])
-        self.ecost_swa = float(configs['ecost_swa'])
-        self._start_swa = configs['start_swa_global_step']
-        #logging.info(f'ecost will be increased to {self.ecost_swa} when the global time step is > {self._start_swa}')
 
-        #with tf.device('/GPU:0'):
-        self.train_writer = tf.summary.create_file_writer(configs['outdir']+'/train')
-        self.l1 = float(configs['l1_norm'])
-        self.l2 = float(configs['l2_norm'])
-        self.learn_radial = configs['learn_radial']
+    # ---------------------------------------------------------------------
+    # 5. NETWORK BUILDING
+    # ---------------------------------------------------------------------
 
+    def _build_species_encoder(self):
+        indim = self.nelement + (1 if self.coulumb else 0)
 
-        #dispersion parameters and electrostatics
-        self.include_vdw = configs['include_vdw']
-        self.rmin_u = configs['rmin_u']
-        self.rmax_u = configs['rmax_u']
-        self.rmin_d = configs['rmin_d']
-        self.rmax_d = configs['rmax_d']
-        # the number of elements in the periodic table
-        self.nelement = configs['nelement']
-        self.coulumb = configs['coulumb']
-        self.efield = configs['efield']
-        self._sawtooth_PE = configs['sawtooth_PE']
-        self._P_in_cell = configs['P_in_cell']
-        print('This is P in cell status',self._P_in_cell)
-        if self._P_in_cell:
-            print('p in cell is active!!!!!')
-        self.accuracy = configs['accuracy']
-        self.pbc = configs['pbc']
-        self.central_atom_id = configs['central_atom_id']
-        self.species_nelectrons = configs['species_nelectrons']
+        species_activations = ['tanh'] * (len(self.species_layer_sizes) - 1) + ['linear']
+        self.species_nets = Networks(
+            indim, self.species_layer_sizes, species_activations, prefix="species_encoder"
+        )
 
-        #self.species_nelectrons =  tf.constant([element(sym).nvalence() for sym in self.species])
-        #self.species_nelectrons =  tf.constant([element(sym).atomic_number for sym in self.species])
-        #'''
-        if self.species_nelectrons is None:
-            if configs['nshells'] == 0:
-                self.species_nelectrons = [2.0 for symb in self.species]
-            elif configs['nshells'] == -1: # Use all electrons in the containing unfilled shells
-                self.species_nelectrons =  [help_fn.unfilled_orbitals(symb)
-                                                    for symb in self.species] # include electrons from l=lmax and l=lmax-1
-            else: #select shells to include.
-                self.species_nelectrons =  [help_fn.valence_with_two_shells(symb,  
-                                                                                    nshells=configs['nshells']) 
-                                                    for symb in self.species] # include electrons from l=lmax and l=lmax-1
-        #'''
-        self.species_nelectrons = tf.cast(self.species_nelectrons, dtype=tf.float32)
-        self._initial_shell_sping_constant = configs['initial_shell_spring_constant'] # If this is true, estimate E_d from Zi
-        print(f'Shell charges used are: {self.species_nelectrons}')
-        # this should be the zeros of the tayloe expansion
-        self.oxidation_states = configs['oxidation_states']
-        self.learn_oxidation_states = True
-        self.gaussian_width_scale = configs['gaussian_width_scale']
-        self._qcost = configs['qcost'] 
-        
+    def _build_atomic_network(self):
+        self.atomic_nets = Networks(
+            self.feature_size,             # input dimension
+            self.layer_sizes,              # hidden layers
+            self.activations,              # activations
+            l1=self.l1, l2=self.l2,
+            normalize=self.configs['normalize']
+        )
 
-
-        if self.oxidation_states is None:
-            self.oxidation_states = tf.constant([0.0 for i in self.species], tf.float32)
-
-        self.species_chi0 = configs['species_chi0'] * configs['scale_chi0']
-        self.species_J0 = configs['species_J0'] * configs['scale_J0']
-
-        self._max_width = configs['max_width']
-        #if self._max_width == -1:
-        #    self._max_width == 3.0
-        self._linearize_d = configs['linearize_d']
-        self._anisotropy = configs['anisotropy']
-        self.linear_d_terms = configs['linear_d_terms']
-        self._d0 = configs['d0'] #initial d0 to enhance training stability
-        self.pqeq = configs['pqeq']
-
-        self.atomic_nets = Networks(self.feature_size, 
-                    layer_sizes, _activations, 
-                    l1=self.l1, l2=self.l2,
-        normalize=configs['normalize']) 
-        self._normalize = configs['normalize']
-
-        _radial_layer_sizes = configs['radial_layer_sizes']
+    def _build_radial_network(self):
+        # radial network
+        zeta = self.zeta
         self.number_radial_components = 1
-        for i, z in enumerate(self.zeta):
-            self.number_radial_components += (i+1) * z + 1 # 1 for 2body, l_3 + 1 for 3body, 2 l_4 + 1 for 4body, 3 l_5 + 1 for 5 body
+        for i, zi in enumerate(zeta):
+            self.number_radial_components += (i + 1) * zi + 1
 
-        _radial_layer_sizes.append(self.number_radial_components * self.Nrad)
-        radial_activations = ['silu' for s in _radial_layer_sizes[:-1]]
-        radial_activations.append('silu')
-        self.radial_funct_net = Networks(self.n_bessels, _radial_layer_sizes,
-                                         radial_activations,
-                                         #l1=self.l1, l2=self.l2
-                                 #bias_initializer='zeros',
-                                 prefix='radial-functions')
+        radial_layers = self.configs['radial_layer_sizes']
+        radial_layers.append(self.number_radial_components * self.Nrad)
 
-       # create a species embedding network with 1 hidden layer Nembedding x Nspecies
-        #species_activations = ['silu' for x in self.species_layer_sizes[:-1]]
-        species_activations = ['tanh' for x in self.species_layer_sizes[:-1]]
-        species_activations.append('linear')
-        nelements = self.nelement
+        radial_act = ['silu'] * len(radial_layers)
+        self.radial_funct_net = Networks(
+            self.n_bessels, radial_layers, radial_act, prefix="radial-functions"
+        )
 
-        if self.coulumb: # and self.learn_oxidation_states:
-            nelements += 1
-        self.species_nets = Networks(nelements, 
-                self.species_layer_sizes, 
-                species_activations, prefix='species_encoder')
+    def _build_optional_networks(self):
+        cfg = self.configs
+        self.learnable_gaussian_width = cfg['learnable_gaussian_width']
 
-        b_order = self.body_order
-        if self.body_order == 40:
-            b_order = 4
-        self.learnable_gaussian_width = configs['learnable_gaussian_width']
-        if self.learnable_gaussian_width:
-            #acts = ['softplus', 'softplus']
-            #if self._max_width > 0:
-            acts = ['tanh', 'tanh']
-            self.gaussian_width_net = Networks(self.nelement, # pass one-hot encoder
-                [64,2], # return two width per species, one for q and the other for Z 
-                acts, 
-                prefix='species_gaussian_width')
-        
+        if cfg['learnable_gaussian_width']:
+            self.gaussian_width_net = Networks(
+                self.nelement,
+                [64, 2],
+                ['sigmoid', 'sigmoid'],
+                prefix='species_gaussian_width'
+            )
         '''
-        self._learn_species_nelectrons = configs['learn_species_nelectrons']
+        self._learn_species_nelectrons = cfg['learn_species_nelectrons']
         if self._learn_species_nelectrons:
             self.species_nelectrons_net = Networks(self.nelement, # pass one-hot encoder
                 [64,1],
                 ['softplus', 'softplus'], prefix='species_nelectrons') # freely learn
         '''
-
-        self.lxlylz = []
-        self.lxlylz_sum = []
-        self.fact_norm = []
-        for i, z in enumerate(self.zeta):
-            lxlylz, lxlylz_sum, fact_norm = help_fn._compute_cosine_terms(z)
-            lxlylz = tf.cast(lxlylz,tf.float32) #[n_lxlylz, 3]
-            lxlylz_sum = tf.cast(lxlylz_sum, tf.int32) #[n_lxlylz,]
-            fact_norm = tf.cast(fact_norm, tf.float32) #[n_lxlylz,]
-            self.lxlylz.append(lxlylz)
-            self.lxlylz_sum.append(lxlylz_sum)
-            self.fact_norm.append(fact_norm)
-
-        configs['feature_size'] = self.feature_size 
-        configs['spec_size'] = self.spec_size 
-        configs['atomic_nets'] = self.atomic_nets 
-        configs['radial_funct_net'] = self.radial_funct_net 
-        self.model = Compute(configs) # call model
-
+        
     @tf.function
     def step_fn(self, x):
         x = tf.cast(x, tf.float32)
@@ -257,11 +261,10 @@ class BACENET(tf.keras.Model):
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
                 )])
-    def map_fn_parallel_ld0(self, elements):
+    def map_fn_parallel_pqeq(self, elements):
         out_signature = [
             tf.float32,  # energies
             tf.float32,  # forces
-#            tf.float32,  # atomic_features
             tf.float32,  # C6
             tf.float32,  # charges
             tf.float32,  # stress
@@ -275,56 +278,15 @@ class BACENET(tf.keras.Model):
             tf.float32,  # Vj
         ]
 
-
-        return tf.map_fn(self.model.tf_predict_energy_forces_pqeq0, elements,
+        if self._linearize_d == 0:
+            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq0, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
-
-
-    @tf.function(jit_compile=False,
-                input_signature=[(
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,), dtype=tf.int32),
-                )])
-    def map_fn_parallel_ld1(self, elements):
-        out_signature = [
-            tf.float32,  # energies
-            tf.float32,  # forces
-#            tf.float32,  # atomic_features
-            tf.float32,  # C6
-            tf.float32,  # charges
-            tf.float32,  # stress
-            tf.float32,  # shell_disp
-            tf.float32,  # P
-            tf.float32,  # E1
-            tf.float32,  # E2
-            tf.float32,  # E_d1
-            tf.float32,  # E_d2
-            tf.float32,  # E_dq
-            tf.float32,  # Vj
-        ]
-
 
         return tf.map_fn(self.model.tf_predict_energy_forces_pqeq1, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
-
-
+       
     @tf.function(jit_compile=False,
                 input_signature=[(
                 tf.TensorSpec(shape=(None,None,), dtype=tf.float32),
@@ -360,10 +322,15 @@ class BACENET(tf.keras.Model):
             tf.float32,  # Vj
         ]
 
-
-        return tf.map_fn(self.model.tf_predict_energy_forces_qeq, elements,
+        if self.coulumb:
+            return tf.map_fn(self.model.tf_predict_energy_forces_qeq, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
+        
+        return tf.map_fn(self.model.tf_predict_energy_forces, elements,
+                                     fn_output_signature=out_signature,
+                                     parallel_iterations=self.batch_size)
+
 
     def call(self, data, training=False):
         # may be just call the energy prediction here which will be needed in the train and test steps
@@ -432,10 +399,8 @@ class BACENET(tf.keras.Model):
 
             if self.learnable_gaussian_width:
                 #minimum = 0.5 and maximum = 2.1, self._species_gaussian_width in [-1,1]
-                self._species_gaussian_width = 1.1 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
-                #if self._max_width > 0.0:
-                #    self._species_gaussian_width = 0.5  + (self._max_width 
-                #                                           - 0.5) * self._species_gaussian_width 
+                #self._species_gaussian_width = 1.1 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
+                self._species_gaussian_width = 1.0  + 1.5 * self.gaussian_width_net(_species_one_hot_encoder) # [1.0,2.5]
                     # species_gaussian_width is between 0,1. spec_gwidth is between 0.5 and 2.5
                 #else:
                 #    self._species_gaussian_width += 0.5
@@ -509,45 +474,23 @@ class BACENET(tf.keras.Model):
                     batch_species_nelec, atomic_number)
 
         # energies, forces, atomic_features, C6, charges, stress
-        if self.pqeq:
-            if self._linearize_d == 0:
-                energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2, E_d1, E_qd, Vj = self.map_fn_parallel_ld0(elements)
+        if self.coulumb:
+            if self.pqeq:
+                if self._linearize_d == 0 or self._linearize_d == 1:
+                    energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2, E_d1, E_qd, Vj = self.map_fn_parallel_pqeq(elements)
             else:
-                energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2, E_d1, E_qd, Vj = self.map_fn_parallel_ld1(elements)
+                energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, Vj = self.map_fn_parallel(elements)
+                E_d1 = tf.zeros_like(positions)
+                E_d2 = tf.zeros_like(positions)
+                E_qd = tf.zeros_like(positions)
         else:
             energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, Vj = self.map_fn_parallel(elements)
             E_d1 = tf.zeros_like(positions)
             E_d2 = tf.zeros_like(positions)
             E_qd = tf.zeros_like(positions)
 
-        #'''
-        out_signature = [
-            tf.float32,  # energies
-            tf.float32,  # forces
-#            tf.float32,  # atomic_features
-            tf.float32,  # C6
-            tf.float32,  # charges
-            tf.float32,  # stress
-            tf.float32,  # shell_disp
-            tf.float32,  # Pi_a
-            tf.float32,  # E1
-            tf.float32,  # E2
-            tf.float32,  # E_d1
-            tf.float32,  # E_d2
-            tf.float32,  # E_dq
-            tf.float32,  # Vj
-
-        ]
-
-
-        #energies, forces, C6, charges, stress, shell_disp = tf.map_fn(self.tf_predict_energy_forces, elements,
-        #                             fn_output_signature=out_signature,
-        #                             parallel_iterations=self.batch_size)
-        #'''
-        #outs = [energies, forces, atomic_features]
         outs = {'energy':energies,
                 'forces':forces,
-                #'features':atomic_features,
                 'C6': C6,
                 'charges': charges,
                 'stress': stress,
