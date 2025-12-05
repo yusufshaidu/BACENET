@@ -67,7 +67,6 @@ class BACENET(tf.keras.Model):
 
         self.is_training = cfg['is_training']
         self.starting_step = cfg['initial_global_step']
-
         # Cutoffs & radial settings
         self.rcut = float(cfg['rc_rad'])
         self.Nrad = int(cfg['Nrad'])
@@ -278,6 +277,8 @@ class BACENET(tf.keras.Model):
             tf.float32,  # E_d2
             tf.float32,  # E_dq
             tf.float32,  # Vj
+            tf.float32,  # Zstar
+            tf.float32,  # epsilon
         ]
 
         if self._linearize_d == 0:
@@ -313,15 +314,16 @@ class BACENET(tf.keras.Model):
         out_signature = [
             tf.float32,  # energies
             tf.float32,  # forces
-#            tf.float32,  # atomic_features
             tf.float32,  # C6
             tf.float32,  # charges
             tf.float32,  # stress
-            tf.float32,  # shell_disp
             tf.float32,  # P
             tf.float32,  # E1
             tf.float32,  # E2
             tf.float32,  # Vj
+            tf.float32,  # Zstar
+            tf.float32,  # epsilon
+
         ]
 
         if self.coulumb:
@@ -479,17 +481,24 @@ class BACENET(tf.keras.Model):
         if self.coulumb:
             if self.pqeq:
                 if self._linearize_d == 0 or self._linearize_d == 1:
-                    energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2, E_d1, E_qd, Vj = self.map_fn_parallel_pqeq(elements)
+                    energies, forces, C6, charges, stress, \
+                            shell_disp, Pi_a, E1, E2, E_d2, E_d1, E_qd, Vj, \
+                            Zstar, epsilon_infty = self.map_fn_parallel_pqeq(elements)
             else:
-                energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, Vj = self.map_fn_parallel(elements)
-                E_d1 = tf.zeros_like(positions)
-                E_d2 = tf.zeros_like(positions)
-                E_qd = tf.zeros_like(positions)
+                energies, forces, C6, charges, stress, Pi_a, E1, E2, Vj, \
+                        Zstar, epsilon_infty = self.map_fn_parallel(elements)
+                E_d1 = tf.zeros((batch_size, nmax,3))
+                E_d2 = tf.zeros((batch_size, nmax,3))
+                E_qd = tf.zeros((batch_size, nmax,3))
+                shell_disp = tf.zeros((batch_size, nmax,3))
         else:
-            energies, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, Vj = self.map_fn_parallel(elements)
-            E_d1 = tf.zeros_like(positions)
-            E_d2 = tf.zeros_like(positions)
-            E_qd = tf.zeros_like(positions)
+            energies, forces, C6, charges, stress, Pi_a, E1, E2, Vj = self.map_fn_parallel(elements)
+            E_d1 = tf.zeros((batch_size, nmax,3))
+            E_d2 = tf.zeros((batch_size, nmax,3))
+            E_qd = tf.zeros((batch_size, nmax,3))
+            shell_disp = tf.zeros((batch_size, nmax,3))
+            Zstar = tf.zeros((nmax,3,3))
+            epsilon_infty = tf.eye(3)
 
         outs = {'energy':energies,
                 'forces':forces,
@@ -504,6 +513,8 @@ class BACENET(tf.keras.Model):
                 'E_qd':E_qd,
                 'E_d2':E_d2,
                 'Vj':Vj,
+                'Zstar':Zstar,
+                'epsilon':epsilon_infty,
                 }
         return outs
 

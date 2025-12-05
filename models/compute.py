@@ -24,6 +24,9 @@ from models.ewald import ewald
 import warnings
 import logging
 constant_e = 1.602176634e-19
+epsilon_0 = 8.854e-12 # F/m
+Angs = 1e-10 #m
+UNIT_FACTOR = constant_e / (Angs * epsilon_0)
 
 #tf.config.run_functions_eagerly(
 #    True
@@ -192,7 +195,6 @@ class Compute:
         with tf.GradientTape(persistent=True) as tape0:
             tape0.watch(positions)
             tape0.watch(cell)
-        #    tape0.watch(_efield)
 
             #based on ase 
             #npairs x 3
@@ -318,6 +320,7 @@ class Compute:
         total_charge = x[14]
         nuclei_charge = x[15][:nat]
         atomic_number = x[16][:nat]
+        _efield = self.efield
         with tf.GradientTape(persistent=True) as tape0:
             tape0.watch(positions)
             tape0.watch(cell)
@@ -365,15 +368,7 @@ class Compute:
             Gi = self.to_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat)
             Gi = tf.concat(Gi, axis=1)
             atomic_descriptors = tf.concat([atomic_descriptors, Gi], axis=1)
-            #for nbody in tf.range(0, self.body_order-3):
-            #    atomic_descriptors = tf.concat([atomic_descriptors, Gi[nbody]], axis=1)
 
-            #field components = \sum_j{fc(rij) * (E . rij_unit)}
-            #_efield_extended = tf.squeeze(tf.matmul(rij_unit, _efield[:, None])) * help_fn.tf_fcut_rbf(all_rij_norm, rc)
-            #_efield_extended = tf.math.unsorted_segment_sum(data=_efield_extended,
-            #                                                  segment_ids=first_atom_idx, num_segments=nat)
-
-            #atomic_descriptors = tf.concat([atomic_descriptors, _efield_extended[:,None]], axis=1) # append electric field
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
 
             #predict energy and forces
@@ -397,35 +392,59 @@ class Compute:
                            )
             Vij = _ewald.recip_space_term() if self.pbc else _ewald.real_space_term()
 
+            shell_disp = tf.zeros_like(positions) # not needed
+            nuclei_charge = tf.zeros_like(atomic_q0) # not needed, only place_holder
             if self.apply_field:
-                field_kernel_q, field_kernel_e, field_kernel_qe = _ewald.atom_centered_dV(nuclei_charge,
-                                                                                     self.central_atom_id,
-                                                                                     atomic_number)
+                 #directly diffrentiate charge and shell_disp.
+                #Since the derivative is independent on charge and shell_disp, we are initializing them to zero
+                #Not: this doesn's affect the derivatives needed here
+                charges = tf.identity(atomic_q0)
+                field_kernel_q, field_kernel_e = _ewald.atom_centered_dV_vectorized_auto(shell_disp,
+                                    charges, nuclei_charge,
+                                    self.central_atom_id,
+                                    atomic_number)
+                field_kernel_qe = tf.zeros((nat,3))
             else:
                 field_kernel_q,field_kernel_e, field_kernel_qe = tf.zeros(nat), tf.zeros((nat,3)), tf.zeros((nat,3))
 
             _b += field_kernel_q
 
-            charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+            charges = _compute_charges(Vij, _b, E2, atomic_q0, total_charge)
             ecoul = _compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
 
             if self.apply_field:
-                Piq_a, Pie_a = _ewald.atom_centered_polarization(shell_disp,
+                Piq_a, Pie_a = _ewald.atom_centered_polarization_vectorized(shell_disp, positions,
                                                              nuclei_charge,
                                                              charges,
                                                              self.central_atom_id,
-                                                             atomic_number
-                                                             )
+                                                             atomic_number)
+
             else:
                 Piq_a, Pie_a = tf.zeros(3), tf.zeros(3)
 
             Pi_a = Piq_a + Pie_a
-            efield_energy = -tf.reduce_sum((Piq_a + Pie_a) * _efield)
-            ecoul += efield_energy 
+
+            efield_energy = -tf.reduce_sum(Pi_a * _efield)
+            ecoul += efield_energy
             Vj = _ewald.recip_space_term_with_shelld_linear_Vj(shell_disp,
                                                nuclei_charge,
                                                charges)
             total_energy += ecoul
+
+            cell_volume = tf.abs(tf.linalg.det(cell))
+            Pi_a /= cell_volume
+
+        #differentiating a scalar w.r.t tensors
+        if self.apply_field:
+            #Z*_{iab} = V * dP_a/dr_{ib}
+            Zstar = cell_volume * tf.transpose(tape0.jacobian(Pi_a, positions, experimental_use_pfor=False), perm=(1,0,2))
+            #epsilon*_{ab} = dP_a/defield_b
+            epsilon_infty = tape0.jacobian(Pi_a, _efield, experimental_use_pfor=False)
+            epsilon_infty *= UNIT_FACTOR #
+            epsilon_infty += tf.eye(3)
+        else:
+            epsilon_infty = tf.eye(3)
+            Zstar = tf.zeros((nat,3,3))
 
         #differentiating a scalar w.r.t tensors
         forces = tape0.gradient(total_energy, positions)
@@ -437,13 +456,19 @@ class Compute:
         pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
         forces = tf.concat([-forces, pad_rows], axis=0)
 
+        pad_rows = tf.zeros([nmax_diff, 3, 3], dtype=tf.float32)
+        Zstar = tf.concat([Zstar, pad_rows], axis=0)
+
         pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
         charges = tf.concat([charges, pad_rows], axis=0)
         E1 = tf.concat([E1, pad_rows], axis=0)
         E2 = tf.concat([E2, pad_rows], axis=0)
-        Vj = tf.concat([Vj, pad_rows], axis=0)
+        Vj = tf.zeros(nat+nmax_diff)
+        C6 = tf.zeros(nat+nmax_diff)
+        Pi_a = tf.zeros(3)
 
-        return [total_energy, forces, C6, charges, stress, Pi_a, E1, E2, Vj]
+        return [total_energy, forces, C6, charges, stress, 
+                Pi_a, E1, E2, Vj, Zstar, epsilon_infty]
 
     @tf.function(jit_compile=False,
                 input_signature=[(
@@ -500,11 +525,11 @@ class Compute:
         total_charge = x[14]
         nuclei_charge = x[15][:nat]
         atomic_number = x[16][:nat]
-
+        _efield = self.efield
         with tf.GradientTape(persistent=True) as tape0:
             tape0.watch(positions)
             tape0.watch(cell)
-            #tape0.watch(_efield)
+            tape0.watch(_efield)
 
             #based on ase 
             #npairs x 3
@@ -590,14 +615,21 @@ class Compute:
 
             _ewald = ewald(positions, cell, nat,
                     gaussian_width,self.accuracy,
-                           None, self.pbc, self.efield,
+                           None, self.pbc, _efield,
                            self.gaussian_width_scale
                            )
 
             if self.apply_field:
-                field_kernel_q, field_kernel_e, field_kernel_qe = _ewald.atom_centered_dV(nuclei_charge,
-                                                                                     self.central_atom_id,
-                                                                                     atomic_number)
+                 #directly diffrentiate charge and shell_disp.
+                #Since the derivative is independent on charge and shell_disp, we are initializing them to zero
+                #Not: this doesn's affect the derivatives needed here
+                shell_disp = tf.zeros_like(positions)
+                charges = tf.identity(atomic_q0)
+                field_kernel_q, field_kernel_e = _ewald.atom_centered_dV_vectorized_auto(shell_disp,
+                                    charges, nuclei_charge,
+                                    self.central_atom_id,
+                                    atomic_number)
+                field_kernel_qe = tf.zeros((nat,3))
                 _b += field_kernel_q # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
             else:
                 field_kernel_q,field_kernel_e, field_kernel_qe = tf.zeros(nat), tf.zeros((nat,3)), tf.zeros((nat,3))
@@ -615,30 +647,43 @@ class Compute:
             dq = charges - atomic_q0
             ecoul += tf.reduce_sum((E_d1  + 0.5 * E_qd * dq[:,None] + 0.5 *  E_d2 * shell_disp) * shell_disp) 
             if self.apply_field:
-                Piq_a, Pie_a = _ewald.atom_centered_polarization(shell_disp,
+                Piq_a, Pie_a = _ewald.atom_centered_polarization_vectorized(shell_disp, positions,
                                                              nuclei_charge,
                                                              charges,
                                                              self.central_atom_id,
-                                                             atomic_number
-                                                             )
+                                                             atomic_number)
+
             else:
                 Piq_a, Pie_a = tf.zeros(3), tf.zeros(3)
 
             Pi_a = Piq_a + Pie_a
-            efield_energy = -tf.reduce_sum(Pi_a * self.efield)
+            efield_energy = -tf.reduce_sum(Pi_a * _efield)
 
             ecoul += efield_energy
             Vj = _ewald.recip_space_term_with_shelld_linear_Vj(shell_disp,
                                                nuclei_charge,
                                                charges)
             total_energy += ecoul
+            
+            cell_volume = tf.abs(tf.linalg.det(cell))
+            Pi_a /= cell_volume
 
+        #differentiating a scalar w.r.t tensors
+        if self.apply_field:
+            #Z*_{iab} = V * dP_a/dr_{ib}
+            Zstar = cell_volume * tf.transpose(tape0.jacobian(Pi_a, positions, experimental_use_pfor=False), perm=(1,0,2))
+            #epsilon*_{ab} = dP_a/defield_b
+            epsilon_infty = tape0.jacobian(Pi_a, _efield, experimental_use_pfor=False)
+            epsilon_infty *= UNIT_FACTOR #
+            epsilon_infty += tf.eye(3)
+        else:
+            epsilon_infty = tf.eye(3)
+            Zstar = tf.zeros((nat,3,3))
         forces = tape0.gradient(total_energy, positions)
         #needs tape to be persistent
         dE_dh = tape0.gradient(total_energy, cell)
-        V = tf.abs(tf.tensordot(cell[0], tf.linalg.cross(cell[1], cell[2]),axes=1))
         # Stress: stress_{ij} = (1/V) \sum_k dE/dh_{ik} * h_{jk}
-        stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / V
+        stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / cell_volume
         pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
         forces = tf.concat([-forces, pad_rows], axis=0)
         shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
@@ -646,13 +691,17 @@ class Compute:
         E_d2 = tf.concat([E_d2, pad_rows], axis=0)
         E_qd = tf.concat([E_qd, pad_rows], axis=0)
 
+        pad_rows = tf.zeros([nmax_diff, 3, 3], dtype=tf.float32)
+        Zstar = tf.concat([Zstar, pad_rows], axis=0)
+
         pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
         charges = tf.concat([charges, pad_rows], axis=0)
         E1 = tf.concat([E1, pad_rows], axis=0)
         E2 = tf.concat([E2, pad_rows], axis=0)
         Vj = tf.concat([Vj, pad_rows], axis=0)
 
-        return [total_energy, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2,E_d1,E_qd, Vj]
+        return [total_energy, forces, C6, charges, stress, shell_disp, 
+                Pi_a, E1, E2, E_d2,E_d1,E_qd, Vj, Zstar, epsilon_infty]
 
     @tf.function(jit_compile=False,
                 input_signature=[(
@@ -708,11 +757,12 @@ class Compute:
         total_charge = x[14]
         nuclei_charge = x[15][:nat]
         atomic_number = x[16][:nat]
+        _efield = self.efield
 
         with tf.GradientTape(persistent=True) as tape0:
             tape0.watch(positions)
             tape0.watch(cell)
-            #tape0.watch(_efield)
+            tape0.watch(_efield)
 
             #based on ase 
             #npairs x 3
@@ -760,12 +810,6 @@ class Compute:
             Gi = tf.concat(Gi, axis=1)
             atomic_descriptors = tf.concat([atomic_descriptors, Gi], axis=1)
 
-            #field components = \sum_j{fc(rij) * (E . rij_unit)}
-            #_efield_extended = tf.squeeze(tf.matmul(rij_unit, _efield[:, None])) * help_fn.tf_fcut_rbf(all_rij_norm, rc)
-            #_efield_extended = tf.math.unsorted_segment_sum(data=_efield_extended,
-            #                                                  segment_ids=first_atom_idx, num_segments=nat)
-
-            #atomic_descriptors = tf.concat([atomic_descriptors, _efield_extended[:,None]], axis=1) # append electric field
             atomic_descriptors = tf.reshape(atomic_descriptors, [nat, self.feature_size])
 
             #predict energy and forces
@@ -798,27 +842,34 @@ class Compute:
 
             _ewald = ewald(positions, cell, nat,
                     gaussian_width,self.accuracy,
-                           None, self.pbc, self.efield,
+                           None, self.pbc, _efield,
                            self.gaussian_width_scale
                            )
             if self.apply_field:
-                field_kernel_q, field_kernel_e, field_kernel_qe = _ewald.atom_centered_dV(nuclei_charge,
-                                                                                     self.central_atom_id,
-                                                                                     atomic_number)
+                #directly diffrentiate charge and shell_disp. 
+                #Since the derivative is independent on charge and shell_disp, we are initializing them to zero
+                #Not: this doesn's affect the derivatives needed here
+                shell_disp = tf.zeros_like(positions)
+                charges = tf.identity(atomic_q0)
+                field_kernel_q, field_kernel_e = _ewald.atom_centered_dV_vectorized_auto(shell_disp,
+                                    charges, nuclei_charge,
+                                    self.central_atom_id,
+                                    atomic_number)
+                field_kernel_qe = tf.zeros((nat,3))
                 _b += field_kernel_q # the term coming from qi-nuclei. The electronic contribution does not contribute to change in nuclei charges
             else:
                 field_kernel_q,field_kernel_e, field_kernel_qe = tf.zeros(nat), tf.zeros((nat,3)), tf.zeros((nat,3))
 
             _b += field_kernel_q
 
-            '''
+            #'''
             Vij, Vij_qz, Vij_zq, Vij_zz, Vij_qz2, Vij_zq2 = _ewald.recip_space_term_with_shelld_quadratic_qqdd_1(nuclei_charge)
             # compute charges at d = 0
             charges, shell_disp = run_scf(Vij, Vij_qz, Vij_zq, Vij_zz, Vij_qz2, Vij_zq2,
                     E_d1, E_d2, E_qd, E2,
                     atomic_q0, total_charge,
                     field_kernel_qe, field_kernel_e, _b,
-                    tol=1e-3, max_iter=4)
+                    tol=1e-3, max_iter=50)
             '''
             Vij, Vij_qz, Vij_zq, Vij_zz, Vij_qz2, Vij_zq2 = _ewald.recip_space_term_with_shelld_quadratic_qqdd_1(nuclei_charge)
             # compute charges at d = 0
@@ -833,7 +884,8 @@ class Compute:
             #_b += 0.5 * tf.reduce_sum((tf.transpose(Vij_zq2,perm=(1,0,2,3)) + Vij_qz2) * shell_d2[None,...], axis=(1,2,3)) #N
             #_b += 0.5 * tf.reduce_sum(E_qd * shell_disp, axis=1) #sum over cartessian directions
             #charges = _compute_charges(Vij, _b, E2, atomic_q0, total_charge)
-            #'''
+            '''
+            shell_d2 = shell_disp[:,:,None] * shell_disp[:,None,:]
 
             dq = charges - atomic_q0
 
@@ -845,28 +897,41 @@ class Compute:
             ecoul += 0.5 * tf.reduce_sum(Vij_zq2 * charges[None,:,None,None] * shell_d2[:,None,:,:])
             ecoul += tf.reduce_sum((E_d1  + 0.5 * E_qd * dq[:,None] + 0.5 *  E_d2 * shell_disp) * shell_disp)
             if self.apply_field:
-                Piq_a, Pie_a = _ewald.atom_centered_polarization(shell_disp,
+                Piq_a, Pie_a = _ewald.atom_centered_polarization_vectorized(shell_disp, positions,
                                                              nuclei_charge,
                                                              charges,
                                                              self.central_atom_id,
                                                              atomic_number)
+                Pi_a = Piq_a + Pie_a
             else:
                 Piq_a, Pie_a = tf.zeros(3), tf.zeros(3)
-            Pi_a = Piq_a + Pie_a
-            efield_energy = -tf.reduce_sum(Pi_a * self.efield)
+                Pi_a = Piq_a + Pie_a
+
+            efield_energy = -tf.reduce_sum(Pi_a * _efield)
             ecoul += efield_energy
             total_energy += ecoul
             Vj = _ewald.recip_space_term_with_shelld_linear_Vj(shell_disp,
                                                nuclei_charge,
                                                charges)
+            cell_volume = tf.abs(tf.linalg.det(cell))
+            Pi_a /= cell_volume
 
         #differentiating a scalar w.r.t tensors
+        if self.apply_field:
+            #Z*_{iab} = V * dP_a/dr_{ib}
+            Zstar = cell_volume * tf.transpose(tape0.jacobian(Pi_a, positions, experimental_use_pfor=False), perm=(1,0,2))
+            #epsilon*_{ab} = dP_a/defield_b
+            epsilon_infty = tape0.jacobian(Pi_a, _efield, experimental_use_pfor=False)
+            epsilon_infty *= UNIT_FACTOR #
+            epsilon_infty += tf.eye(3)
+        else:
+            epsilon_infty = tf.eye(3)
+            Zstar = tf.zeros((nat,3,3))
         forces = tape0.gradient(total_energy, positions)
         #needs tape to be persistent
         dE_dh = tape0.gradient(total_energy, cell)
-        V = tf.abs(tf.tensordot(cell[0], tf.linalg.cross(cell[1], cell[2]),axes=1))
         # Stress: stress_{ij} = (1/V) \sum_k dE/dh_{ik} * h_{jk}
-        stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / V
+        stress = tf.linalg.matmul(dE_dh, cell, transpose_b=True) / cell_volume
         pad_rows = tf.zeros([nmax_diff, tf.shape(forces)[1]], dtype=forces.dtype)
         forces = tf.concat([-forces, pad_rows], axis=0)
         shell_disp = tf.concat([shell_disp, pad_rows], axis=0)
@@ -874,6 +939,9 @@ class Compute:
         E_d1 = tf.concat([E_d1, pad_rows], axis=0)
         E_d2 = tf.concat([E_d2, pad_rows], axis=0)
         E_qd = tf.concat([E_qd, pad_rows], axis=0)
+        
+        pad_rows = tf.zeros([nmax_diff, 3, 3], dtype=tf.float32)
+        Zstar = tf.concat([Zstar, pad_rows], axis=0)
 
         pad_rows = tf.zeros([nmax_diff], dtype=tf.float32)
         charges = tf.concat([charges, pad_rows], axis=0)
@@ -881,7 +949,9 @@ class Compute:
         E2 = tf.concat([E2, pad_rows], axis=0)
         Vj = tf.concat([Vj, pad_rows], axis=0)
 
-        return [total_energy, forces, C6, charges, stress, shell_disp, Pi_a, E1, E2, E_d2,E_d1,E_qd, Vj]
+        return [total_energy, forces, C6, charges, stress, 
+                shell_disp, Pi_a, E1, E2, E_d2,E_d1,E_qd, Vj, 
+                Zstar, epsilon_infty]
 
 
     ###kept for hitorical reasons
@@ -1125,8 +1195,8 @@ class Compute:
                     if apply_field:
                         field_kernel, field_kernel_e = _ewald.potential_linearized_periodic_ref0(tf.zeros_like(nuclei_charge))
                         _b += field_kernel
-                    charges = self.compute_charges(Vij, _b, E2, atomic_q0, total_charge)
-                    ecoul = self.compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
+                    charges = _compute_charges(Vij, _b, E2, atomic_q0, total_charge)
+                    ecoul = _compute_coulumb_energy(charges, atomic_q0, E1, E2, Vij)
                 else:
                     if apply_field:
                         if self._sawtooth_PE:

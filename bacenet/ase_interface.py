@@ -189,4 +189,6 @@ class bacenet_Calculator(Calculator):
             "E_qd": outs['E_qd'][0],
             "E_d2": outs['E_d2'][0],
             "Vj": outs['Vj'][0],
+            "Zstar": outs['Zstar'][0],
+            "epsilon": outs['epsilon'][0],
             }
