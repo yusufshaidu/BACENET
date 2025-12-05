@@ -43,18 +43,18 @@ init_forces = atoms.get_forces()
 cell0 = atoms.cell
 a0 = np.linalg.norm(cell0, axis=-1)[0] 
 
-dyn = BFGS(ufc, maxstep=0.02)
+dyn = BFGS(ucf, maxstep=0.02)
 dyn.run(fmax=0.01)
 
-print(np.linalg.norm(init_f0-myconf.get_forces()))
+print(np.linalg.norm(init_forces-atoms.get_forces()))
 print('cell after and before minimization', atoms.cell, cell0)
 
 #display the results
-print(myconf.calc.results)
+print(atoms.calc.results)
 
 #charges = myconf.get_charges()
 
-write('check.vasp', myconf)
+write('check.vasp', atoms)
 
 efield = np.ones(3) * eps
 

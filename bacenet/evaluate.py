@@ -7,8 +7,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
 
 import tensorflow as tf
 from data.data_processing import data_preparation
-from models.model import BACENET
-from models.model_lchannels import BACENET as BACENET_lc
+from models.model_run import BACENET
 
 import sys, yaml,argparse, json
 import numpy as np
@@ -89,10 +88,7 @@ def create_model(configs):
     test_fraction = configs['test_fraction']
     if test_fraction < 1.0:
         print(f'you are evaluating only on a {test_fraction*100} % of you test dataset')
-    if configs['model_version'] == 'linear':
-        model_call = BACENET
-    else:
-        model_call = BACENET_lc
+    model_call = BACENET
     try:
         error_file = configs['error_file']
     except:
@@ -128,12 +124,9 @@ def create_model(configs):
         print('I am evaluating all saved check points: may take some time except some of them are already done!!!')
         print('############')
         ckpts_idx = [int(ck.split('-')[-1].split('.')[0]) for ck in ckpts]
-        #ckpts_idx = [int(ck.split('-')[-1]) for ck in ckpts]
         ckpts_idx.sort()
 
-        #idx=f"{epoch:04d}"
         ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.ckpt" for idx in ckpts_idx]
-        #ck = [model_outdir+"/models/"+f"ckpts-{idx:04d}.weights.h5" for idx in ckpts_idx]
 
 
     try:
@@ -151,25 +144,11 @@ def create_model(configs):
             if int(i) % interval != 0 or pfile.is_file():
                 continue
 
-        #model = tf.keras.models.load_model(_ck)
         model.load_weights(_ck).expect_partial()
-        #model.load_weights(_ck)
-        #print(_ck)
-        #print(_ck)
-        #model.load_weights(_ck, skip_mismatch=True)
-
         print(f'evaluating {_epoch} epoch')
 
- #       weights = model.get_weights()
-
-#        print(weights[0])
-
-        #if configs['coulumb']:
-        e_ref, e_pred, force_ref, force_pred,nat,_charges,stress, _shell_disp, P_ia, E1,E2,E_di = model.predict(test_data)
-        #else:
-        #    e_ref, e_pred, metrics, force_ref, force_pred,nat,stress = model.predict(test_data)
-        
-        
+        e_ref, e_pred, force_ref, force_pred,nat,_charges,stress, outs = model.predict(test_data)
+        shell_disp = outs['shell_disp']
 
         _f_ref = []
         _f_pred = []
@@ -186,13 +165,7 @@ def create_model(configs):
                 charges = np.append(charges, _charges[i][:j])
                 shell_disp = np.append(_shell_disp, _charges[i][:j])
             idx = np.append(idx, np.arange(1,j+1).tolist())
-            #diff = force_ref[i][:j] - force_pred[i][:j]
-            #fmaes.append(tf.reduce_mean(tf.abs(diff)))
-            #frmses.append(tf.sqrt(tf.reduce_mean(tf.square(diff))))
-
-        #force_ref = [tf.reshape(force_ref[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
         force_ref = tf.reshape(_f_ref, [-1,3])
-        #force_pred = [tf.reshape(_f_pred[:,:tf.cast(i, tf.int32), :], [-1,3]) for i in nat]
         force_pred = tf.reshape(_f_pred, [-1,3])
         diff_f = force_ref - force_pred
 
@@ -206,18 +179,27 @@ def create_model(configs):
         fmae = tf.reduce_mean(tf.abs(diff_f)).numpy()
         frmse = tf.sqrt(tf.reduce_mean(diff_f**2)).numpy()
         errors.append([_epoch,rmse*1000,mae*1000,frmse*1000,fmae*1000])
-        #print(errors)
 
         print(f'Ermse = {rmse*1000:.3f} and Emae = {mae*1000:.3f} | Frmse = {frmse*1000:.3f} and Fmae = {fmae*1000:.3f}')
         #print(f'Forces: the test rmse = {rmse} and mae = {mae}')
-        np.savetxt(os.path.join(configs['test_outdir'], f'energy_last_test_{_epoch}.dat'), np.stack([e_ref, e_pred, nat]).T)
-        np.savetxt(os.path.join(configs['test_outdir'], f'forces_last_test_{_epoch}.dat'), np.stack([idx,force_ref[:,0], force_ref[:,1], 
-                                                                                                force_ref[:,2],force_pred[:,0], force_pred[:,1], force_pred[:,2]]).T,
+        np.savetxt(os.path.join(configs['test_outdir'], 
+                                f'energy_last_test_{_epoch}.dat'), 
+                   np.stack([e_ref, e_pred, nat]).T)
+        np.savetxt(os.path.join(configs['test_outdir'], 
+                                f'forces_last_test_{_epoch}.dat'), 
+                   np.stack([idx,force_ref[:,0], force_ref[:,1], 
+                            force_ref[:,2],force_pred[:,0], 
+                             force_pred[:,1], force_pred[:,2]]).T,
                    fmt="%d %10.6f %10.6f %10.6f %10.6f %10.6f %10.6f")
 
         if configs['coulumb']:
-            np.savetxt(os.path.join(configs['test_outdir'], f'charges_{_epoch}.dat'), np.stack([idx, charges]).T)
-            np.savetxt(os.path.join(configs['test_outdir'], f'shell_disp_{_epoch}.dat'), np.stack([idx, shell_disp[:,0],shell_disp[:,1],shell_disp[:,2]]).T, fmt="%d %10.6f %10.6f %10.6f")
+            np.savetxt(os.path.join(configs['test_outdir'], 
+                                    f'charges_{_epoch}.dat'), 
+                       np.stack([idx, charges]).T)
+            np.savetxt(os.path.join(configs['test_outdir'], 
+                                    f'shell_disp_{_epoch}.dat'), 
+                       np.stack([idx, shell_disp[:,0],shell_disp[:,1],
+                                 shell_disp[:,2]]).T, fmt="%d %10.6f %10.6f %10.6f")
     #print(errors)
 
     #weights = model.get_weights()

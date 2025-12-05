@@ -11,9 +11,7 @@ from ase.calculators.calculator import FileIOCalculator,Calculator, all_changes
 from ase.io import write
 from data.unpack_tfr_data import unpack_data
 import tensorflow as tf
-from models.model import BACENET
-from models.model_lchannels import BACENET as BACENET_lc
-from models.model_run import BACENET as BACENET_run
+from models.model_run import BACENET
 
 from data.data_processing import data_preparation, atomic_number, _process_file
 
@@ -86,9 +84,6 @@ class bacenet_Calculator(Calculator):
             rc = configs['rc_rad']
 
         _model_call = BACENET
-        if configs['model_version'] != 'linear':
-            #_model_call = BACENET_lc
-            _model_call = BACENET_run
 
         atomic_energy = configs['atomic_energy']
         if len(atomic_energy)==0:
