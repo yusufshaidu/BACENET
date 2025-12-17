@@ -121,75 +121,9 @@ def _compute_charges_disp(Vij, Vij_qz, Vij_zq, Vij_zz,
     charges_disp = tf.squeeze(tf.linalg.solve(Mat, b[:,None]))
     #charges_disp = ConjugateGradientSolver(A_matvec, M_inv, tol=1e-3, maxiter=50).solve(b)
 
-    '''
-    lin_op_A = tf.linalg.LinearOperatorFullMatrix(
-        Aij,
-        is_self_adjoint=True,
-        is_positive_definite=True,  # Optional: set to True if you know it is
-        is_non_singular=True        # Optional: set to True if you know it is
-    )
-    outs = tf.linalg.experimental.conjugate_gradient(
-        lin_op_A,
-        E1,
-        preconditioner=None,
-        x=atomic_q0,
-        tol=1e-05,
-        max_iter=500,
-        name='conjugate_gradient'
-        )
-    #outs[0]= max_iter, outs[2]=residual,outs[3]=basis vectors, outs[4]=preconditioner 
-    charges = outs[1]
-    '''
     charges = charges_disp[:N]
     shell_disp = tf.reshape(charges_disp[N+1:], [N,3*n])
     return charges, shell_disp
-
-@tf.function(jit_compile=False,
-            input_signature=[
-            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-            ]
-             )
-def _compute_shell_disp_qqdd2(Vij, Vij_qz, Vij_zq, Vij_zz, 
-                             Vij_qz2, Vij_zq2, Vij_qq2, Vij_qq3,
-                       E_d2, atomic_q0,charges, field_kernel_e, field_kernel_qe):
-    '''comput charges through the solution of linear system'''
-    dq = charges - atomic_q0
-    nat = tf.shape(dq)[0]
-    
-    charge_ij = charges[:,None] * charges[None,:]
-    A_ia = 0.5 * tf.reduce_sum((tf.transpose(Vij_qz,perm=(1,0,2)) + Vij_zq) * 
-                               charges[None,:,None], axis=1) #N,3
-    A_ia += 0.5 * tf.reduce_sum((tf.transpose(Vij_qq2,perm=(1,0,2)) - Vij_qq2) * 
-                                charge_ij[:,:,None], axis=1) #N,3
-
-    A_iab = tf.reduce_sum((tf.transpose(Vij_qz2,perm=(1,0,2,3)) + Vij_zq2) * 
-                          charges[None,:,None,None], axis=1) #N,3,3
-    A_iab += 0.5 * tf.reduce_sum((tf.transpose(Vij_qq3,perm=(1,0,2,3)) + Vij_qq3) * 
-                                 charge_ij[:,:,None,None], axis=1) #N,3,3
-    A_ijab = Vij_zz + A_iab * tf.eye(nat)[:,:,None,None]
-    A_ijab += E_d2[:,None,:,None] * tf.eye(nat)[:,:,None,None] * tf.eye(3)[None,None,:,:]
-    #A_ijab -= 2.0 * 0.5 * (tf.transpose(Vij_qz2,perm=(1,0,3,2)) + Vij_zq2) * charges[None,:,None,None] #N,N,3,3
-    A_ijab -= (tf.transpose(Vij_qz2,perm=(1,0,3,2)) + Vij_zq2) * charges[None,:,None,None] #N,N,3,3
-    A_ijab -= (tf.transpose(Vij_zq2,perm=(1,0,3,2)) + Vij_qz2) * charges[:,None,None,None] #N,N,3,3
-    A_ijab -= 2. * Vij_qq3 * charge_ij[:,:,None,None]
-
-    A_iajb = tf.reshape(tf.transpose(A_ijab, [0,2,1,3]), [nat*3, nat*3])
-    A_ia += field_kernel_e + charges[:,None] * field_kernel_qe
-    A_ia = tf.reshape(A_ia, [-1])
-    shell_disp = tf.reshape(tf.linalg.solve(A_iajb, -A_ia[:,None]), [nat,3])
-    return shell_disp
 
 @tf.function(jit_compile=False,
             input_signature=[
@@ -247,25 +181,6 @@ def _compute_charges(Vij, E1, E2, total_charge):
     #L = tf.linalg.cholesky(Aij)
     #charges = tf.linalg.cholesky_solve(L, E1_padded[:,None])
     charges = tf.linalg.solve(Aij, E1_padded[:,None])
-    '''
-    lin_op_A = tf.linalg.LinearOperatorFullMatrix(
-        Aij,
-        is_self_adjoint=True,
-        is_positive_definite=True,  # Optional: set to True if you know it is
-        is_non_singular=True        # Optional: set to True if you know it is
-    )
-    outs = tf.linalg.experimental.conjugate_gradient(
-        lin_op_A,
-        E1,
-        preconditioner=None,
-        x=atomic_q0,
-        tol=1e-05,
-        max_iter=500,
-        name='conjugate_gradient'
-        )
-    #outs[0]= max_iter, outs[2]=residual,outs[3]=basis vectors, outs[4]=preconditioner 
-    charges = outs[1]
-    '''
     return tf.reshape(charges, [-1])[:-1]
 #"""
 @tf.function(jit_compile=False,
@@ -361,45 +276,7 @@ def _compute_coulumb_energy_pqeq(charges, atomic_q0, nuclei_charge,
         )
                          )
     return tf.reduce_sum(E)
-@tf.function(jit_compile=False,
-            input_signature=[
-            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            ]
-             )
-def _compute_energy_exact(Vij_qq, Vij_qz, Vijn_qz, Vij_zq,
-                           Vijn_zq, Vij_zz, Vijn_zz1,
-                           Vijn_zz2, Vijnn_zz,
-                           E_d2, shell_displacement,
-                          q_charge, z_charge):
-    n_shells = tf.shape(E_d2)[1]
-    z_charge_n = tf.tile(z_charge[:,None], [1,n_shells]) / tf.cast(n_shells, tf.float32)
 
-    qij = q_charge[:,None] * q_charge[None,:]
-    qzij = q_charge[:,None] * z_charge[None,:]
-    zqij = q_charge[None,:] * z_charge[:,None]
-    qzijn = q_charge[:,None,None] * z_charge_n[None,:,:]
-    zqijn = q_charge[None,:,None] * z_charge_n[:,None,:]
-    zzij = z_charge[:,None] * z_charge[None,:]
-    zzijn = z_charge[:,None,None] * z_charge_n[None,:,:]
-    zzjin = z_charge[None,:,None] * z_charge_n[:,None,:]
-    zzijnn = z_charge_n[:,None,:,None] * z_charge_n[None,:,None,:]
-    E = 0.5 * tf.reduce_sum(Vij_qq * qij + Vij_qz * qzij + Vij_zq * zqij + Vij_zz * zzij)
-    E += 0.5 * tf.reduce_sum(Vijn_qz * qzijn + Vijn_zq * zqijn + Vijn_zz1 * zzijn + Vijn_zz2 * zzjin)
-    E += 0.5 * tf.reduce_sum(Vijnn_zz * zzijnn)
-    E += 0.5 * tf.reduce_sum(E_d2 * shell_displacement * shell_displacement)
-    return E
 @tf.function(jit_compile=False,
              input_signature=[
             tf.TensorSpec(shape=(None,None), dtype=tf.float32),
@@ -433,6 +310,7 @@ def run_scf(Vij, Vij_qz, Vij_zq,
     shell_disp0 = tf.zeros((nat,3))
     count0 = tf.constant(0)
     conv0 = tf.constant(False)
+    charges = _compute_charges(Vij, _b, E2, total_charge)
     def scf_cond(charges_old, shell_disp_old, count, converged):
         return tf.logical_and(
             tf.logical_not(converged),
@@ -442,7 +320,7 @@ def run_scf(Vij, Vij_qz, Vij_zq,
     def scf_body(charges_old, shell_disp_old, count, converged):
 
         # --- Start SCF iteration ---
-        bb = tf.identity(b)
+        bb = b
 
         shell_disp = _compute_shell_disp_qqdd1(
             Vij_qz, Vij_zq, Vij_qz2, Vij_zq2, Vij_zz,
@@ -482,107 +360,4 @@ def run_scf(Vij, Vij_qz, Vij_zq,
         maximum_iterations=max_iter
     )
 
-    return charges_final, shell_final
-
-
-@tf.function(jit_compile=False,
-             input_signature=[
-            tf.TensorSpec(shape=(None,None), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,None,3,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-            tf.TensorSpec(shape=(None,), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.int32),
-            ])
-def run_scf2(Vij, Vij_qz, Vij_zq, 
-            Vij_zz, Vij_qz2, Vij_zq2,
-            Vij_qq2, Vij_qq3,
-            E_d2, E2,
-            atomic_q0, total_charge,
-            field_kernel_e,field_kernel_qe, b,
-            tol=1e-6, max_iter=50):
-    """
-    Performs SCF loop for charges and shell displacements.
-    """
-
-    # Initial conditions
-    nat = tf.shape(E_d2)[0]
-    charges0 = atomic_q0
-    shell_disp0 = tf.zeros((nat,3))
-    count0 = tf.constant(0)
-    conv0 = tf.constant(False)
-    charges0 = _compute_charges(Vij, b, E2, total_charge)
-    def scf_cond(charges_old, shell_disp_old, count, converged):
-        return tf.logical_and(
-            tf.logical_not(converged),
-            count < max_iter
-        )
-
-    def scf_body(charges_old, shell_disp_old, count, converged):
-
-        # --- Start SCF iteration ---
-        bb = b
-        _Vij = Vij
-        
-        shell_disp = _compute_shell_disp_qqdd2(Vij, Vij_qz, Vij_zq, Vij_zz,
-                 Vij_qz2, Vij_zq2, Vij_qq2, Vij_qq3,
-           E_d2, atomic_q0,charges_old, field_kernel_e,field_kernel_qe)
-        #shell_disp = tf.clip_by_value(shell_disp, clip_value_min=-0.5, clip_value_max=0.5)
-
-        shell_d_ab = shell_disp[:, :, None] * shell_disp[:, None, :]
-        bb += 0.5 * tf.reduce_sum(
-            (tf.transpose(Vij_zq, perm=(1, 0, 2)) + Vij_qz) * shell_disp[None, :, :],
-            axis=(1, 2)
-        )
-        bb += 0.5 * tf.reduce_sum(
-            (tf.transpose(Vij_zq2, perm=(1, 0, 2, 3)) + Vij_qz2) * shell_d_ab[None, ...],
-            axis=(1, 2, 3)
-        )
-        shell_d_ijab = shell_disp[:,None, :, None] * shell_disp[None, :, None, :]
-        #Vij_qz3/zq = - 2 * Vij_zq/zq2
-        bb -= tf.reduce_sum(
-            (tf.transpose(Vij_zq2, perm=(1, 0, 2, 3)) + Vij_qz2) * shell_d_ijab,
-            axis=(1, 2, 3)
-        )
-        dshell_ij = shell_disp[None,:,:] - shell_disp[:,None,:]
-        _Vij += tf.reduce_sum(Vij_qq2 * dshell_ij, axis=-1)
-        _Vij += tf.reduce_sum(Vij_qq3 * ((shell_d_ab[:,None,...] + shell_d_ab[None,...]) 
-                             - 2.0 * shell_d_ijab), axis = (2,3))
-
-        charges = _compute_charges(_Vij, bb, E2, total_charge)
-        
-        #important only during the initial stage of the training
-        #charges = tf.clip_by_value(charges, -10.0, 10.0)
-        #charges -= tf.reduce_mean(charges)
-
-        res = tf.linalg.norm(charges - charges_old) + tf.linalg.norm(shell_disp - shell_disp_old)
-        charges_old = charges
-        shell_disp_old = shell_disp
-
-        converged = res < tol
-        return (
-            charges,
-            shell_disp,
-            count + 1,
-            converged
-        )
-
-    # Execute SCF
-    charges_final, shell_final, _, _ = tf.while_loop(
-        scf_cond,
-        scf_body,
-        loop_vars=[charges0, shell_disp0, count0, conv0],
-        maximum_iterations=max_iter
-    )
     return charges_final, shell_final

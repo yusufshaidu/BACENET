@@ -305,14 +305,6 @@ class BACENET(tf.keras.Model):
             return tf.map_fn(self.model.tf_predict_energy_forces_pqeq1, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
-        elif self._linearize_d == 2:
-            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq2, elements,
-                                     fn_output_signature=out_signature,
-                                     parallel_iterations=self.batch_size)
-        elif self._linearize_d == -1:
-            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq_scf, elements,
-                                     fn_output_signature=out_signature,
-                                     parallel_iterations=self.batch_size)
        
     @tf.function(jit_compile=False,
                 input_signature=[(
