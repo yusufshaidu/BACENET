@@ -21,9 +21,92 @@ def _angular_terms(rij_unit, lxlylz):
     # Compute powers: shape = [npairs, n_lxlylz, 3]
     rij_lxlylz = (tf.expand_dims(rij_unit, axis=1) + 1e-12) ** tf.expand_dims(lxlylz, axis=0)
     # Multiply x^lx * y^ly * z^lz
-    #g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1)              # [npairs, n_lxlylz]
-    g_ij_lxlylz = rij_lxlylz[:,:,0] * rij_lxlylz[:,:,1] * rij_lxlylz[:,:,2]  
+    g_ij_lxlylz = tf.reduce_prod(rij_lxlylz, axis=-1)              # [npairs, n_lxlylz]
+    #g_ij_lxlylz = rij_lxlylz[:,:,0] * rij_lxlylz[:,:,1] * rij_lxlylz[:,:,2]  
     return g_ij_lxlylz
+
+@tf.function(jit_compile=False,
+            input_signature=[
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,), dtype=tf.int32),
+            tf.TensorSpec(shape=(), dtype=tf.int32),
+            ]
+             )
+def to_three_body_order_terms_chunk(
+    rij_unit,
+    radial_ij,
+    first_atom_idx,
+    nat,
+):
+    block_size=4
+    zeta = 3
+    lxlylz, lxlylz_sum, fact_norm = cosine_terms(zeta)
+
+
+    r_start = 1
+    r_end = r_start + 1 + zeta
+
+    nfeat = tf.shape(radial_ij)[1]
+    #nfeat = tf.cast(nfeat, tf.int32)
+    nzeta = zeta + 1
+
+    ta = tf.TensorArray(
+        dtype=tf.float32,
+        size=0,
+        dynamic_size=True,
+        element_shape=(None, nzeta, None),
+    )
+
+    g_ang = _angular_terms(rij_unit, lxlylz)  # computed ONCE
+
+    def cond(f0, *_):
+        return f0 < nfeat
+
+    def body(f0, ta):
+        f1 = tf.minimum(f0 + block_size, nfeat)
+        #f1 = tf.cast(f1, tf.int32)
+
+        # radial gather: [npairs, f_block, n_l]
+        rad = tf.gather(
+            radial_ij[:, f0:f1, r_start:r_end],
+            tf.cast(lxlylz_sum,tf.int32),
+            axis=2
+        )
+
+        g_pair = rad * g_ang[:, None, :]
+
+        g_atom = tf.math.unsorted_segment_sum(
+            g_pair,
+            first_atom_idx,
+            num_segments=nat
+        )
+
+        tmp = tf.transpose(g_atom * g_atom, [2, 0, 1]) * fact_norm[:, None, None]
+
+        out = tf.math.unsorted_segment_sum(
+            tmp,
+            lxlylz_sum,
+            num_segments=nzeta
+        )
+
+        out = tf.transpose(out, [1, 0, 2])  # [nat, nzeta, f_block]
+
+        ta = ta.write(ta.size(), out)
+        #ta = tf.concat([ta, out], axis=2)
+        return f1, ta
+
+    _, ta = tf.while_loop(
+        cond,
+        body,
+        loop_vars=(0, ta),
+        parallel_iterations=1,
+        maximum_iterations=None,
+    )
+
+    gi3 = tf.transpose(tf.concat(ta.stack(), axis=2),
+                       [1,2,0,3])# [nat, nzeta, nblock, nchuck]
+    return tf.reshape(gi3, [nat, -1])
 
 @tf.function(jit_compile=False,
             input_signature=[
@@ -40,11 +123,11 @@ def to_three_body_order_terms(rij_unit, radial_ij, first_atom_idx, nat):
     '''
     zeta = 3
     lxlylz, lxlylz_sum, fact_norm = cosine_terms(zeta)    
-    g_ij_lxlylz = _angular_terms(rij_unit,lxlylz)
+    g_ij_lxlylz = _angular_terms(rij_unit,lxlylz) #npairs,n_lxlylz
     shapes = tf.shape(g_ij_lxlylz)
     npairs = shapes[0]
     n_lxlylz = shapes[1]
-    # shape: [npair, n_lxlylz]
+    
     r_start = 1
     r_end = r_start + 1 + zeta
     radial_ij_expanded = tf.gather(radial_ij[:,:,r_start:r_end], lxlylz_sum, axis=2)

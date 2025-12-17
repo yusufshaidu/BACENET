@@ -180,10 +180,7 @@ class bacenet_Calculator(Calculator):
             "Pi_a": outs['Pi_a'][0],
             "E1": outs['E1'][0],
             "E2": outs['E2'][0],
-            "E_d1": outs['E_d1'][0],
-            "E_qd": outs['E_qd'][0],
             "E_d2": outs['E_d2'][0],
-            "Vj": outs['Vj'][0],
             "Zstar": outs['Zstar'][0],
             "epsilon": outs['epsilon'][0],
             }

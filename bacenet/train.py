@@ -97,7 +97,7 @@ def default_config():
         'gaussian_width_scale': 1.0,
         'max_width': 3.0,
         'linearize_d': 0,
-        'nshells': 2,
+        'nshells': 0,
         'anisotropy': False,
         'initial_shell_spring_constant': False,
         'sawtooth_PE': False,
@@ -106,7 +106,8 @@ def default_config():
         'd0': 0.001,
         'P_in_cell': False,
         'learn_species_nelectrons': False,
-        'learnable_gaussian_width': False
+        'learnable_gaussian_width': True,
+        'n_shells': 1
             }
 
 def estimate_species_chi0_J0(species):
@@ -138,8 +139,6 @@ def get_compiled_model(configs,optimizer,example_input):
     return _model
 
 
-#This is an example from tensorflow not currently used
-#TODO
 def make_or_restore_model(model_outdir,configs,optimizer,
                           example_input):
     # Either restore the latest model, or create a fresh one

@@ -76,12 +76,24 @@ class BACENET(tf.keras.Model):
         # body-order zeta list
         self.zeta = cfg['zeta']
         self.nzeta = sum(self.zeta)
+        self._n_shells = cfg['n_shells']
 
         self.body_order = cfg['body_order']
         self.batch_size = cfg['batch_size']
 
         # Network architecture settings
         self.layer_sizes = cfg['layer_sizes']
+        if cfg['coulumb']:
+            if cfg['pqeq']:
+                if self.layer_sizes[-1] != 3 + self._n_shells:
+                    raise ValueError(f'last layer for pQEQ must have {3 + self._n_shells} output nodes')
+            else:
+                if self.layer_sizes[-1] != 3:
+                    raise ValueError(f'last layer for QEQ must have {3} output nodes')
+        else:
+            if self.layer_sizes[-1] != 1:
+                raise ValueError(f'last layer for model without long range must have {1} output nodes')
+
         self.species_layer_sizes = cfg['species_layer_sizes']
         self.activations = cfg['activations']
 
@@ -138,7 +150,7 @@ class BACENET(tf.keras.Model):
         # electrons per atom
         if cfg['species_nelectrons'] is None:
             if cfg['nshells'] == 0:
-                nelec = [2.0] * len(self.species)
+                nelec = [1.0] * len(self.species)
             elif cfg['nshells'] == -1:
                 nelec = [help_fn.unfilled_orbitals(s) for s in self.species]
             else:
@@ -147,6 +159,8 @@ class BACENET(tf.keras.Model):
         else:
             nelec = cfg['species_nelectrons']
 
+        #if self._n_shells > 1:
+        #    nelec = [2.0 * self._n_shells] * len(self.species) # each shell take max of 2 elctrons
         self.species_nelectrons = tf.cast(nelec, tf.float32)
 
         # electronegativity parameters
@@ -226,7 +240,8 @@ class BACENET(tf.keras.Model):
             self.gaussian_width_net = Networks(
                 self.nelement,
                 [64, 2],
-                ['sigmoid', 'sigmoid'],
+                #['sigmoid', 'sigmoid'],
+                ['tanh', 'tanh'],
                 prefix='species_gaussian_width'
             )
         '''
@@ -273,20 +288,29 @@ class BACENET(tf.keras.Model):
             tf.float32,  # P
             tf.float32,  # E1
             tf.float32,  # E2
-            tf.float32,  # E_d1
             tf.float32,  # E_d2
-            tf.float32,  # E_dq
-            tf.float32,  # Vj
             tf.float32,  # Zstar
             tf.float32,  # epsilon
         ]
 
         if self._linearize_d == 0:
+            if self._n_shells > 1:
+                return tf.map_fn(self.model.tf_predict_energy_forces_pqeq0_n, elements,
+                                     fn_output_signature=out_signature,
+                                     parallel_iterations=self.batch_size)
             return tf.map_fn(self.model.tf_predict_energy_forces_pqeq0, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
-
-        return tf.map_fn(self.model.tf_predict_energy_forces_pqeq1, elements,
+        elif self._linearize_d == 1:
+            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq1, elements,
+                                     fn_output_signature=out_signature,
+                                     parallel_iterations=self.batch_size)
+        elif self._linearize_d == 2:
+            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq2, elements,
+                                     fn_output_signature=out_signature,
+                                     parallel_iterations=self.batch_size)
+        elif self._linearize_d == -1:
+            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq_scf, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
        
@@ -320,7 +344,6 @@ class BACENET(tf.keras.Model):
             tf.float32,  # P
             tf.float32,  # E1
             tf.float32,  # E2
-            tf.float32,  # Vj
             tf.float32,  # Zstar
             tf.float32,  # epsilon
 
@@ -403,8 +426,9 @@ class BACENET(tf.keras.Model):
 
             if self.learnable_gaussian_width:
                 #minimum = 0.5 and maximum = 2.1, self._species_gaussian_width in [-1,1]
-                #self._species_gaussian_width = 1.1 + self.gaussian_width_net(_species_one_hot_encoder) # nspec, 2
-                self._species_gaussian_width = 1.0  + 1.5 * self.gaussian_width_net(_species_one_hot_encoder) # [1.0,2.5]
+                self._species_gaussian_width = 1.5 + self.gaussian_width_net(_species_one_hot_encoder)
+                #self._species_gaussian_width = tf.clip_by_value(self._species_gaussian_width,
+                #                     clip_value_min=0.25, clip_value_max=2.5)
                     # species_gaussian_width is between 0,1. spec_gwidth is between 0.5 and 2.5
                 #else:
                 #    self._species_gaussian_width += 0.5
@@ -480,22 +504,17 @@ class BACENET(tf.keras.Model):
         # energies, forces, atomic_features, C6, charges, stress
         if self.coulumb:
             if self.pqeq:
-                if self._linearize_d == 0 or self._linearize_d == 1:
-                    energies, forces, C6, charges, stress, \
-                            shell_disp, Pi_a, E1, E2, E_d2, E_d1, E_qd, Vj, \
+                energies, forces, C6, charges, stress, \
+                            shell_disp, Pi_a, E1, E2, E_d2, \
                             Zstar, epsilon_infty = self.map_fn_parallel_pqeq(elements)
             else:
-                energies, forces, C6, charges, stress, Pi_a, E1, E2, Vj, \
+                energies, forces, C6, charges, stress, Pi_a, E1, E2, \
                         Zstar, epsilon_infty = self.map_fn_parallel(elements)
-                E_d1 = tf.zeros((batch_size, nmax,3))
                 E_d2 = tf.zeros((batch_size, nmax,3))
-                E_qd = tf.zeros((batch_size, nmax,3))
                 shell_disp = tf.zeros((batch_size, nmax,3))
         else:
-            energies, forces, C6, charges, stress, Pi_a, E1, E2, Vj = self.map_fn_parallel(elements)
-            E_d1 = tf.zeros((batch_size, nmax,3))
+            energies, forces, C6, charges, stress, Pi_a, E1, E2 = self.map_fn_parallel(elements)
             E_d2 = tf.zeros((batch_size, nmax,3))
-            E_qd = tf.zeros((batch_size, nmax,3))
             shell_disp = tf.zeros((batch_size, nmax,3))
             Zstar = tf.zeros((nmax,3,3))
             epsilon_infty = tf.eye(3)
@@ -509,10 +528,7 @@ class BACENET(tf.keras.Model):
                 'Pi_a':Pi_a,
                 'E1':E1,
                 'E2':E2,
-                'E_d1':E_d1,
-                'E_qd':E_qd,
                 'E_d2':E_d2,
-                'Vj':Vj,
                 'Zstar':Zstar,
                 'epsilon':epsilon_infty,
                 }
