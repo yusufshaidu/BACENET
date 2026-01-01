@@ -22,12 +22,18 @@ def example(data,nmax, nneigh_max):
     # Create a description of the features.
     nat = int(data[4])
     ndiff = (nmax - nat)
-    positions = np.pad(data[0].flatten(), pad_width=(0,ndiff*3)).tolist()
-    forces = np.pad(data[11].flatten(), pad_width=(0,ndiff*3)).tolist()
-    atomic_number = np.pad(data[1].flatten(), pad_width=(0,ndiff)).tolist()
-    atomic_charges = np.pad(data[13].flatten(), pad_width=(0,ndiff)).tolist()
-    C6 = np.pad(data[2].flatten(), pad_width=(0,ndiff)).tolist()
-    gaussian_width = np.pad(data[9].flatten(), pad_width=(0,ndiff)).tolist()
+    positions = np.pad(data[0].flatten(), 
+                       pad_width=(0,ndiff*3)).tolist()
+    forces = np.pad(data[11].flatten(), 
+                    pad_width=(0,ndiff*3)).tolist()
+    atomic_number = np.pad(data[1].flatten(), 
+                           pad_width=(0,ndiff)).tolist()
+    atomic_charges = np.pad(data[13].flatten(), 
+                            pad_width=(0,ndiff)).tolist()
+    C6 = np.pad(data[2].flatten(), 
+                pad_width=(0,ndiff)).tolist()
+    gaussian_width = np.pad(data[9].flatten(), 
+                            pad_width=(0,ndiff)).tolist()
     nneigh = int(data[8])
     ndiff = nneigh_max - nneigh
     i_idx = np.pad(data[5].flatten(), pad_width=(0,ndiff)).tolist()
@@ -46,7 +52,9 @@ def example(data,nmax, nneigh_max):
                 'energy':_float_feature([data[10]]),
                 'forces':_float_feature(forces),
                 'total_charge':_float_feature([data[12]]),
-                'charges':_float_feature(atomic_charges)}
+                'charges':_float_feature(atomic_charges),
+                'stress':_float_feature(data[14].flatten().tolist())
+                }
     return tf.train.Example(features=tf.train.Features(feature=features))
 
 def write_tfr(prefix, data, nmax, nneigh_max, nelement=None, tfr_dir='tfrs',):
@@ -94,7 +102,9 @@ def _parse_function(example_proto):
                 'energy':tf.io.FixedLenFeature([], tf.float32),
                 'forces':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
                 'total_charge':tf.io.FixedLenFeature([], tf.float32),
-                'charges':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True)}
+                'charges':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
+                'stress':tf.io.FixedLenSequenceFeature([],tf.float32, allow_missing=True),
+                           }
     return tf.io.parse_single_example(example_proto, feature_description)
 
 def load_tfrs(filenames,batch_size):

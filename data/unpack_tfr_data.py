@@ -17,7 +17,8 @@ def unpack_data(data):
         data['energy'],
         data['forces'],
         data['total_charge'],
-        data['charges']
+        data['charges'],
+        data['stress']
     )
 def np_unpack_data(data):
     #[positions,species_encoder,C6,cells,natoms,i,j,S,neigh, energy,forces]
@@ -35,5 +36,6 @@ def np_unpack_data(data):
         data['energy'],
         data['forces'],
         data['total_charge'],
-        data['charges']
+        data['charges'],
+        data['stress']
     )

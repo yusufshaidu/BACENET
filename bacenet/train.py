@@ -104,10 +104,11 @@ def default_config():
         'central_atom_id': 1, #This should be set
         'linear_d_terms': False,
         'd0': 0.001,
-        'P_in_cell': False,
         'learn_species_nelectrons': False,
         'learnable_gaussian_width': True,
-        'n_shells': 1
+        'n_shells': 1,
+        'exact_solver': True,
+        'stress_cost':0.0
             }
 
 def estimate_species_chi0_J0(species):
@@ -134,7 +135,7 @@ def get_compiled_model(configs,optimizer,example_input):
                   #loss=help_fn.mae_loss,
                   #loss_f = help_fn.force_loss_mae)
                   loss_f = help_fn.force_loss,
-                  loss_q = help_fn.charge_loss)
+                  loss_s = help_fn.stress_loss)
     print(_model.summary())
     return _model
 
@@ -167,7 +168,7 @@ def make_or_restore_model(model_outdir,configs,optimizer,
         _model.compile(optimizer=optimizer,
                loss=help_fn.quad_loss,
                loss_f=help_fn.force_loss,
-               loss_q = help_fn.charge_loss)
+               loss_s=help_fn.stress_loss)
 
         print(_model.summary())
         return _model, last_ckpt_idx
@@ -235,8 +236,8 @@ class CustomCallback(tf.keras.callbacks.Callback):
 
 
 def create_model(configs):
-    '''
     # Set memory growth before any GPU work is done
+    '''
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
@@ -248,7 +249,6 @@ def create_model(configs):
         tf.config.set_visible_devices([], 'GPU')
         tf.config.threading.set_inter_op_parallelism_threads(16)
         tf.config.threading.set_intra_op_parallelism_threads(16)
-
     '''
     #Read in model parameters
     #I am parsing yaml files with all the parameters

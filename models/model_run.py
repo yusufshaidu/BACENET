@@ -8,17 +8,7 @@ import itertools, os
 #mixed_precision.set_global_policy('mixed_float16')
 from networks.networks import Networks
 import functions.helping_functions as help_fn
-from functions.tf_linop import AOperator
-from models.descriptors import *
-from models.coulomb_functions import (_compute_Aij, _compute_Fia, _compute_Fiajb, 
-                                      _compute_charges_disp, _compute_shell_disp_qqdd2, 
-                                      _compute_shell_disp_qqdd1,_compute_charges,
-                                      _compute_coulumb_energy,
-                                      _compute_coulumb_energy_pqeq_qd,
-                                      _compute_coulumb_energy_pqeq, run_scf)
-
 from data.unpack_tfr_data import unpack_data
-from models.ewald import ewald
 from models.compute import Compute
 
 import warnings
@@ -100,6 +90,7 @@ class BACENET(tf.keras.Model):
         # Optional loss settings
         self.fcost = float(cfg['fcost'])
         self.ecost = float(cfg['ecost'])
+        self.stress_cost = float(cfg['stress_cost'])
         self.fcost_swa = float(cfg['fcost_swa'])
         self.ecost_swa = float(cfg['ecost_swa'])
         self._start_swa = cfg['start_swa_global_step']
@@ -126,13 +117,13 @@ class BACENET(tf.keras.Model):
         self.coulumb = cfg['coulumb']
         self.efield = cfg['efield']
 
-        self._P_in_cell = cfg['P_in_cell']
-        self._sawtooth_PE = cfg['sawtooth_PE']
+        #self._P_in_cell = cfg['P_in_cell']
+        #self._sawtooth_PE = cfg['sawtooth_PE']
 
         self._linearize_d = cfg['linearize_d']
-        self._anisotropy = cfg['anisotropy']
+        #self._anisotropy = cfg['anisotropy']
         self.linear_d_terms = cfg['linear_d_terms']
-        self._d0 = cfg['d0']
+        #self._d0 = cfg['d0']
         self.accuracy = cfg['accuracy']
         self.pbc = cfg['pbc']
 
@@ -526,12 +517,12 @@ class BACENET(tf.keras.Model):
                 }
         return outs
 
-    def compile(self, optimizer, loss, loss_f, loss_q):
+    def compile(self, optimizer, loss, loss_f, loss_s):
         super().compile()
         self.optimizer = optimizer
         self.loss_e = loss
         self.loss_f = loss_f
-        self.loss_q = loss_q
+        self.loss_s = loss_s
 
     def train_step(self, data):
         # Unpack the data. Its structure depends on your model and
@@ -561,6 +552,7 @@ class BACENET(tf.keras.Model):
 
             target = tf.reshape(data['energy'], [-1])
             target_f = data['forces'][:,:nmax*3]
+            target_stress = data['stress']
 
             ediff = (e_pred - target)
             forces = tf.reshape(forces, [-1, 3*nmax])
@@ -581,6 +573,16 @@ class BACENET(tf.keras.Model):
 
             _loss = _ecost * emse_loss
             _loss += _fcost * fmse_loss
+            if self.stress_cost > 0.0:
+                stress_loss = self.loss_s((tf.reshape(target_stress,[-1]), 
+                                     tf.reshape(stress, [-1])))
+                stress_loss *= self.stress_cost
+                _loss += stress_loss
+            else:
+                stress_loss = 0.0
+
+
+
             #if self.learn_oxidation_states:
             #    q_loss = tf.map_fn(self.loss_q,
             #                      (self.batch_oxidation_states,charges,batch_nats),
@@ -621,6 +623,7 @@ class BACENET(tf.keras.Model):
         metrics.update({'loss': _loss})
         metrics.update({'energy loss': _ecost*emse_loss})
         metrics.update({'force loss': _fcost*fmse_loss})
+        metrics.update({'stress loss': stress_loss})
         #metrics.update({'charge loss': q_loss})
 
         #with writer.set_as_default():
@@ -678,6 +681,15 @@ class BACENET(tf.keras.Model):
         forces = tf.reshape(forces, [-1, nmax*3])
         #target_f = tf.reshape(inputs_target[7], [-1, 3*nmax])
         target_f = tf.cast(target_f, tf.float32)
+        target_stress = data['stress']
+        if self.stress_cost > 0.0:
+            stress_loss = self.loss_s((tf.reshape(target_stress,[-1]),
+                                     tf.reshape(stress, [-1])))
+            #stress_loss *= self.stress_cost
+        else:
+            stress_loss = 0.0
+
+
 
         ediff = (e_pred - target)
 
@@ -692,12 +704,15 @@ class BACENET(tf.keras.Model):
         rmse_f = tf.sqrt(fmse_loss)
 
         metrics = {}
-        loss = self.ecost * rmse * rmse + self.fcost * fmse_loss
+        loss = (self.ecost * rmse * rmse + 
+                self.fcost * fmse_loss + 
+                stress_loss * self.stress_cost)
 
         metrics.update({'MAE': mae})
         metrics.update({'RMSE': rmse})
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
+        metrics.update({'RMSE_S': tf.sqrt(stress_loss)})
         metrics.update({'loss': loss})
         with self.train_writer.as_default(step=self._train_counter + self.starting_step):
             tf.summary.scalar('2. Metrics/1. V_RMSE/atom',rmse,self._train_counter + self.starting_step)

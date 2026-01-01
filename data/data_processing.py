@@ -199,7 +199,10 @@ def input_function(x, shuffle=True, batch_size=32): # inner function that will b
 #    dataset = dataset.batch(batch_size).repeat(num_epochs) # split dataset into batch_size batches and repeat process for num_epochs
 #    return dataset
 
-def process_ase(atoms, evaluate_test,species,atomic_energy,C6_spec,energy_key,force_key):
+def process_ase(atoms, evaluate_test,
+                species,atomic_energy,
+                C6_spec,energy_key,
+                force_key):
         # Ensure a nonzero box
         if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
             atoms.set_cell(np.eye(3) * 100)
@@ -262,6 +265,14 @@ def _process_file(args):
 
     # Build neighbor list
     i_list, j_list, shifts = neighbor_list('ijS', atoms, rc)
+    try:
+        stress = np.reshape(atoms.info['stress'],
+                            [3,3])
+    except:
+        stress = np.reshape(atoms.get_stress(voigt=False), 
+                            [3,3])
+    else:
+        stress = np.zeros((3,3))
 
     return {
         'positions': atoms.positions,
@@ -277,7 +288,8 @@ def _process_file(args):
         'S':    shifts,
         'nneigh':    len(i_list),
         'total_charge': total_charge,
-        'charges': atoms.get_array('charges')
+        'charges': atoms.get_array('charges'),
+        'stress': stress
     }
 
 def load_structure_data_parallel(files, data_format, species, atomic_energy,
@@ -289,7 +301,8 @@ def load_structure_data_parallel(files, data_format, species, atomic_energy,
     covalent_radii = {x:element(x).covalent_radius*0.01 for x in species}
     if evaluate_test < 0: # this is inference basically with ASE
 
-        args = (files[0], data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii)
+        args = (files[0], data_format, species, atomic_energy, 
+                C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii)
         data = _process_file(args)
         _data = {k:[] for k in data.keys()}
         for k, v in data.items():

@@ -431,6 +431,17 @@ def charge_loss(x):
     charge_pred = x[1][:nat]
     loss = tf.reduce_mean((charge_ref - charge_pred)**2)
     return loss
+@tf.function(input_signature=[
+                             (tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                             tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                              )
+                             ])
+def stress_loss(x):
+    stress_ref = x[0]
+    stress_pred = x[1]
+    loss = tf.reduce_mean((stress_ref - stress_pred)**2)
+    return loss
+
 
 def valence_with_two_shells(Z, nshells=1):
     """Return valence electrons including the last two shells for element Z."""
