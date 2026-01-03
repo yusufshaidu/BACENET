@@ -278,12 +278,9 @@ class BACENET(tf.keras.Model):
         ]
 
         #if self._n_shells > 1:
-        return tf.map_fn(self.model.tf_predict_energy_forces_pqeq_n, elements,
+        return tf.map_fn(self.model.tf_predict_energy_forces_pqeq, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
-        #return tf.map_fn(self.model.tf_predict_energy_forces_pqeq, elements,
-        #                             fn_output_signature=out_signature,
-        #                             parallel_iterations=self.batch_size)
        
     @tf.function(jit_compile=False,
                 input_signature=[(
