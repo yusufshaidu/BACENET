@@ -13,7 +13,10 @@ from data.unpack_tfr_data import unpack_data
 import tensorflow as tf
 from models.model_run import BACENET
 
-from data.data_processing import data_preparation, atomic_number, _process_file
+from data.data_processing import (data_preparation, 
+                                  atomic_number, 
+                                  _process_file,
+                                  _process_file_production)
 
 import sys, yaml,argparse, json
 import numpy as np
@@ -113,10 +116,10 @@ class bacenet_Calculator(Calculator):
         epoch = ckpts_idx[-1]
         idx=f"{epoch:04d}"
         self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.ckpt"
-        print(f'##################################################################')
-        print(f'calculation are performed with the model:')
-        print(f'{self.ckpt}')
-        print(f'##################################################################')
+        #print(f'##################################################################')
+        #print(f'calculation are performed with the model:')
+        #print(f'{self.ckpt}')
+        #print(f'##################################################################')
 
 
         #self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"
@@ -158,7 +161,7 @@ class bacenet_Calculator(Calculator):
                self.atomic_energy, C6_spec,
                configs['energy_key'],configs['force_key'],
                configs['rc_rad'], -1, covalent_radii)
-        _data = _process_file(args)
+        _data = _process_file_production(args)
         data = {}
         for key in _data.keys():
             #add the batch dimension

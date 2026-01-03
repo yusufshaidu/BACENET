@@ -97,7 +97,7 @@ def atom_centered_polarization(Rij,
 @tf.function(jit_compile=False,
                 input_signature=[
                 tf.TensorSpec(shape=(None,3), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,None), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.int32),
@@ -107,7 +107,7 @@ def atom_centered_polarization(Rij,
                 tf.TensorSpec(shape=(3,), dtype=tf.float32),
                 ]
                  )
-def atom_centered_dV(Rij,
+def _atom_centered_dV(Rij,
                     shell_displacement,
                     z_charge, q_charge,
                     first_atom_idx,
@@ -178,7 +178,7 @@ def atom_centered_dV(Rij,
     # we should add the self correction in the main function
     dVie += (tf.cast(central_atom_mask, tf.float32)[:,None] *
              z_charge[:,None] * efield[None,:])
-    return dViq, tf.reshape(dVie, [-1,n_shells*3])
+    return dViq, tf.reshape(tf.tile(dVie[:,None,:], [1,n_shells,1]), [-1,n_shells*3])
 
 @tf.function(jit_compile=False,
                 input_signature=[
@@ -193,7 +193,7 @@ def atom_centered_dV(Rij,
                 tf.TensorSpec(shape=(3,), dtype=tf.float32),
                 ]
                  )
-def _atom_centered_dV(Rij,
+def atom_centered_dV(Rij,
                     shell_displacement,
                     z_charge, q_charge,
                     first_atom_idx,

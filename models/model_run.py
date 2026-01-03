@@ -230,19 +230,12 @@ class BACENET(tf.keras.Model):
         if cfg['learnable_gaussian_width']:
             self.gaussian_width_net = Networks(
                 self.nelement,
-                [64, 2],
+                [64, self._n_shells],
                 #['sigmoid', 'sigmoid'],
                 ['tanh', 'tanh'],
                 prefix='species_gaussian_width'
             )
-        '''
-        self._learn_species_nelectrons = cfg['learn_species_nelectrons']
-        if self._learn_species_nelectrons:
-            self.species_nelectrons_net = Networks(self.nelement, # pass one-hot encoder
-                [64,1],
-                ['softplus', 'softplus'], prefix='species_nelectrons') # freely learn
-        '''
-        
+    
     @tf.function
     def step_fn(self, x):
         x = tf.cast(x, tf.float32)
@@ -284,18 +277,13 @@ class BACENET(tf.keras.Model):
             tf.float32,  # epsilon
         ]
 
-        if self._linearize_d == 0:
-            if self._n_shells > 1:
-                return tf.map_fn(self.model.tf_predict_energy_forces_pqeq0_n, elements,
+        #if self._n_shells > 1:
+        return tf.map_fn(self.model.tf_predict_energy_forces_pqeq_n, elements,
                                      fn_output_signature=out_signature,
                                      parallel_iterations=self.batch_size)
-            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq0, elements,
-                                     fn_output_signature=out_signature,
-                                     parallel_iterations=self.batch_size)
-        elif self._linearize_d == 1:
-            return tf.map_fn(self.model.tf_predict_energy_forces_pqeq1, elements,
-                                     fn_output_signature=out_signature,
-                                     parallel_iterations=self.batch_size)
+        #return tf.map_fn(self.model.tf_predict_energy_forces_pqeq, elements,
+        #                             fn_output_signature=out_signature,
+        #                             parallel_iterations=self.batch_size)
        
     @tf.function(jit_compile=False,
                 input_signature=[(
@@ -376,7 +364,8 @@ class BACENET(tf.keras.Model):
         atomic_number = tf.cast(atomic_number, tf.int32)
 
         # Compare each element in species_encoder to atomic_numbers in spec_identity: It has one true value per row
-        matches = tf.equal(tf.cast(atomic_number, tf.float32)[..., tf.newaxis], tf.cast(spec_identity,dtype=tf.float32))  # [batch_size, nmaxx, nspecies]
+        matches = tf.equal(tf.cast(atomic_number, tf.float32)[..., tf.newaxis], 
+                           tf.cast(spec_identity,dtype=tf.float32))  # [batch_size, nmaxx, nspecies]
 
         # Convert boolean match to one-hot-like index mask and extract all true index including the paddings
         species_indices = tf.argmax(tf.cast(matches, tf.int32), axis=-1)  # [batch_size, nmaxx]
@@ -409,22 +398,13 @@ class BACENET(tf.keras.Model):
 
             if self.learnable_gaussian_width:
                 #minimum = 0.5 and maximum = 2.1, self._species_gaussian_width in [-1,1]
-                self._species_gaussian_width = 1.5 + self.gaussian_width_net(_species_one_hot_encoder)
-                #self._species_gaussian_width = tf.clip_by_value(self._species_gaussian_width,
-                #                     clip_value_min=0.25, clip_value_max=2.5)
-                    # species_gaussian_width is between 0,1. spec_gwidth is between 0.5 and 2.5
-                #else:
-                #    self._species_gaussian_width += 0.5
+                self._species_gaussian_width = 1.5 + self.gaussian_width_net(_species_one_hot_encoder) # (nspecs, nshells)
+
                 batch_gaussian_width = tf.gather(self._species_gaussian_width, species_indices)
                 shape = tf.shape(batch_gaussian_width)
                 batch_gaussian_width = tf.where(valid_mask[...,tf.newaxis],
                                     batch_gaussian_width,
-                                     tf.zeros(shape)) # nbatch, nspec * 2
-            #else:
-            #    species_gaussian_width = tf.cast(data['gaussian_width'][:,:nmax], tf.float32) * tf.sqrt(2.0) # this defines alpha^2 = 2 * sigma^2
-            #    batch_gaussian_width = tf.cast(species_gaussian_width, tf.float32)
-            #    self._species_gaussian_width = tf.unique(species_gaussian_width[0])[0]
-
+                                     tf.zeros(shape)) # nbatch, nspec,n_shells
             #initial charges
             batch_atomic_q0 = tf.gather(tf.cast(self.oxidation_states,tf.float32), species_indices)
             shape = tf.shape(batch_atomic_q0)
@@ -454,14 +434,14 @@ class BACENET(tf.keras.Model):
             self.batch_oxidation_states = tf.reshape(tf.identity(batch_atomic_q0), [batch_size,nmax]) #to regress against predicted charges
         else:
             batch_atomic_chi0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
-            batch_gaussian_width = tf.zeros((batch_size,nmax, 2), dtype=tf.float32)
+            batch_gaussian_width = tf.zeros((batch_size,nmax,self._n_shells ), dtype=tf.float32)
             batch_atomic_J0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_atomic_q0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_species_nelec = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_total_charge = tf.zeros(batch_size, dtype=tf.float32)
 
         batch_species_encoder = tf.reshape(batch_species_encoder, [batch_size, nmax * self.nspec_embedding])
-        batch_gaussian_width = tf.reshape(batch_gaussian_width, [batch_size, nmax * 2])  
+        batch_gaussian_width = tf.reshape(batch_gaussian_width, [batch_size, nmax * self._n_shells])  
 
             
 
@@ -581,8 +561,6 @@ class BACENET(tf.keras.Model):
             else:
                 stress_loss = 0.0
 
-
-
             #if self.learn_oxidation_states:
             #    q_loss = tf.map_fn(self.loss_q,
             #                      (self.batch_oxidation_states,charges,batch_nats),
@@ -617,7 +595,6 @@ class BACENET(tf.keras.Model):
 
         metrics.update({'MAE': mae})
         metrics.update({'RMSE': rmse})
-
         metrics.update({'MAE_F': mae_f})
         metrics.update({'RMSE_F': rmse_f})
         metrics.update({'loss': _loss})
@@ -641,9 +618,15 @@ class BACENET(tf.keras.Model):
             #tf.summary.histogram(f'3. angular terms: lambda',self._lambda_weights,self._train_counter)
             for idx, spec in enumerate(self.species_identity):
                 tf.summary.histogram(f'3. encoding /{spec}',self.trainable_species_encoder[idx],self._train_counter + self.starting_step)
-                tf.summary.scalar(f'31. gaussian_width_q /{spec}',self._species_gaussian_width[idx,0],self._train_counter + self.starting_step)
-                tf.summary.scalar(f'31. gaussian_width_Z /{spec}',self._species_gaussian_width[idx,1],self._train_counter + self.starting_step)
-                tf.summary.scalar(f'32. shell  charges /{spec}',self._species_nelectrons[idx],self._train_counter + self.starting_step)
+                
+                if self._n_shells == 1:
+                    tf.summary.scalar(f'31. gaussian_width_q /{spec}',
+                                      tf.squeeze(self._species_gaussian_width[idx]),self._train_counter + self.starting_step)
+                else:
+                    for idx2 in range(self._n_shells):
+                        tf.summary.scalar(f'31. gaussian_width_q /{spec}_{idx2}',
+                                      self._species_gaussian_width[idx,idx2],self._train_counter + self.starting_step)
+                #tf.summary.scalar(f'32. shell  charges /{spec}',self._species_nelectrons[idx],self._train_counter + self.starting_step)
             if self.include_vdw:
                 tf.summary.histogram(f'4. C6 parameters',C6, self._train_counter + self.starting_step)
             if self.coulumb:

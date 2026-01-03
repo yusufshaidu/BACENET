@@ -198,7 +198,6 @@ def input_function(x, shuffle=True, batch_size=32): # inner function that will b
 #        dataset = dataset.shuffle(1000)
 #    dataset = dataset.batch(batch_size).repeat(num_epochs) # split dataset into batch_size batches and repeat process for num_epochs
 #    return dataset
-
 def process_ase(atoms, evaluate_test,
                 species,atomic_energy,
                 C6_spec,energy_key,
@@ -240,6 +239,66 @@ def process_ase(atoms, evaluate_test,
 
         return atoms, energy, forces, np.sum(charges)
 
+def process_ase_production(atoms, evaluate_test,
+                species,atomic_energy,
+                C6_spec,energy_key,
+                force_key):
+        # Ensure a nonzero box
+        if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
+            atoms.set_cell(np.eye(3) * 100)
+
+        charges = np.zeros(len(atoms.positions))
+        # Atomic encodings
+        encoder = atoms.get_atomic_numbers()
+        atoms.set_array('encoder', encoder)
+        atoms.set_array('charges', charges)
+
+
+        # C6 coefficients
+        C6_vals = np.array([C6_spec[z] for z in atoms.get_chemical_symbols()])
+        atoms.set_array('C6', C6_vals)
+
+        return atoms, 0.0, np.zeros_like(atoms.positions), np.sum(charges)
+def _process_file_production(args):
+    """
+    Worker function: loads one file, computes all the arrays, returns a dict.
+    """
+    atoms, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii = args
+
+    # 1) Load ASE Atoms object & compute energy/forces
+    atoms, energy, forces, total_charge = process_ase_production(atoms, 
+                                                      evaluate_test, 
+                                                      species,atomic_energy,
+                                                      C6_spec, energy_key, force_key)
+
+    gaussian_width = np.array([covalent_radii[x] for x in atoms.get_chemical_symbols()])
+    
+    # Ensure box
+    if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
+        atoms.set_cell(np.eye(3) * 100)
+
+    # Build neighbor list
+    i_list, j_list, shifts = neighbor_list('ijS', atoms, rc)
+    
+    stress = np.zeros((3,3))
+    return {
+        'positions': atoms.positions,
+        'cells':      atoms.cell,
+        'atomic_number':   atoms.get_array('encoder'),
+        'C6':        atoms.get_array('C6'),
+        'gaussian_width': gaussian_width,
+        'energy':    0.0,
+        'forces':    np.zeros_like(atoms.positions),
+        'natoms':    atoms.get_global_number_of_atoms(),
+        'i':     i_list,
+        'j':    j_list,
+        'S':    shifts,
+        'nneigh':    len(i_list),
+        'total_charge': total_charge,
+        'charges': np.zeros(len(atoms.positions)),
+        'stress': stress
+    }
+
 def _process_file(args):
     """
     Worker function: loads one file, computes all the arrays, returns a dict.
@@ -265,14 +324,17 @@ def _process_file(args):
 
     # Build neighbor list
     i_list, j_list, shifts = neighbor_list('ijS', atoms, rc)
+    
+    #try:
+    #    stress = np.reshape(atoms.info['stress'],
+    #                        [3,3])
     try:
-        stress = np.reshape(atoms.info['stress'],
-                            [3,3])
-    except:
         stress = np.reshape(atoms.get_stress(voigt=False), 
                             [3,3])
-    else:
+    except:
         stress = np.zeros((3,3))
+        #stress = np.reshape(atoms.info['stress'],
+        #                    [3,3])
 
     return {
         'positions': atoms.positions,

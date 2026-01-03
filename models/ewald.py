@@ -33,10 +33,9 @@ class ewald:
         
         #self._pair_displacement = pair_displacement
         #self._first_atom_idx = first_atom_idx
-
-        self._gaussian_width_a = tf.convert_to_tensor(gaussian_width[:,0],dtype=tf.float32) 
-        self._gaussian_width_b = tf.convert_to_tensor(gaussian_width[:,1],dtype=tf.float32) 
-        self._gaussian_width = tf.identity(self._gaussian_width_a) # defined for  standard qeq and for obtaining kmax
+        self._gaussian_width = tf.reshape(gaussian_width, [self._n_atoms, -1])
+        #self._gaussian_width_a = tf.convert_to_tensor(gaussian_width[:,0],dtype=tf.float32) 
+        #self._gaussian_width_b = tf.convert_to_tensor(gaussian_width[:,1],dtype=tf.float32) 
         self._sqrt_pi = tf.sqrt(pi)
         
 
@@ -47,7 +46,7 @@ class ewald:
 
         if self.pbc:
             self.reciprocal_cell = 2 * pi * tf.transpose(tf.linalg.inv(self._cell))
-            gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(self._gaussian_width_a))
+            gamma_max = 1/(tf.sqrt(2.0)*tf.reduce_min(self._gaussian_width))
             self._gmax = gmax if gmax else 2 * gamma_max * tf.sqrt(-tf.math.log(accuracy))
             self._gmax *= 1.0001
         if efield is not None:
@@ -218,6 +217,7 @@ class ewald:
         
         return tf.reshape(Vij, [self._n_atoms, self._n_atoms]) 
     
+    
     @tf.function(jit_compile=False,
                  input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -229,8 +229,9 @@ class ewald:
         calculates the interaction contribution to the electrostatic energy
         '''
 
+        g_width = tf.reshape(self._gaussian_width, [-1])
         N = self._n_atoms
-        alpha_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_a[None,:]**2
+        alpha_ij2 = g_width[:,None]**2 + g_width[None,:]**2
         g_sq = self.g_norm * self.g_norm  # [K]
         # Prepare factors for summation
         # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
@@ -245,14 +246,71 @@ class ewald:
         exp_cos_ij_aa = exp_ij_aa * tf.cos(r_dot_k) # N,N,K
         exp_sin_ij_aa = exp_ij_aa * tf.sin(r_dot_k) # N,N,K
         Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij_aa, axis=2)  # [N, N]
-        #alway summing over K
-        Vija = 4.0 * tf.matmul(exp_sin_ij_aa, self.g_vecs)
+        #alway summing over K including the spin degeneracy
+        Vija = 8.0 * tf.matmul(exp_sin_ij_aa, self.g_vecs)
         g_ab = tf.reshape(self.g_vecs[:, :, None] * self.g_vecs[:, None, :], [-1,9]) # K,3,3
-        Vijab = 2.0 * tf.reshape(tf.matmul(exp_cos_ij_aa, g_ab), [N,N,3,3]) # N,N,3,3
+        Vijab = 8.0 * tf.reshape(tf.matmul(exp_cos_ij_aa, g_ab), [N,N,3,3]) # N,N,3,3
         conversion_fact = CONV_FACT * (4.* pi / self.volume)
         return [Vij_qq * conversion_fact,
                 Vija * conversion_fact,
                 Vijab * conversion_fact]
+   
+    @tf.function(jit_compile=False,
+                 input_signature=[
+                tf.TensorSpec(shape=(None,), dtype=tf.float32),
+                ]
+                 )
+    def recip_space_term_with_shelld_quadratic_qd_n(self,
+                                                  z_charge):
+        '''
+        calculates the interaction contribution to the electrostatic energy
+        '''
+
+        N = self._n_atoms
+        g_width_0 = self._gaussian_width[:,0]
+        g_width_ns = self._gaussian_width
+        ns = tf.shape(g_width_ns)[1]
+        
+        alpha_ij2 = g_width_0[:,None]**2 + g_width_0[None,:]**2
+        alpha_ijn2 = g_width_0[:,None,None]**2 + g_width_ns[None,:,:]**2
+        alpha_ijnn2 = g_width_ns[:,None,:,None]**2 + g_width_ns[None,:,None,:]**2
+
+        g_sq = self.g_norm * self.g_norm  # [K]
+        # Prepare factors for summation
+        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
+        # shape [K, N]
+        exp_ij_aa = (tf.exp(-0.25 * alpha_ij2[:,:,None] * g_sq[None,None,:]) / 
+                     (g_sq[None,None,:] + 1e-12)) # [N,N,K]
+        exp_ij_aan = (tf.exp(-0.25 * alpha_ijn2[...,None] * g_sq[None,None,None,:]) / 
+                     (g_sq[None,None,None,:] + 1e-12)) # [N,N,n,K]
+        exp_ij_aann = (tf.exp(-0.25 * alpha_ijnn2[...,None] * g_sq[None,None,None,None,:]) / 
+                     (g_sq[None,None,None,None,:] + 1e-12)) # [N,N,n,n,K]
+
+        # The cosine term: shape [N*N,K]
+        g_vecs_transpose = tf.transpose(self.g_vecs)
+        #rij = tf.reshape(self._positions[:,None,:] - self._positions[None,:,:], [-1,3])
+        rij = self._positions[:,None,:] - self._positions[None,:,:] #N,N,3
+        r_dot_k = tf.matmul(rij, g_vecs_transpose)
+        exp_cos_ij_aa = exp_ij_aa * tf.cos(r_dot_k) # N,N,K
+        exp_sin_ij_aan = exp_ij_aan * tf.sin(r_dot_k)[:,:,None,:] # N,N,n,K
+        exp_cos_ij_aann = exp_ij_aann * tf.cos(r_dot_k)[:,:,None,None,:] # N,N,n,n,K
+
+        Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij_aa, axis=2)  # [N, N]
+        #alway summing over K
+        Vijna = 8.0 * tf.reshape(tf.matmul(exp_sin_ij_aan, self.g_vecs),[N,N,-1]) # N,N,n,3
+
+        g_ab = tf.reshape(self.g_vecs[:, :, None] * self.g_vecs[:, None, :], [-1,9]) # K,9
+        Vijnnab = 8.0 * tf.reshape(
+                tf.transpose(
+                    tf.reshape(tf.matmul(exp_cos_ij_aann, g_ab), [N,N,ns,ns,3,3]), 
+                    perm=[0,1,2,4,3,5]),
+                [N,N,3*ns,3*ns]) # N,N,nshells*3,nshell*3
+
+        conversion_fact = CONV_FACT * (4.* pi / self.volume)
+        return [Vij_qq * conversion_fact,
+                Vijna * conversion_fact,
+                Vijnnab * conversion_fact]
+
     @tf.function(jit_compile=False,
                  input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
@@ -287,28 +345,37 @@ class ewald:
         '''
         v = tf.reshape(v, [-1])
         N = self._n_atoms
-        v1 = v[:N]
+        charges = v[:N]
         lagrange_mult = v[N]
-        v2 = tf.reshape(v[N+1:],[N,3])
+        dipole_moment = tf.reshape(v[N+1:], [N,-1,3])
+        n_shell = tf.shape(dipole_moment)[1]
+        
         g_sq = self.g_norm * self.g_norm  # [K]
-        alpha2 = self._gaussian_width * self._gaussian_width
+        alpha2 = self._gaussian_width[:,0] * self._gaussian_width[:,0]
+        alphan2 = self._gaussian_width * self._gaussian_width # alp_in * alp_in
 
         g_vecs_transpose = tf.transpose(self.g_vecs) #(3,K)
         r_dot_k = tf.matmul(self._positions, g_vecs_transpose)
-        p_dot_k = tf.matmul(v2, g_vecs_transpose) # (N,K)
+        pn_dot_k = tf.matmul(dipole_moment, g_vecs_transpose) # (N,n_shells,K)
 
         fik_real = tf.exp(-0.25 * alpha2[:,None] * g_sq[None,:]) * tf.cos(r_dot_k)
-        fik_im = tf.exp(-0.25 * alpha2[:,None] * g_sq[None,:]) * tf.sin(r_dot_k)
+        fik_im = -tf.exp(-0.25 * alpha2[:,None] * g_sq[None,:]) * tf.sin(r_dot_k)
 
-        Sk_real = tf.reduce_sum(fik_real * v1[:,None], axis=0)
-        Sk_im = tf.reduce_sum(fik_im * v1[:,None], axis=0)
+        S1k_real = tf.reduce_sum(fik_real * charges[:,None], axis=0)
+        S1k_im = tf.reduce_sum(fik_im * charges[:,None], axis=0)
+        
+        fink_real = 2.0 * tf.exp(-0.25 * alphan2[:,:,None] * 
+                                 g_sq[None,None,:]) * tf.sin(r_dot_k)[:,None,:]
+        fink_im = 2.0 * tf.exp(-0.25 * alphan2[:,:,None] * 
+                               g_sq[None,None,:]) * tf.cos(r_dot_k)[:,None,:]
 
-        Qk_real = tf.reduce_sum(fik_real * p_dot_k, axis=0)
-        Qk_im = tf.reduce_sum(fik_im * p_dot_k, axis=0)
+        S2k_real = tf.reduce_sum(fink_real * pn_dot_k, axis=(0,1)) #(K)
+        S2k_im = tf.reduce_sum(fink_im * pn_dot_k, axis=(0,1)) #(K)
 
         return [fik_real, fik_im, 
-                Sk_real, Sk_im,
-                Qk_real, Qk_im]
+                S1k_real, S1k_im,
+                fink_real, fink_im,
+                S2k_real, S2k_im]
 
     @tf.function(jit_compile=False,
                  input_signature=[
@@ -360,7 +427,7 @@ class ewald:
                  input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
                 ]
                  )
 
@@ -373,14 +440,14 @@ class ewald:
         N = self._n_atoms
         v1 = v[:N]
         lagrange_mult = v[N]
-        v2 = tf.reshape(v[N+1:],[N,3])
-        fik_real, fik_im, Sk_real, Sk_im, Qk_real, Qk_im = self.structure_factors_pqeq(v)
+        dipole_moment = tf.reshape(v[N+1:],[N,-1,3])
+        fik_real, fik_im, S1k_real, S1k_im, fink_real, fink_im, S2k_real, S2k_im = self.structure_factors_pqeq(v)
        #q:
-        a_dot_v1 = tf.reduce_sum((fik_real * Sk_real[None,:] +
-                                  fik_im * Sk_im[None,:]) / (g_sq[None,:] + 1e-12), axis=1)
-        a_dot_v1 += tf.reduce_sum((fik_im * Qk_real[None,:] -
-                                   fik_real * Qk_im[None,:]) /
-                                  (g_sq[None,:] + 1e-12), axis=1) 
+        a_dot_v1 = tf.reduce_sum((fik_real * S1k_real[None,:] +
+                                  fik_im * S1k_im[None,:]) / (g_sq[None,:] + 1e-12), axis=1)
+        a_dot_v1 += tf.reduce_sum((fik_real * S2k_real[None,:] +
+                                   fik_im * S2k_im[None,:]) /
+                                  (g_sq[None,:] + 1e-12), axis=1) # N,
         a_dot_v1 *= conversion_fact
         #add the E2 * q terms
         a_dot_v1 += E2 * v1
@@ -390,23 +457,23 @@ class ewald:
         #\sum_j q_j + 0 lambda = qtot
         a_dot_v1 = tf.concat([a_dot_v1, [tf.reduce_sum(v1) + 1e-12]], axis=0)
 
-        a_dot_v2 = -tf.reduce_sum((fik_im * Sk_real[None,:] - 
-                                   fik_real * Sk_im[None,:])[:,:,None] * 
-                                  self.g_vecs[None,:,:] / (g_sq[None,:,None] + 1e-12), axis=1)
+        a_dot_v2 = tf.reduce_sum((fink_real * S1k_real[None,None,:] +
+                                  fink_im * S1k_im[None,None,:])[:,:,:,None] * 
+                                  self.g_vecs[None,None,:,:] / (g_sq[None,None,:,None] + 1e-12), axis=2)
         
-        a_dot_v2 += tf.reduce_sum((fik_real * Qk_real[None,:] + 
-                                   fik_im * Qk_im[None,:])[:,:,None] * 
-                                  self.g_vecs[None,:,:] / (g_sq[None,:,None] + 1e-12), axis=1)
+        a_dot_v2 += tf.reduce_sum((fink_real * S2k_real[None,None,:] + 
+                                   fink_im * S2k_im[None,None,:])[:,:,:,None] * 
+                                  self.g_vecs[None,None,:,:] / (g_sq[None,None,:,None] + 1e-12), axis=2)
 
         a_dot_v2 *= conversion_fact
-        a_dot_v2 += E_d2 * v2
+        a_dot_v2 += E_d2 * dipole_moment
         a_dot_v = tf.concat([a_dot_v1, tf.reshape(a_dot_v2, [-1])], axis=0)
         return a_dot_v
     
     @tf.function(jit_compile=False,
                  input_signature=[
                 tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
                 ]
                  )
     def M_inv_pqeq0(self, E2, E_d2):
@@ -417,17 +484,23 @@ class ewald:
         gvecs = self.g_vecs
         g_sq = self.g_norm * self.g_norm  # [K]
 
-        alpha = self._gaussian_width_a
-
-        M_qi = 1.0 / (conversion_fact * tf.reduce_sum(tf.exp(-0.5 * alpha[:,None]**2 * g_sq[None,:])
-                                                     / (g_sq[None,:] + 1e-12), axis=-1) + 1e-12)
+        alpha2 = self._gaussian_width[:,0] * self._gaussian_width[:,0]
+        alphan2 = self._gaussian_width * self._gaussian_width
+        Aii_q = conversion_fact * tf.reduce_sum(tf.exp(-0.5 * alpha2[:,None] * g_sq[None,:])
+                                                     / (g_sq[None,:] + 1e-12), axis=-1)
+        M_qi = 1.0 / (Aii_q + 1e-12)
         M_qi += 1.0 / (E2 + 1e-12)
+        
         gvecs2 = gvecs * gvecs
-        M_pi = 1.0 / (conversion_fact * tf.reduce_sum(
-            tf.exp(-0.5 * alpha[:,None]**2 * g_sq[None,:])[...,None] * 
-            gvecs2[None,:,:] / (g_sq[None,:,None] + 1e-12), axis=1) + 1e-12) # 
-
+        
+        Aii_pin = conversion_fact * tf.reduce_sum(
+                tf.exp(-0.5 * alphan2[:,:,None] * g_sq[None,None,:])[...,None] * 
+            gvecs2[None,None,:,:] / (g_sq[None,None,:,None] + 1e-12), axis=2)
+        
+        M_pi = 1.0 / (Aii_pin + 1e-12)
         M_pi += 1.0 / (E_d2 + 1e-12)
+
+        #the diagonal element at lambda is 0. We approxaimate 1/0 as 1/1e-12 to avoid overflow
         M_inv = tf.concat([M_qi, [1e12], tf.reshape(M_pi, [-1])], axis=0)
         return M_inv
 
@@ -457,148 +530,20 @@ class ewald:
         N = self._n_atoms
         g_sq = self.g_norm * self.g_norm  # [K]
        
-        fik_real, fik_im, Sk_real, Sk_im, Qk_real, Qk_im = self.structure_factors_pqeq(v)
+        _,_, S1k_real, S1k_im, _, _, S2k_real, S2k_im = self.structure_factors_pqeq(v)
 
         conversion_fact = CONV_FACT * (8.* pi / self.volume)
         #qq term
-        E = tf.reduce_sum((Sk_real * Sk_real + Sk_im * Sk_im) / (g_sq + 1e-12))
+        E = tf.reduce_sum((S1k_real * S1k_real + S1k_im * S1k_im) / (g_sq + 1e-12))
         #qz and zq term
-        E += 2.0 * tf.reduce_sum((Sk_im * Qk_real - Sk_real * Qk_im) / (g_sq + 1e-12))
+        E += 2.0 * tf.reduce_sum((S1k_real * S2k_real + S1k_im * S2k_im) / (g_sq + 1e-12))
         #zz term
         #g_ab = self.g_vecs[:,None,:] * self.g_vecs[:,:,None]
-        E += tf.reduce_sum((Qk_real * Qk_real + Qk_im * Qk_im) / (g_sq + 1e-12))
+        E += tf.reduce_sum((S2k_real * S2k_real + S2k_im * S2k_im) / (g_sq + 1e-12))
         E *= conversion_fact
 
         return 0.5 * E
 
-    @tf.function(jit_compile=False,
-                 input_signature=[
-                tf.TensorSpec(shape=(), dtype=tf.int32),
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                ]
-                 )
-    def recip_space_term_with_shelld_quadratic_q_nd(self, n_shells, z_charge):
-        '''
-        calculates the interaction contribution to the electrostatic energy
-        '''
-        #z_charge = tf.ones((self._n_atoms, n)) * 2.0 # [nat, n]
-        z_charge = tf.tile(z_charge[:,None], [1,n_shells]) / tf.cast(n_shells, tf.float32)
-
-        alpha_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_a[None,:]**2
-        beta_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_b[None,:]**2
-        alpha_beta_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_b[None,:]**2
-        #beta_alpha_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_a[None,:]**2
-
-        g_sq = self.g_norm * self.g_norm  # [K]
-
-        # Prepare factors for summation
-        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
-        # shape [K, N]
-        exp_ij_aa = tf.exp(-0.25 * alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        exp_ij_bb = tf.exp(-0.25 * beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        exp_ij_ab = tf.exp(-0.25 * alpha_beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        #exp_ij_ba = tf.exp(-0.25 * beta_alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        exp_ij_ba = tf.transpose(exp_ij_ab, [1,0,2])
-
-        # The cosine term: shape [N*N,K]
-        #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
-        g_vecs_transpose = tf.transpose(self.g_vecs)
-
-        #rij = tf.reshape(self._positions[:,None,:] - self._positions[None,:,:], [-1,3])
-        rij = self._positions[:,None,:] - self._positions[None,:,:] #N,N,3
-        #cos_term = tf.cos(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
-        #sin_term = tf.sin(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
-        r_dot_k = tf.matmul(rij, g_vecs_transpose)
-        exp_cos_ij_aa = exp_ij_aa * tf.cos(r_dot_k) # N,N,K
-        exp_cos_ij_bb = exp_ij_bb * tf.cos(r_dot_k) # N,N,K
-        exp_sin_ij_ab = exp_ij_ab * tf.sin(r_dot_k) # N,N,K
-        exp_sin_ij_ba = exp_ij_ba * tf.sin(r_dot_k) # N,N,K
-        
-        Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij_aa, axis=2)  # [N, N]
-
-        #alway summing over K
-        Vija_qz =  2.0 * tf.matmul(exp_sin_ij_ab, self.g_vecs)[:,:,None,:] * z_charge[None,:,:,None] # [N,N,n,3]
-        Vija_zq =  -2.0 * tf.matmul(exp_sin_ij_ba, self.g_vecs)[:,:,None,:] * z_charge[:,None,:,None] # [N,N,n,3]
-
-        zz = z_charge[None,:,:,None] * z_charge[:, None,None,:] #N,N,n,n
-        g_ab = tf.reshape(self.g_vecs[:, :, None] * self.g_vecs[:, None, :], [-1,9])
-        Vijab_zz =  2.0 * tf.matmul(exp_cos_ij_bb, g_ab) # N,N,3,3
-        Vijab_zz = tf.reshape(Vijab_zz[:,:,None,None,:] * zz[...,None],
-                              [self._n_atoms, self._n_atoms,n_shells,n_shells,3,3]) # [N,N,n,n,3,3]
-
-        conversion_fact = CONV_FACT * (4.* pi / self.volume)
-        return [Vij_qq * conversion_fact,
-                Vija_qz * conversion_fact,
-                Vija_zq * conversion_fact,
-                Vijab_zz * conversion_fact]
-
-    @tf.function(jit_compile=False,
-                 input_signature=[
-                tf.TensorSpec(shape=(None,), dtype=tf.float32),
-                ]
-                 )
-    def recip_space_term_with_shelld_quadratic_qqdd_1(self,
-                                                  z_charge):
-        '''
-        calculates the interaction contribution to the electrostatic energy
-        '''
-
-        N = self._n_atoms
-
-        alpha_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_a[None,:]**2
-        beta_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_b[None,:]**2
-        alpha_beta_ij2 = self._gaussian_width_a[:,None]**2 + self._gaussian_width_b[None,:]**2
-        #beta_alpha_ij2 = self._gaussian_width_b[:,None]**2 + self._gaussian_width_a[None,:]**2
-
-        g_sq = self.g_norm * self.g_norm  # [K]
-
-        # Prepare factors for summation
-        # exp_factor[k,i] = exp(-g^2 * gamma_ij**2/2)
-        # shape [K, N]
-        exp_ij_aa = tf.exp(-0.25 * alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        exp_ij_bb = tf.exp(-0.25 * beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        exp_ij_ab = tf.exp(-0.25 * alpha_beta_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        #exp_ij_ba = tf.exp(-0.25 * beta_alpha_ij2[:,:,None] * g_sq[None,None,:]) / (g_sq[None,None,:] + 1e-12) # [N,N,K]
-        exp_ij_ba = tf.transpose(exp_ij_ab, [1,0,2])
-
-        # The cosine term: shape [N*N,K]
-        #cos_term = tf.cos(tf.einsum('ijk, lk->ijl', rij, g_vecs))
-        g_vecs_transpose = tf.transpose(self.g_vecs)
-
-        #rij = tf.reshape(self._positions[:,None,:] - self._positions[None,:,:], [-1,3])
-        rij = self._positions[:,None,:] - self._positions[None,:,:] #N,N,3
-        #cos_term = tf.cos(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
-        #sin_term = tf.sin(tf.matmul(rij, g_vecs_transpose)) #[N,N,K]
-        r_dot_k = tf.matmul(rij, g_vecs_transpose)
-        exp_cos_ij_aa = exp_ij_aa * tf.cos(r_dot_k) # N,N,K
-        exp_cos_ij_bb = exp_ij_bb * tf.cos(r_dot_k) # N,N,K
-        exp_sin_ij_ab = exp_ij_ab * tf.sin(r_dot_k) # N,N,K
-        exp_cos_ij_ab = exp_ij_ab * tf.cos(r_dot_k) # N,N,K
-        exp_sin_ij_ba = exp_ij_ba * tf.sin(r_dot_k) # N,N,K
-        exp_cos_ij_ba = exp_ij_ba * tf.cos(r_dot_k) # N,N,K
-        
-        Vij_qq = 2.0 * tf.reduce_sum(exp_cos_ij_aa, axis=2)  # [N, N]
-
-        #alway summing over K
-        Vija_qz = 2.0 * tf.matmul(exp_sin_ij_ab, self.g_vecs) * z_charge[None,:,None]
-        Vija_zq = -2.0 * tf.matmul(exp_sin_ij_ba, self.g_vecs) * z_charge[:,None,None]
-        g_ab = tf.reshape(self.g_vecs[:, :, None] * self.g_vecs[:, None, :], [-1,9]) # K,3,3
-        Vijab_qz = tf.reshape(tf.matmul(exp_cos_ij_ab, g_ab) * 
-                               z_charge[None,:,None], [N,N,3,3])
-        Vijab_zq = tf.reshape(tf.matmul(exp_cos_ij_ba, g_ab) * 
-                              z_charge[:,None,None], [N,N,3,3])
-
-        zz = z_charge[None,:] * z_charge[:, None] #N,N
-        Vijab_zz =  2.0 * tf.reshape(tf.matmul(exp_cos_ij_bb, g_ab) *
-                                     zz[...,None], [N,N,3,3]) # N,N,3,3
-
-        conversion_fact = CONV_FACT * (4.* pi / self.volume)
-        return [Vij_qq * conversion_fact,
-                Vija_qz * conversion_fact,
-                Vija_zq * conversion_fact,
-                Vijab_zz * conversion_fact,
-                Vijab_qz * conversion_fact,
-                Vijab_zq * conversion_fact]
     
     @tf.function(jit_compile=False,
                 input_signature=[
