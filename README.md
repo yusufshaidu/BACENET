@@ -5,6 +5,6 @@
  - Standard short range model
  - charge equilibration similar to that presented in [https://www.nature.com/articles/s41524-024-01225-6]
  - multi-shell polarizable charge equilibration model for insulators and ferroelectric materials
- - In the case of charge equilibration, the we have implemented conjugate gradient to enable large systems simulations withing ASE.
+ - In the case of charge equilibration, we have implemented conjugate gradient to enable large systems simulations within ASE.
 
 - **Documentation is Underconstruction**
