@@ -7,4 +7,6 @@
  - multi-shell polarizable charge equilibration model for insulators and ferroelectric materials
  - In the case of charge equilibration, we have implemented conjugate gradient to enable large systems simulations within ASE.
 
+## ToDoList
+ - interface with simple DFT-D3 [https://dftd3.readthedocs.io/en/latest/installation.html] to enable incorporating vdW through Grimme-D3
 - **Documentation is Underconstruction**
