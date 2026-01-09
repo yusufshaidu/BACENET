@@ -1,11 +1,10 @@
 import os
+
 '''
 The following command is used to supress the following wied message
 I tensorflow/core/framework/local_rendezvous.cc:421] Local rendezvous recv item cancelled. Key hash:
 '''
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
-
-import numpy as np
 
 from ase.calculators.calculator import FileIOCalculator,Calculator, all_changes
 from ase.io import write
@@ -24,11 +23,7 @@ import bacenet.train as train
 from pathlib import Path
 import mendeleev
 from mendeleev import element
-
-
-
-
-import os
+from ase.neighborlist import neighbor_list
 
 class bacenet_Calculator(Calculator):
     implemented_properties = ['energy', 'forces', 'stress','charges', 'zstar', 'shell_displacements', 'Pi_a']
@@ -39,10 +34,10 @@ class bacenet_Calculator(Calculator):
 #    fileio_rules = FileIOCalculator.ruleset(
 #        stdout_name='weighted_mBP.out')
 
-    def __init__(self, 
-                 config=None,efield=None,central_atom_id=0,
+    def __init__(self, rebuild_every=1, total_charge=0.0,
+                 config=None, efield=None, central_atom_id=0,
                  **kwargs):
-        """Construct ACE-like descriptors Behler Parrinello  calculator.
+        """Construct cartessian ACE descriptors calculator.
 
         The keyword arguments (kwargs) can be one of the ASE standard
         keywords: this is currently empty
@@ -51,11 +46,21 @@ class bacenet_Calculator(Calculator):
 
         super().__init__(**kwargs)
         
+        self.rebuild_every = rebuild_every
+        self._step = 0
+        self.i_list = None
+        self.j_list = None
+        self.shifts = None
+        self.total_charge = total_charge
+
         #Read in model parameters
         #I am parsing yaml files with all the parameters
 
         #
-        self._properties = ['energy', 'forces', 'stress','charges', 'zstar', 'shell_displacements']
+        self._properties = ['energy', 'forces', 
+                            'stress','charges', 
+                            'zstar', 'shell_displacements']
+
         with open(config) as f:
             configs = yaml.safe_load(f)
         
@@ -69,9 +74,9 @@ class bacenet_Calculator(Calculator):
 
         species_chi0, species_J0 = train.estimate_species_chi0_J0(configs['species'])
         if configs['scale_J0'] is None:
-            configs['scale_J0'] = tf.ones_like(species_chi0)
+            configs['scale_J0'] = tf.zeros_like(species_chi0)
         if configs['scale_chi0'] is None:
-            configs['scale_chi0'] = tf.ones_like(species_chi0)
+            configs['scale_chi0'] = tf.zeros_like(species_chi0)
 
         configs['species_chi0'] = species_chi0
         configs['species_J0'] = species_J0
@@ -82,9 +87,9 @@ class bacenet_Calculator(Calculator):
             configs['efield'] = tf.cast(efield, tf.float32)
 
         if configs['include_vdw']:
-            rc = np.max([configs['rc_rad'],configs['rmax_d']])
+            self.rc = np.max([configs['rc_rad'],configs['rmax_d']])
         else:
-            rc = configs['rc_rad']
+            self.rc = configs['rc_rad']
 
         _model_call = BACENET
 
@@ -121,22 +126,20 @@ class bacenet_Calculator(Calculator):
         #print(f'{self.ckpt}')
         #print(f'##################################################################')
 
-
-        #self.ckpt = model_outdir+"/models/"+f"ckpts-{idx}.weights.h5"
         species_identity = [atomic_number(s) for s in configs['species']]
-        #print(species_identity)
                 
         configs['species_identity'] = species_identity
-#        print(species_identity, len(species_identity))
         self.model_call = _model_call(configs)
         self.model_call.load_weights(self.ckpt).expect_partial()
-        #weights = self.model.get_weights()
-        #print(weights[0])
-
-        #self.model.load_weights(ckpts[-1]).expect_partial()
         self.configs = configs
 
-    def calculate(self, atoms=None, properties=['energy'], system_changes=all_changes):
+    #@tf.function
+    #def infer(self, data):
+    #    return self.model_call(data)
+
+    def calculate(self, atoms=None, 
+                  properties=['energy'], 
+                  system_changes=all_changes):
         """
         atoms: Atoms object
             Contains positions, unit-cell, ...
@@ -150,28 +153,33 @@ class bacenet_Calculator(Calculator):
         """
         properties = self._properties
         Calculator.calculate(self, atoms, properties, system_changes)
+
         configs = self.configs
         # C6 are in Ha * au^6
         to_eV = 27.211324570273 * 0.529177**6
         C6_spec = {ss:element(ss).c6_gb * to_eV for ss in configs['species']}
         covalent_radii = {x:element(x).covalent_radius*0.01 for x in configs['species']}
 
-        #file, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii = args
-        args = (atoms, 'ase', configs['species'], 
-               self.atomic_energy, C6_spec,
-               configs['energy_key'],configs['force_key'],
-               configs['rc_rad'], -1, covalent_radii)
-        _data = _process_file_production(args)
-        data = {}
-        for key in _data.keys():
-            #add the batch dimension
-            values = tf.convert_to_tensor(_data[key], dtype=tf.float32)
-            data[key] = tf.expand_dims(tf.reshape(values, [-1]), axis=0)
-#            print(key)
+        if self._step % self.rebuild_every == 0:
+            i_list, j_list, shifts = neighbor_list('ijS', atoms, self.rc)
+            self.i_list = i_list
+            self.j_list = j_list
+            self.shifts = shifts
 
+
+        self._step += 1
+        data = _process_file_production(
+                                        atoms, C6_spec,
+                                        covalent_radii,
+                                        self.total_charge, self.i_list,
+                                        self.j_list, self.shifts
+                                        )
+        
         _outs = self.model_call.predict(data, batch_size=1, verbose=0)
+        #outs = self.infer(data)
         outs = _outs[-1]
-        e0 = np.sum([self.atomic_energy_dic[s] for s in atoms.get_chemical_symbols()])
+        e0 = np.sum([self.atomic_energy_dic[s] 
+                     for s in atoms.get_chemical_symbols()])
 
         #there is the batch axis
         self.results = {
@@ -187,3 +195,19 @@ class bacenet_Calculator(Calculator):
             "Zstar": outs['Zstar'][0],
             "epsilon": outs['epsilon'][0],
             }
+
+        ''' direct call
+        self.results = {
+            "energy":outs['energy'].numpy()[0] + e0,
+            "forces":outs['forces'][0].numpy(),
+            "stress":outs['stress'][0].numpy(),
+            "charges":outs['charges'][0].numpy(),
+            "shell_displacements":outs['shell_disp'][0].numpy(),
+            "Pi_a": outs['Pi_a'][0].numpy(),
+            "E1": outs['E1'][0].numpy(),
+            "E2": outs['E2'][0].numpy(),
+            "E_d2": outs['E_d2'][0].numpy(),
+            "Zstar": outs['Zstar'][0].numpy(),
+            "epsilon": outs['epsilon'][0].numpy(),
+            }
+        '''

@@ -25,9 +25,9 @@ def create_model(configs):
             configs[key] = _configs[key]
     species_chi0, species_J0 = train.estimate_species_chi0_J0(configs['species'])
     if configs['scale_J0'] is None:
-        configs['scale_J0'] = tf.ones_like(species_chi0)
+        configs['scale_J0'] = tf.zeros_like(species_chi0)
     if configs['scale_chi0'] is None:
-        configs['scale_chi0'] = tf.ones_like(species_chi0)
+        configs['scale_chi0'] = tf.zeros_like(species_chi0)
 
     configs['species_chi0'] = species_chi0
     configs['species_J0'] = species_J0

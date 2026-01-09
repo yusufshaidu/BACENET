@@ -259,44 +259,50 @@ def process_ase_production(atoms, evaluate_test,
         atoms.set_array('C6', C6_vals)
 
         return atoms, 0.0, np.zeros_like(atoms.positions), np.sum(charges)
-def _process_file_production(args):
+
+def _process_file_production(atoms, C6_spec, 
+                             covalent_radii, 
+                             total_charge, i_list, 
+                             j_list, shifts):
     """
     Worker function: loads one file, computes all the arrays, returns a dict.
     """
-    atoms, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii = args
+    #atoms, C6_spec, covalent_radii = args
 
-    # 1) Load ASE Atoms object & compute energy/forces
-    atoms, energy, forces, total_charge = process_ase_production(atoms, 
-                                                      evaluate_test, 
-                                                      species,atomic_energy,
-                                                      C6_spec, energy_key, force_key)
-
-    gaussian_width = np.array([covalent_radii[x] for x in atoms.get_chemical_symbols()])
-    
+    encoder = atoms.get_atomic_numbers()
+    C6_vals = np.array([C6_spec[z] for z in atoms.get_chemical_symbols()])
+    charges = np.zeros(len(atoms.positions))
+    nat = len(atoms.positions)
+    forces = np.zeros(nat*3)
+    total_charge = total_charge
+    gaussian_width = np.array([covalent_radii[x] for x in 
+                               atoms.get_chemical_symbols()])
     # Ensure box
     if atoms.cell is None or np.linalg.norm(atoms.cell) < 1e-6:
         atoms.set_cell(np.eye(3) * 100)
 
     # Build neighbor list
-    i_list, j_list, shifts = neighbor_list('ijS', atoms, rc)
+    #if rebuild_nl:
+    #    i_list, j_list, shifts = neighbor_list('ijS', atoms, rc)
+
     
-    stress = np.zeros((3,3))
+    stress = np.zeros(9)
     return {
-        'positions': atoms.positions,
-        'cells':      atoms.cell,
-        'atomic_number':   atoms.get_array('encoder'),
-        'C6':        atoms.get_array('C6'),
-        'gaussian_width': gaussian_width,
-        'energy':    0.0,
-        'forces':    np.zeros_like(atoms.positions),
-        'natoms':    atoms.get_global_number_of_atoms(),
-        'i':     i_list,
-        'j':    j_list,
-        'S':    shifts,
-        'nneigh':    len(i_list),
-        'total_charge': total_charge,
-        'charges': np.zeros(len(atoms.positions)),
-        'stress': stress
+        'positions': tf.convert_to_tensor([tf.reshape(atoms.positions, [-1])], dtype=tf.float32),
+        'cells': tf.convert_to_tensor([tf.reshape(atoms.cell, [-1])], dtype=tf.float32),
+        'atomic_number':   tf.convert_to_tensor([encoder], dtype=tf.int32),
+        'C6':        tf.convert_to_tensor([C6_vals], dtype=tf.float32),
+        'gaussian_width': tf.convert_to_tensor([gaussian_width], dtype=tf.float32),
+        'energy':    tf.convert_to_tensor([0.0], dtype=tf.float32),
+        'forces':    tf.convert_to_tensor([forces], dtype=tf.float32),
+        'natoms':    tf.convert_to_tensor([nat], dtype=tf.int32),
+        'i':     tf.convert_to_tensor([i_list], dtype=tf.int32),
+        'j':    tf.convert_to_tensor([j_list], dtype=tf.int32),
+        'S':    tf.convert_to_tensor([tf.reshape(shifts, [-1])], dtype=tf.int32),
+        'nneigh':    tf.convert_to_tensor([len(i_list)], dtype=tf.int32),
+        'total_charge': tf.convert_to_tensor([total_charge], dtype=tf.float32),
+        'charges': tf.convert_to_tensor([charges], dtype=tf.float32),
+        'stress': tf.convert_to_tensor([stress], dtype=tf.float32)
     }
 
 def _process_file(args):
@@ -305,7 +311,7 @@ def _process_file(args):
     """
     file, data_format, species, atomic_energy, C6_spec, energy_key, force_key, rc, evaluate_test,covalent_radii = args
 
-    # 1) Load ASE Atoms object & compute energy/forces
+    # Load ASE Atoms object and compute energy/forces
     if data_format == 'panna_json':
         atoms = convert_json2ASE_atoms(atomic_energy, file, C6_spec, species)
         energy = atoms.info[energy_key]

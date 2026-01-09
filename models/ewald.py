@@ -75,8 +75,9 @@ class ewald:
         #1e10 comes from angstrom
         #CONV_FACT = 1e10 * e_charge / (4 * np.pi * epsilon_0)
 
+        g_width = self._gaussian_width[:,0]
         rij = self._positions[:,None,:] - self._positions[None,:,:]
-        gamma_ij = tf.sqrt(self._gaussian_width[:,None]**2 + self._gaussian_width**2)
+        gamma_ij = tf.sqrt(g_width[:,None]**2 + g_width**2)
 
         #compute the norm of all distances
         rij_norm = tf.linalg.norm(rij + 1e-12, axis=-1)
@@ -88,7 +89,7 @@ class ewald:
         Vij = tf.identity(erf_term)
 
         
-        E_diag = 1. / self._sqrt_pi * 1.0/(self._gaussian_width)
+        E_diag = 1. / self._sqrt_pi * 1.0/(g_width)
         Vij = tf.linalg.set_diag(Vij, E_diag) * CONV_FACT
 
         return Vij
@@ -183,7 +184,8 @@ class ewald:
         # rk-ri
         rij = self._positions[None,:,:] - self._positions[:,None,:]
         rij = tf.reshape(rij, [-1,3])
-        sigma_ij2 = self._gaussian_width[:,None]**2 + self._gaussian_width**2
+        g_width = self._gaussian_width[:,0]
+        sigma_ij2 = g_width[:,None]**2 + g_width**2
         sigma_ij2 = tf.reshape(sigma_ij2, [-1])
         
 
@@ -229,7 +231,7 @@ class ewald:
         calculates the interaction contribution to the electrostatic energy
         '''
 
-        g_width = tf.reshape(self._gaussian_width, [-1])
+        g_width = tf.reshape(self._gaussian_width[:,0], [-1])
         N = self._n_atoms
         alpha_ij2 = g_width[:,None]**2 + g_width[None,:]**2
         g_sq = self.g_norm * self.g_norm  # [K]
@@ -268,7 +270,7 @@ class ewald:
 
         N = self._n_atoms
         g_width_0 = self._gaussian_width[:,0]
-        g_width_ns = self._gaussian_width
+        g_width_ns = self._gaussian_width[:,1:]
         ns = tf.shape(g_width_ns)[1]
         
         alpha_ij2 = g_width_0[:,None]**2 + g_width_0[None,:]**2
@@ -322,7 +324,7 @@ class ewald:
         '''
         N = self._n_atoms
         g_sq = self.g_norm * self.g_norm  # [K]
-        alpha2 = self._gaussian_width * self._gaussian_width
+        alpha2 = self._gaussian_width[:,0] * self._gaussian_width[:,0]
 
         g_vecs_transpose = tf.transpose(self.g_vecs)
         r_dot_k = tf.matmul(self._positions, g_vecs_transpose)
@@ -352,7 +354,7 @@ class ewald:
         
         g_sq = self.g_norm * self.g_norm  # [K]
         alpha2 = self._gaussian_width[:,0] * self._gaussian_width[:,0]
-        alphan2 = self._gaussian_width * self._gaussian_width # alp_in * alp_in
+        alphan2 = self._gaussian_width[:,1:] * self._gaussian_width[:,1:] # alp_in * alp_in
 
         g_vecs_transpose = tf.transpose(self.g_vecs) #(3,K)
         r_dot_k = tf.matmul(self._positions, g_vecs_transpose)
@@ -414,13 +416,13 @@ class ewald:
         conversion_fact = CONV_FACT * (8.* pi / self.volume)
         g_sq = self.g_norm * self.g_norm  # [K]
 
-        alpha = self._gaussian_width_a
+        alpha = self._gaussian_width[:,0]
 
         M_qi = 1.0 / (conversion_fact * 
                      tf.reduce_sum(tf.exp(-0.5 * alpha[:,None]**2 * g_sq[None,:])
                                    / (g_sq[None,:] + 1e-12), axis=-1) + 1e-12)
         M_qi += 1.0 / (E2 + 1e-12)
-        M_inv = tf.concat([M_qi, [1.0e8]], axis=0)
+        M_inv = tf.concat([M_qi, [10.0]], axis=0)
         return M_inv
 
     @tf.function(jit_compile=False,
@@ -485,7 +487,7 @@ class ewald:
         g_sq = self.g_norm * self.g_norm  # [K]
 
         alpha2 = self._gaussian_width[:,0] * self._gaussian_width[:,0]
-        alphan2 = self._gaussian_width * self._gaussian_width
+        alphan2 = self._gaussian_width[:,1:] * self._gaussian_width[:,1:]
         Aii_q = conversion_fact * tf.reduce_sum(tf.exp(-0.5 * alpha2[:,None] * g_sq[None,:])
                                                      / (g_sq[None,:] + 1e-12), axis=-1)
         M_qi = 1.0 / (Aii_q + 1e-12)
@@ -501,7 +503,7 @@ class ewald:
         M_pi += 1.0 / (E_d2 + 1e-12)
 
         #the diagonal element at lambda is 0. We approxaimate 1/0 as 1/1e-12 to avoid overflow
-        M_inv = tf.concat([M_qi, [1e12], tf.reshape(M_pi, [-1])], axis=0)
+        M_inv = tf.concat([M_qi, [10.0], tf.reshape(M_pi, [-1])], axis=0)
         return M_inv
 
     @tf.function(jit_compile=False,

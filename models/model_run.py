@@ -37,7 +37,7 @@ class BACENET(tf.keras.Model):
         self._build_species_encoder()
         self._build_atomic_network()
         self._build_radial_network()
-        self._build_optional_networks()
+        self._build_gaussian_networks()
 
         # 3. Logging
         #tf.print("Model initialization complete. Feature size =", self.feature_size)
@@ -223,16 +223,21 @@ class BACENET(tf.keras.Model):
             self.n_bessels, radial_layers, radial_act, prefix="radial-functions"
         )
 
-    def _build_optional_networks(self):
+    def _build_gaussian_networks(self):
         cfg = self.configs
-        self.learnable_gaussian_width = cfg['learnable_gaussian_width']
+        #self.learnable_gaussian_width = cfg['learnable_gaussian_width']
 
-        if cfg['learnable_gaussian_width']:
-            self.gaussian_width_net = Networks(
+        self.gaussian_prefact = 1.0
+        if cfg['gaussian_acts'][-1] == 'sigmoid':
+            self.gaussian_prefact = cfg['gaussian_prefact']
+
+        #if cfg['learnable_gaussian_width']:
+        self.gaussian_width_net = Networks(
                 self.nelement,
-                [64, self._n_shells],
+                [64, self._n_shells + 1], #1 for q and n_shells for n shells
+                cfg['gaussian_acts'],
                 #['sigmoid', 'sigmoid'],
-                ['tanh', 'tanh'],
+                #['tanh', 'tanh'],
                 prefix='species_gaussian_width'
             )
     
@@ -393,13 +398,11 @@ class BACENET(tf.keras.Model):
                                      batch_atomic_J0,
                                      tf.zeros(shape))
 
-            if self.learnable_gaussian_width:
-                #minimum = 0.5 and maximum = 2.1, self._species_gaussian_width in [-1,1]
-                self._species_gaussian_width = 1.5 + self.gaussian_width_net(_species_one_hot_encoder) # (nspecs, nshells)
+            self._species_gaussian_width = 0.5 + self.gaussian_prefact * self.gaussian_width_net(_species_one_hot_encoder) # (nspecs, nshells)
 
-                batch_gaussian_width = tf.gather(self._species_gaussian_width, species_indices)
-                shape = tf.shape(batch_gaussian_width)
-                batch_gaussian_width = tf.where(valid_mask[...,tf.newaxis],
+            batch_gaussian_width = tf.gather(self._species_gaussian_width, species_indices)
+            shape = tf.shape(batch_gaussian_width)
+            batch_gaussian_width = tf.where(valid_mask[...,tf.newaxis],
                                     batch_gaussian_width,
                                      tf.zeros(shape)) # nbatch, nspec,n_shells
             #initial charges
@@ -431,14 +434,14 @@ class BACENET(tf.keras.Model):
             self.batch_oxidation_states = tf.reshape(tf.identity(batch_atomic_q0), [batch_size,nmax]) #to regress against predicted charges
         else:
             batch_atomic_chi0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
-            batch_gaussian_width = tf.zeros((batch_size,nmax,self._n_shells ), dtype=tf.float32)
+            batch_gaussian_width = tf.zeros((batch_size,nmax,self._n_shells+1), dtype=tf.float32)
             batch_atomic_J0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_atomic_q0 = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_species_nelec = tf.zeros((batch_size,nmax), dtype=tf.float32)
             batch_total_charge = tf.zeros(batch_size, dtype=tf.float32)
 
         batch_species_encoder = tf.reshape(batch_species_encoder, [batch_size, nmax * self.nspec_embedding])
-        batch_gaussian_width = tf.reshape(batch_gaussian_width, [batch_size, nmax * self._n_shells])  
+        batch_gaussian_width = tf.reshape(batch_gaussian_width, [batch_size, nmax * (self._n_shells+1)])  
 
             
 
@@ -616,12 +619,8 @@ class BACENET(tf.keras.Model):
             for idx, spec in enumerate(self.species_identity):
                 tf.summary.histogram(f'3. encoding /{spec}',self.trainable_species_encoder[idx],self._train_counter + self.starting_step)
                 
-                if self._n_shells == 1:
-                    tf.summary.scalar(f'31. gaussian_width_q /{spec}',
-                                      tf.squeeze(self._species_gaussian_width[idx]),self._train_counter + self.starting_step)
-                else:
-                    for idx2 in range(self._n_shells):
-                        tf.summary.scalar(f'31. gaussian_width_q /{spec}_{idx2}',
+                for idx2 in range(self._n_shells + 1):
+                    tf.summary.scalar(f'31. gaussian_width /{spec}_{idx2}',
                                       self._species_gaussian_width[idx,idx2],self._train_counter + self.starting_step)
                 #tf.summary.scalar(f'32. shell  charges /{spec}',self._species_nelectrons[idx],self._train_counter + self.starting_step)
             if self.include_vdw:
@@ -699,8 +698,6 @@ class BACENET(tf.keras.Model):
             tf.summary.scalar('2. Metrics/2. V_MAE/atom',mae,self._train_counter + self.starting_step)
             tf.summary.scalar('2. Metrics/3. V_RMSE_F',rmse_f,self._train_counter + self.starting_step)
             tf.summary.scalar('2. Metrics/3. V_MAE_F',mae_f,self._train_counter + self.starting_step)
-
-
 
         return {key: metrics[key] for key in metrics.keys()}
 

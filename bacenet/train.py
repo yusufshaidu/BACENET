@@ -102,7 +102,9 @@ def default_config():
         'learnable_gaussian_width': True,
         'n_shells': 1,
         'exact_solver': True,
-        'stress_cost':0.0
+        'stress_cost':0.0,
+        'gaussian_acts': ['sigmoid', 'sigmoid'],
+        'gaussian_prefact': 2.0,
             }
 
 def estimate_species_chi0_J0(species):
@@ -262,9 +264,9 @@ def create_model(configs):
 
     species_chi0, species_J0 = estimate_species_chi0_J0(configs['species'])
     if configs['scale_J0'] is None:
-        configs['scale_J0'] = tf.ones_like(species_chi0)
+        configs['scale_J0'] = tf.zeros_like(species_chi0)
     if configs['scale_chi0'] is None:
-        configs['scale_chi0'] = tf.ones_like(species_chi0)
+        configs['scale_chi0'] = tf.zeros_like(species_chi0)
 
     configs['species_chi0'] = species_chi0
     configs['species_J0'] = species_J0 #* configs['scale_J0']
