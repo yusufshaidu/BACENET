@@ -23,7 +23,7 @@ from models.coulomb_functions import (
                                       )
 from models.ewald import ewald
 from models.polarization import (atom_centered_polarization,
-                                 atom_centered_dV)
+                                 atom_centered_dV, dV, polarization)
 from models.cg import cg_solve, cg_precond_solve
 #from models.iterative_solver import solver
 
@@ -694,6 +694,7 @@ class Compute:
                                                 atomic_number,
                                                 cell,_efield,
                                                 n_shells=self._n_shells)
+                #field_kernel_q, field_kernel_e = dV(positions, _efield, n_shells=self._n_shells)
                 '''
                 field_kernel_q, field_kernel_e = atom_centered_dV(all_rij,shell_disp,
                                                                   nuclei_charge,charges,
@@ -777,13 +778,16 @@ class Compute:
                 ecoul += 0.5 * tf.reduce_sum(E_d2 * shell_disp * shell_disp)
 
             if self.apply_field:
-                #_shell_disp = tf.reshape(shell_disp, [nat,self._n_shells,3])
+                #'''
                 Piq_a, Pie_a = atom_centered_polarization(shell_disp, positions,
                                                           nuclei_charge, charges,
                                                           self.central_atom_id,
                                                           atomic_number,
                                                           cell,
                                                           n_shells=self._n_shells)
+                #'''
+                #Piq_a, Pie_a = polarization(charges, positions, shell_disp)
+
                 '''
                 Piq_a, Pie_a = atom_centered_polarization(all_rij,_shell_disp,
                                                               nuclei_charge,charges,
@@ -805,6 +809,7 @@ class Compute:
         #differentiating a scalar w.r.t tensors
         if self.apply_field:
             #Z*_{iab} = V * dP_a/dr_{ib}
+            #tf.print(tf.reduce_max(tape0.jacobian(charges, positions)))
             Zstar = cell_volume * tf.transpose(tape0.jacobian(Pi_a, positions, 
                                                               experimental_use_pfor=False), perm=(1,0,2))
             #epsilon*_{ab} = dP_a/d_efield_b

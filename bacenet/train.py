@@ -105,6 +105,7 @@ def default_config():
         'stress_cost':0.0,
         'gaussian_acts': ['sigmoid', 'sigmoid'],
         'gaussian_prefact': 2.0,
+        'gaussian_min': 0.5,
             }
 
 def estimate_species_chi0_J0(species):

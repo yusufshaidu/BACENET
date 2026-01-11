@@ -228,6 +228,7 @@ class BACENET(tf.keras.Model):
         #self.learnable_gaussian_width = cfg['learnable_gaussian_width']
 
         self.gaussian_prefact = 1.0
+        self.gaussian_min = cfg['gaussian_min']
         if cfg['gaussian_acts'][-1] == 'sigmoid':
             self.gaussian_prefact = cfg['gaussian_prefact']
 
@@ -398,7 +399,7 @@ class BACENET(tf.keras.Model):
                                      batch_atomic_J0,
                                      tf.zeros(shape))
 
-            self._species_gaussian_width = 0.5 + self.gaussian_prefact * self.gaussian_width_net(_species_one_hot_encoder) # (nspecs, nshells)
+            self._species_gaussian_width = self.gaussian_min + self.gaussian_prefact * self.gaussian_width_net(_species_one_hot_encoder) # (nspecs, nshells)
 
             batch_gaussian_width = tf.gather(self._species_gaussian_width, species_indices)
             shape = tf.shape(batch_gaussian_width)

@@ -1,4 +1,5 @@
 import tensorflow as tf
+import sys
 
 @tf.function(jit_compile=False,
                 input_signature=[
@@ -262,26 +263,19 @@ def atom_centered_polarization(shell_displacement, positions,
 
     i_idx = (atomic_numbers == central_atom_id)
     positions_i = tf.reshape(positions[i_idx], [-1,3]) # nat_c,3
-    positions_i = tf.stop_gradient(positions_i)
+#    positions_i = tf.stop_gradient(positions_i)
     nat_c = tf.shape(positions_i)[0]
 
-    unitcell_idx = tf.range(nat)
     unique_type, unique_idx, counts = tf.unique_with_counts(atomic_numbers)
     idx_cen = (unique_type == central_atom_id)
+
     composition = tf.cast(counts / tf.reduce_min(counts),
                                 tf.float32)
     composition_cent = composition[idx_cen]
     #initialize P
     position_replicas = R_vector[None,:,:] + positions[:,None,:] # nat, 27, 3
     Rij = position_replicas[None,...] - positions_i[:,None, None,:] # nat_c,nat,27,3
-    #Rij = position_replicas[None,...] - positions_i[:,None, None,:] # nat_c,nat,27,3
     Rij_norm = tf.linalg.norm(Rij, axis=3) # nat_c, nat, 27
-
-    #positions_shell = positions[:,None,:] + shell_displacement # nat,nshells,3
-
-    #position_replicas_shell = R_vector[None,:,None,:] + positions_shell[:,None,:,:] # nat, 27, n_shells,3
-    #Rij_shell = (position_replicas_shell[None,...] -
-    #                       positions_i[:,None, None,None,:]) # nat_c,nat,27,n_shells,3
 
     #compute the minimum distance per atom for each central atom and thier replicas
     # include a buffer of less the minimum distance itself. Because, if rmin_i is the distance of atom i from the central atom,
@@ -297,26 +291,20 @@ def atom_centered_polarization(shell_displacement, positions,
     #To determin the weights, we sum over all true values
     _count_selected = tf.reduce_sum(tf.cast(mask, tf.float32), axis=-1)  # [nat_c,nat] float
     #How many centra atoms do I share
-    count_selected = tf.reduce_sum(_count_selected,
+    valid_count_selected = tf.reduce_sum(_count_selected,
                                    axis=0)[None,:] * tf.cast(_count_selected>=1,
                                                              dtype=tf.float32)
-    #print(count_selected, _count_selected)
-    valid_count_selected = count_selected
-
-    #weights_ij = tf.math.divide_no_nan(tf.ones((nat_c,nat)) , valid_count_selected)
-    weights_ij = 1.0 / (valid_count_selected + 1e-12) #(nat_c,nat)
-
-    # Sum of Rij over selected replicas -> [nat_c,nat,3]. This set all displacements with norm greater that min
-    # We rewrite P_ion = \sum_c \sum_{j in uc} (q_j + Z_j)\sum_{R} (Rij + R)
+    weights_ij = tf.math.divide_no_nan(tf.ones((nat_c,nat)) , valid_count_selected)
+    #weights_ij = 1.0 / (valid_count_selected + 1e-12) #(nat_c,nat)
+    #tf.print(valid_count_selected[0], output_stream=sys.stderr)
 
     #Rij_masked = tf.where(mask[..., None], Rij, tf.zeros((nat_c,nat, 27, 3)))
     mask_int = tf.where(mask)
-    Rij_masked = tf.gather_nd(Rij, mask_int)
     weights_ij = tf.gather_nd(weights_ij[:,:,None] * tf.cast(mask, tf.float32), mask_int)
+    weights_ij = tf.stop_gradient(weights_ij)
 
-    #Rij_shell_masked = tf.where(mask[..., None,None], Rij_shell, tf.zeros((nat_c,nat, 27, n_shells,3))) # nat_c, nat,27,3*n_shells
-    #Rij_shell_masked = tf.gather_nd(Rij_shell, mask_int)
     # scale by the weights(the number of images per atom)
+    Rij_masked = tf.gather_nd(Rij, mask_int)
     avg_Rij = Rij_masked * weights_ij[:,None]             # [nat_c,nat,3]
     #qz = tf.gather_nd(tf.tile((q_charge + z_charge)[None,:],
     q = tf.gather_nd(tf.tile(q_charge[None,:],
@@ -376,4 +364,46 @@ def atom_centered_dV(shell_displacement,positions,
     dViq = tape.gradient(energy_field, q_charge)
     dVie = tape.gradient(energy_field, shell_displacement)
     return dViq, tf.reshape(dVie, [-1,n_shells*3])
+########### Not used
+@tf.function(jit_compile=False,
+            input_signature=[
+            tf.TensorSpec(shape=(None,), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,None,3), dtype=tf.float32),
+            ]
+             )
+def polarization(charges, 
+                 positions, 
+                 shell_disp):
+    '''
+    P = sum_i q_i R_i -2*sum_{in} p_in (=Zidi). 
+    Zi = 2 for each shell
+    '''
+    N = tf.shape(positions)[0]
+    Rij = positions[None,:,:] - positions[:,None,:]
+
+    Piq = tf.reduce_sum(charges[None,:,None] * Rij, axis=(0,1)) / tf.cast(N, tf.float32)
+
+    Pie = -2.0 * tf.reduce_sum(shell_disp, axis=0) #nshells, 3
+    return Piq, Pie
+
+@tf.function(jit_compile=False,
+            input_signature=[
+            tf.TensorSpec(shape=(None,3), dtype=tf.float32),
+            tf.TensorSpec(shape=(3), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.int32),
+            ]
+             )
+def dV(positions, efield, n_shells=1):
+    '''
+    dE_field/dq = -sum_a(R_ia . e_field_a) 
+    dE_field/dd_in = e_field * ones(N,shell,3). 
+    Zi = 2 for each shell
+    '''
+    N = tf.shape(positions)[0]
+    Rij = positions[None,:,:] - positions[:,None,:]
+
+    dVdq = -tf.reduce_sum(Rij * efield[None,None,:], axis=(0,2)) / tf.cast(N, tf.float32)
+    dVdp = 2.0 * tf.ones((N,n_shells,3)) * efield[None,None,:] #N, nshells, 3
+    return dVdq, tf.reshape(dVdp, [N,n_shells*3])
 

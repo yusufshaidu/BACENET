@@ -134,8 +134,10 @@ class bacenet_Calculator(Calculator):
         self.configs = configs
 
     #@tf.function
-    #def infer(self, data):
-    #    return self.model_call(data)
+    def infer(self, data):
+        return self.model_call.predict(data, 
+                                       batch_size=1, 
+                                       verbose=0)[-1]
 
     def calculate(self, atoms=None, 
                   properties=['energy'], 
@@ -175,9 +177,9 @@ class bacenet_Calculator(Calculator):
                                         self.j_list, self.shifts
                                         )
         
-        _outs = self.model_call.predict(data, batch_size=1, verbose=0)
-        #outs = self.infer(data)
-        outs = _outs[-1]
+        #_outs = self.model_call.predict(data, batch_size=1, verbose=0)
+        outs = self.infer(data)
+        #outs = _outs[-1]
         e0 = np.sum([self.atomic_energy_dic[s] 
                      for s in atoms.get_chemical_symbols()])
 
